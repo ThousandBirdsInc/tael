@@ -1,0 +1,17 @@
+[package]
+name = "tael-test"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tael-test"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
+rand.workspace = true
+tokio.workspace = true
+tonic.workspace = true

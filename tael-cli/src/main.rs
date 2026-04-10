@@ -1,0 +1,207 @@
+mod client;
+mod commands;
+mod output;
+mod tui;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Parser)]
+#[command(name = "tael", about = "AI-agent-native observability CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    /// Output format
+    #[arg(long, global = true, default_value = "json")]
+    format: OutputFormat,
+
+    /// Server address
+    #[arg(long, global = true, default_value = "http://127.0.0.1:7701")]
+    server: String,
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Table,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Query telemetry data
+    Query {
+        #[command(subcommand)]
+        signal: QuerySignal,
+    },
+    /// Get a specific resource by ID
+    Get {
+        #[command(subcommand)]
+        resource: GetResource,
+    },
+    /// Add or view comments on traces
+    Comment {
+        #[command(subcommand)]
+        action: CommentAction,
+    },
+    /// List known services and their health
+    Services,
+    /// Interactive TUI trace feed
+    Live {
+        /// Filter by service name
+        #[arg(long)]
+        service: Option<String>,
+        /// Filter by status (ok, error, unset)
+        #[arg(long)]
+        status: Option<String>,
+        /// Poll interval in seconds
+        #[arg(long, default_value = "2")]
+        interval: u64,
+    },
+    /// Server management
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuerySignal {
+    /// Search and filter traces
+    Traces {
+        /// Filter by service name
+        #[arg(long)]
+        service: Option<String>,
+        /// Filter by operation name (substring match)
+        #[arg(long)]
+        operation: Option<String>,
+        /// Minimum span duration (e.g. 100ms, 1s, 500)
+        #[arg(long)]
+        min_duration: Option<String>,
+        /// Maximum span duration
+        #[arg(long)]
+        max_duration: Option<String>,
+        /// Filter by status (ok, error, unset)
+        #[arg(long)]
+        status: Option<String>,
+        /// Time window (e.g. 1h, 30m, 7d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max results to return
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum GetResource {
+    /// Get a full trace by trace ID
+    Trace {
+        /// The trace ID to look up
+        trace_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommentAction {
+    /// Add a comment to a trace
+    Add {
+        /// The trace ID to comment on
+        trace_id: String,
+        /// Comment text
+        body: String,
+        /// Author name
+        #[arg(long, default_value = "cli")]
+        author: String,
+        /// Optional span ID to attach comment to
+        #[arg(long)]
+        span_id: Option<String>,
+    },
+    /// List comments on a trace
+    List {
+        /// The trace ID to list comments for
+        trace_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerAction {
+    /// Show server status
+    Status,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let client = client::TaelClient::new(&cli.server);
+
+    match cli.command {
+        Commands::Query { signal } => match signal {
+            QuerySignal::Traces {
+                service,
+                operation,
+                min_duration,
+                max_duration,
+                status,
+                last,
+                limit,
+            } => {
+                commands::query::traces(
+                    &client,
+                    &cli.format,
+                    service,
+                    operation,
+                    min_duration,
+                    max_duration,
+                    status,
+                    last,
+                    limit,
+                )
+                .await?;
+            }
+        },
+        Commands::Get { resource } => match resource {
+            GetResource::Trace { trace_id } => {
+                commands::get::trace(&client, &cli.format, &trace_id).await?;
+            }
+        },
+        Commands::Comment { action } => match action {
+            CommentAction::Add {
+                trace_id,
+                body,
+                author,
+                span_id,
+            } => {
+                commands::comment::add(
+                    &client,
+                    &cli.format,
+                    &trace_id,
+                    &body,
+                    Some(&author),
+                    span_id.as_deref(),
+                )
+                .await?;
+            }
+            CommentAction::List { trace_id } => {
+                commands::comment::list(&client, &cli.format, &trace_id).await?;
+            }
+        },
+        Commands::Services => {
+            commands::services::list(&client, &cli.format).await?;
+        }
+        Commands::Live {
+            service,
+            status,
+            interval,
+        } => {
+            tui::run(&cli.server, service, status, interval).await?;
+        }
+        Commands::Server { action } => match action {
+            ServerAction::Status => {
+                commands::server::status(&client, &cli.format).await?;
+            }
+        },
+    }
+
+    Ok(())
+}

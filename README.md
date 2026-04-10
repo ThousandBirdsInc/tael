@@ -16,7 +16,7 @@
 
 No dashboards. No browsers. Just a single binary and structured data.
 
-[![asciicast](https://asciinema.org/a/placeholder.svg)](https://asciinema.org/a/placeholder)
+[![asciicast](https://asciinema.org/a/svewi9ncgeH52UFP.svg)](https://asciinema.org/a/svewi9ncgeH52UFP)
 
 ## Quickstart
 
