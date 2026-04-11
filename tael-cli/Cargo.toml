@@ -2,6 +2,11 @@
 name = "tael-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "AI-agent-native observability CLI — query, visualize, and annotate OpenTelemetry traces"
 
 [[bin]]
 name = "tael"

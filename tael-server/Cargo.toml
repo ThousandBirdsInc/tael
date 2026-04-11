@@ -2,6 +2,11 @@
 name = "tael-server"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "AI-agent-native observability server — OTLP trace ingestion with DuckDB storage"
 
 [[bin]]
 name = "tael-server"
@@ -22,4 +27,6 @@ tonic.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio-stream.workspace = true
 uuid.workspace = true
+walrus-rust.workspace = true

@@ -2,6 +2,7 @@
 name = "tael-test"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [[bin]]
 name = "tael-test"

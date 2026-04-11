@@ -8,16 +8,18 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 };
 use tonic::{Request, Response, Status};
 
+use crate::span_bus::SpanBus;
 use crate::storage::DuckDbStore;
 use crate::storage::models::{Span, SpanEvent, SpanStatus};
 
 pub struct OtlpTraceService {
     store: Arc<DuckDbStore>,
+    bus: Arc<SpanBus>,
 }
 
 impl OtlpTraceService {
-    pub fn new(store: Arc<DuckDbStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<DuckDbStore>, bus: Arc<SpanBus>) -> Self {
+        Self { store, bus }
     }
 }
 
@@ -141,6 +143,10 @@ impl TraceService for OtlpTraceService {
         if let Err(e) = self.store.insert_spans(&spans) {
             tracing::error!(error = %e, "failed to insert spans");
             return Err(Status::internal(format!("storage error: {e}")));
+        }
+
+        if let Err(e) = self.bus.publish(&spans) {
+            tracing::warn!(error = %e, "failed to publish spans to bus");
         }
 
         tracing::debug!(span_count, "ingested spans");

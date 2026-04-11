@@ -6,6 +6,9 @@ members = ["tael-server", "tael-cli", "tael-test"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/thousandbirdsinc/tael"
+keywords = ["observability", "opentelemetry", "tracing", "cli", "ai-agents"]
+categories = ["command-line-utilities", "development-tools::profiling"]
 
 [workspace.dependencies]
 anyhow = "1"
@@ -29,3 +32,5 @@ comfy-table = "7"
 crossterm = "0.29"
 rand = "0.8"
 ratatui = "0.29"
+tokio-stream = { version = "0.1", features = ["sync"] }
+walrus-rust = "0.2"

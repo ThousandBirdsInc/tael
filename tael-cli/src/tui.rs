@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
@@ -11,9 +12,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::client::TaelClient;
 
@@ -24,11 +26,13 @@ struct Comment {
     span_id: Option<String>,
 }
 
+const MAX_LIVE_SPANS: usize = 200;
+
 struct App {
     client: TaelClient,
     service_filter: Option<String>,
     status_filter: Option<String>,
-    poll_interval: Duration,
+    services_interval: Duration,
     spans: Vec<SpanRow>,
     services: Vec<ServiceRow>,
     table_state: TableState,
@@ -36,7 +40,15 @@ struct App {
     should_quit: bool,
     last_error: Option<String>,
     paused: bool,
-    // Trace waterfall state
+    // SSE live stream
+    sse_rx: mpsc::UnboundedReceiver<String>,
+    // Live timeline (trace-level waterfall)
+    live_trace_map: HashMap<String, LiveTraceRow>,
+    live_traces_sorted: Vec<LiveTraceRow>,
+    timeline_state: TableState,
+    timeline_window_secs: f64,
+    prev_tab: Tab,
+    // Trace detail waterfall state
     trace_spans: Vec<SpanRow>,
     waterfall_rows: Vec<WaterfallRow>,
     waterfall_state: TableState,
@@ -45,13 +57,39 @@ struct App {
     comments: Vec<Comment>,
     comment_input: Option<String>,
     current_trace_id: Option<String>,
+    // Interactive filter
+    filter_input: Option<String>,
+    filter_text: String,
+    // Pinned attribute columns
+    pinned_columns: Vec<String>,
+    attr_picker: Option<AttrPicker>,
+}
+
+struct AttrPicker {
+    keys: Vec<String>,
+    state: TableState,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Traces,
     Services,
+    Timeline,
     Detail,
+}
+
+const MAX_LIVE_TRACES: usize = 500;
+
+#[derive(Clone)]
+struct LiveTraceRow {
+    trace_id: String,
+    service: String,
+    operation: String,
+    start_time_ms: f64,
+    end_time_ms: f64,
+    duration_ms: f64,
+    span_count: usize,
+    has_error: bool,
 }
 
 #[derive(Clone)]
@@ -111,11 +149,13 @@ impl App {
         status: Option<String>,
         interval: u64,
     ) -> Self {
+        let client = TaelClient::new(server);
+        let sse_rx = client.subscribe_live(service.clone(), status.clone());
         Self {
-            client: TaelClient::new(server),
+            client,
             service_filter: service,
             status_filter: status,
-            poll_interval: Duration::from_secs(interval),
+            services_interval: Duration::from_secs(interval.max(5)),
             spans: Vec::new(),
             services: Vec::new(),
             table_state: TableState::default(),
@@ -123,6 +163,12 @@ impl App {
             should_quit: false,
             last_error: None,
             paused: false,
+            sse_rx,
+            live_trace_map: HashMap::new(),
+            live_traces_sorted: Vec::new(),
+            timeline_state: TableState::default(),
+            timeline_window_secs: 60.0,
+            prev_tab: Tab::Traces,
             trace_spans: Vec::new(),
             waterfall_rows: Vec::new(),
             waterfall_state: TableState::default(),
@@ -130,14 +176,185 @@ impl App {
             comments: Vec::new(),
             comment_input: None,
             current_trace_id: None,
+            filter_input: None,
+            filter_text: String::new(),
+            pinned_columns: Vec::new(),
+            attr_picker: None,
         }
     }
 
-    async fn poll_data(&mut self) {
+    fn open_attr_picker(&mut self) {
+        let span = self
+            .table_state
+            .selected()
+            .and_then(|i| self.filtered_spans().into_iter().nth(i));
+        let span = match span {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        // Collect all attribute keys across all spans for a complete list,
+        // but start with the selected span's keys on top
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+
+        // Selected span's attrs first
+        if let Some(obj) = span.attributes.as_object() {
+            for k in obj.keys() {
+                if seen.insert(k.clone()) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+
+        // Then all other spans
+        for s in &self.spans {
+            if let Some(obj) = s.attributes.as_object() {
+                for k in obj.keys() {
+                    if seen.insert(k.clone()) {
+                        keys.push(k.clone());
+                    }
+                }
+            }
+        }
+
+        let mut state = TableState::default();
+        if !keys.is_empty() {
+            state.select(Some(0));
+        }
+        self.attr_picker = Some(AttrPicker { keys, state });
+    }
+
+    fn filtered_spans(&self) -> Vec<&SpanRow> {
+        if self.filter_text.is_empty() {
+            return self.spans.iter().collect();
+        }
+        let q = self.filter_text.to_lowercase();
+        self.spans
+            .iter()
+            .filter(|s| {
+                s.service.to_lowercase().contains(&q)
+                    || s.operation.to_lowercase().contains(&q)
+                    || s.trace_id.to_lowercase().contains(&q)
+                    || s.status.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    fn filtered_live_traces(&self) -> Vec<(usize, &LiveTraceRow)> {
+        if self.filter_text.is_empty() {
+            return self.live_traces_sorted.iter().enumerate().collect();
+        }
+        let q = self.filter_text.to_lowercase();
+        self.live_traces_sorted
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.service.to_lowercase().contains(&q)
+                    || t.operation.to_lowercase().contains(&q)
+                    || t.trace_id.to_lowercase().contains(&q)
+                    || (t.has_error && "error".contains(&q))
+                    || (!t.has_error && "ok".contains(&q))
+            })
+            .collect()
+    }
+
+    fn ingest_sse(&mut self, json: &str) {
         if self.paused {
             return;
         }
 
+        let val: Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // SSE data is a JSON array of spans
+        let new_spans = if val.is_array() {
+            parse_spans(&serde_json::json!({ "spans": val }))
+        } else {
+            parse_spans(&val)
+        };
+
+        if new_spans.is_empty() {
+            return;
+        }
+
+        // Update live trace map
+        self.update_live_traces(&new_spans);
+
+        // Prepend new spans (newest first)
+        let mut merged = new_spans;
+        merged.append(&mut self.spans);
+        merged.truncate(MAX_LIVE_SPANS);
+        self.spans = merged;
+        self.last_error = None;
+    }
+
+    fn update_live_traces(&mut self, spans: &[SpanRow]) {
+        for span in spans {
+            let end_ms = span.start_time_ms + span.duration_ms;
+            let entry = self
+                .live_trace_map
+                .entry(span.trace_id.clone())
+                .or_insert_with(|| LiveTraceRow {
+                    trace_id: span.trace_id.clone(),
+                    service: span.service.clone(),
+                    operation: span.operation.clone(),
+                    start_time_ms: span.start_time_ms,
+                    end_time_ms: end_ms,
+                    duration_ms: span.duration_ms,
+                    span_count: 0,
+                    has_error: false,
+                });
+
+            entry.span_count += 1;
+            if span.start_time_ms < entry.start_time_ms {
+                entry.start_time_ms = span.start_time_ms;
+            }
+            if end_ms > entry.end_time_ms {
+                entry.end_time_ms = end_ms;
+            }
+            entry.duration_ms = entry.end_time_ms - entry.start_time_ms;
+            if span.status == "error" {
+                entry.has_error = true;
+            }
+            // Prefer root span's service/operation
+            if span.parent_span_id.is_none() {
+                entry.service = span.service.clone();
+                entry.operation = span.operation.clone();
+            }
+        }
+
+        self.rebuild_live_traces();
+    }
+
+    fn rebuild_live_traces(&mut self) {
+        let mut traces: Vec<LiveTraceRow> = self.live_trace_map.values().cloned().collect();
+        traces.sort_by(|a, b| {
+            a.start_time_ms
+                .partial_cmp(&b.start_time_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Evict oldest traces if over limit
+        if traces.len() > MAX_LIVE_TRACES {
+            let to_remove: Vec<String> = traces[..traces.len() - MAX_LIVE_TRACES]
+                .iter()
+                .map(|t| t.trace_id.clone())
+                .collect();
+            for id in &to_remove {
+                self.live_trace_map.remove(id);
+            }
+            traces = traces[traces.len() - MAX_LIVE_TRACES..].to_vec();
+        }
+
+        self.live_traces_sorted = traces;
+    }
+
+
+
+    async fn poll_initial(&mut self) {
         match self
             .client
             .query_traces(
@@ -152,14 +369,18 @@ impl App {
             .await
         {
             Ok(val) => {
-                self.last_error = None;
                 self.spans = parse_spans(&val);
+                self.update_live_traces(&self.spans.clone());
             }
             Err(e) => {
-                self.last_error = Some(format!("traces: {e}"));
+                self.last_error = Some(format!("initial load: {e}"));
             }
         }
 
+        self.poll_services().await;
+    }
+
+    async fn poll_services(&mut self) {
         match self.client.list_services().await {
             Ok(val) => {
                 self.services = parse_services(&val);
@@ -226,10 +447,6 @@ impl App {
         }
     }
 
-    fn selected_span(&self) -> Option<&SpanRow> {
-        self.table_state.selected().and_then(|i| self.spans.get(i))
-    }
-
     fn selected_waterfall_span(&self) -> Option<&SpanRow> {
         self.waterfall_state
             .selected()
@@ -239,6 +456,71 @@ impl App {
 
     /// Returns action: None = normal, Some("load_trace") = load trace, Some("submit_comment") = submit
     fn handle_key(&mut self, code: KeyCode) -> Option<&'static str> {
+        // Attribute picker mode
+        if let Some(ref mut picker) = self.attr_picker {
+            match code {
+                KeyCode::Esc | KeyCode::Char('a') => {
+                    self.attr_picker = None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = picker.keys.len();
+                    if len > 0 {
+                        let i = picker.state.selected().map(|i| i + 1).unwrap_or(0);
+                        picker.state.select(Some(i.min(len - 1)));
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let i = picker
+                        .state
+                        .selected()
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(0);
+                    picker.state.select(Some(i));
+                }
+                KeyCode::Enter => {
+                    if let Some(idx) = picker.state.selected() {
+                        if let Some(key) = picker.keys.get(idx).cloned() {
+                            if let Some(pos) = self.pinned_columns.iter().position(|k| *k == key) {
+                                self.pinned_columns.remove(pos);
+                            } else {
+                                self.pinned_columns.push(key);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        // Filter input mode
+        if self.filter_input.is_some() {
+            match code {
+                KeyCode::Enter => {
+                    if let Some(input) = self.filter_input.take() {
+                        self.filter_text = input;
+                        self.table_state.select(None);
+                        self.timeline_state.select(None);
+                    }
+                }
+                KeyCode::Esc => {
+                    self.filter_input = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(ref mut input) = self.filter_input {
+                        input.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut input) = self.filter_input {
+                        input.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         // Comment input mode
         if self.comment_input.is_some() {
             match code {
@@ -269,7 +551,7 @@ impl App {
             }
             KeyCode::Esc => {
                 if self.tab == Tab::Detail {
-                    self.tab = Tab::Traces;
+                    self.tab = self.prev_tab;
                 } else {
                     self.should_quit = true;
                 }
@@ -282,10 +564,40 @@ impl App {
                 self.tab = Tab::Services;
                 self.table_state.select(None);
             }
+            KeyCode::Char('3') => {
+                self.tab = Tab::Timeline;
+                self.timeline_state.select(None);
+            }
             KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char('/') => {
+                if self.tab == Tab::Traces || self.tab == Tab::Timeline {
+                    self.filter_input = Some(self.filter_text.clone());
+                }
+            }
+            KeyCode::Char('\\') => {
+                // Clear filter
+                self.filter_text.clear();
+                self.table_state.select(None);
+                self.timeline_state.select(None);
+            }
+            KeyCode::Char('a') => {
+                if self.tab == Tab::Traces && self.table_state.selected().is_some() {
+                    self.open_attr_picker();
+                }
+            }
             KeyCode::Char('c') => {
                 if self.tab == Tab::Detail {
                     self.comment_input = Some(String::new());
+                }
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if self.tab == Tab::Timeline {
+                    self.timeline_window_secs = (self.timeline_window_secs / 2.0).max(5.0);
+                }
+            }
+            KeyCode::Char('-') => {
+                if self.tab == Tab::Timeline {
+                    self.timeline_window_secs = (self.timeline_window_secs * 2.0).min(3600.0);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -295,9 +607,18 @@ impl App {
                         let i = self.waterfall_state.selected().map(|i| i + 1).unwrap_or(0);
                         self.waterfall_state.select(Some(i.min(len - 1)));
                     }
-                } else if self.tab == Tab::Traces && !self.spans.is_empty() {
-                    let i = self.table_state.selected().map(|i| i + 1).unwrap_or(0);
-                    self.table_state.select(Some(i.min(self.spans.len() - 1)));
+                } else if self.tab == Tab::Timeline {
+                    let len = self.filtered_live_traces().len();
+                    if len > 0 {
+                        let i = self.timeline_state.selected().map(|i| i + 1).unwrap_or(0);
+                        self.timeline_state.select(Some(i.min(len - 1)));
+                    }
+                } else if self.tab == Tab::Traces {
+                    let len = self.filtered_spans().len();
+                    if len > 0 {
+                        let i = self.table_state.selected().map(|i| i + 1).unwrap_or(0);
+                        self.table_state.select(Some(i.min(len - 1)));
+                    }
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -308,6 +629,13 @@ impl App {
                         .map(|i| i.saturating_sub(1))
                         .unwrap_or(0);
                     self.waterfall_state.select(Some(i));
+                } else if self.tab == Tab::Timeline {
+                    let i = self
+                        .timeline_state
+                        .selected()
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(0);
+                    self.timeline_state.select(Some(i));
                 } else if self.tab == Tab::Traces {
                     let i = self
                         .table_state
@@ -321,10 +649,13 @@ impl App {
                 if self.tab == Tab::Traces && self.table_state.selected().is_some() {
                     return Some("load_trace");
                 }
+                if self.tab == Tab::Timeline && self.timeline_state.selected().is_some() {
+                    return Some("load_trace");
+                }
             }
             KeyCode::Backspace => {
                 if self.tab == Tab::Detail {
-                    self.tab = Tab::Traces;
+                    self.tab = self.prev_tab;
                 }
             }
             _ => {}
@@ -438,7 +769,7 @@ fn build_waterfall(spans: &[SpanRow]) -> Vec<WaterfallRow> {
             for &idx in child_indices.iter().rev() {
                 let span = &spans[idx];
                 let offset_pct = ((span.start_time_ms - trace_start) / trace_duration).clamp(0.0, 1.0);
-                let width_pct = (span.duration_ms / trace_duration).clamp(0.005, 1.0 - offset_pct);
+                let width_pct = (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
 
                 rows.push(WaterfallRow {
                     span_idx: idx,
@@ -456,7 +787,7 @@ fn build_waterfall(spans: &[SpanRow]) -> Vec<WaterfallRow> {
     for (i, span) in spans.iter().enumerate() {
         if !visited.contains(&i) {
             let offset_pct = ((span.start_time_ms - trace_start) / trace_duration).clamp(0.0, 1.0);
-            let width_pct = (span.duration_ms / trace_duration).clamp(0.005, 1.0 - offset_pct);
+            let width_pct = (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
             rows.push(WaterfallRow {
                 span_idx: i,
                 depth: 0,
@@ -519,8 +850,38 @@ fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, chunks[0], app);
 
     match app.tab {
-        Tab::Traces => draw_traces(frame, chunks[1], app),
+        Tab::Traces => {
+            let has_selection = app.table_state.selected().is_some();
+            if has_selection {
+                let splits = Layout::vertical([
+                    Constraint::Min(8),
+                    Constraint::Length(10),
+                ])
+                .split(chunks[1]);
+                draw_traces(frame, splits[0], app);
+                draw_selected_span_properties(frame, splits[1], app);
+            } else {
+                draw_traces(frame, chunks[1], app);
+            }
+            if app.attr_picker.is_some() {
+                draw_attr_picker(frame, chunks[1], app);
+            }
+        }
         Tab::Services => draw_services(frame, chunks[1], app),
+        Tab::Timeline => {
+            let has_selection = app.timeline_state.selected().is_some();
+            if has_selection {
+                let splits = Layout::vertical([
+                    Constraint::Min(8),
+                    Constraint::Length(10),
+                ])
+                .split(chunks[1]);
+                draw_timeline(frame, splits[0], app);
+                draw_selected_timeline_properties(frame, splits[1], app);
+            } else {
+                draw_timeline(frame, chunks[1], app);
+            }
+        }
         Tab::Detail => draw_trace_detail(frame, chunks[1], app),
     }
 
@@ -539,6 +900,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(" 2:Services ", Style::default().fg(Color::Black).bg(Color::Cyan))
         } else {
             Span::styled(" 2:Services ", Style::default().fg(Color::DarkGray))
+        },
+        Span::raw("  "),
+        if app.tab == Tab::Timeline {
+            Span::styled(" 3:Timeline ", Style::default().fg(Color::Black).bg(Color::Cyan))
+        } else {
+            Span::styled(" 3:Timeline ", Style::default().fg(Color::DarkGray))
         },
         Span::raw("  "),
         if app.tab == Tab::Detail {
@@ -562,6 +929,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Yellow),
         ));
     }
+    if !app.filter_text.is_empty() {
+        title_parts.push(Span::styled(
+            format!(" filter={}", app.filter_text),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if let Some(ref input) = app.filter_input {
+        title_parts.push(Span::styled(" /", Style::default().fg(Color::Green).bold()));
+        title_parts.push(Span::styled(input.clone(), Style::default().fg(Color::White)));
+        title_parts.push(Span::styled("█", Style::default().fg(Color::Green)));
+    }
     if app.paused {
         title_parts.push(Span::styled(" PAUSED", Style::default().fg(Color::Red).bold()));
     }
@@ -572,18 +950,37 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(header, area);
 }
 
+fn span_attr_value(span: &SpanRow, key: &str) -> String {
+    span.attributes
+        .as_object()
+        .and_then(|obj| obj.get(key))
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default()
+}
+
 fn draw_traces(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         Cell::from("Time").style(Style::default().bold()),
         Cell::from("Service").style(Style::default().bold()),
         Cell::from("Operation").style(Style::default().bold()),
         Cell::from("Duration").style(Style::default().bold()),
         Cell::from("Status").style(Style::default().bold()),
         Cell::from("Trace ID").style(Style::default().bold()),
-    ]);
+    ];
+    for col in &app.pinned_columns {
+        header_cells.push(Cell::from(col.clone()).style(Style::default().bold().fg(Color::Yellow)));
+    }
+    let header = Row::new(header_cells);
 
-    let rows: Vec<Row> = app
-        .spans
+    let filtered = app.filtered_spans();
+    let filtered_len = filtered.len();
+    let pinned = app.pinned_columns.clone();
+
+    let rows: Vec<Row> = filtered
         .iter()
         .map(|s| {
             let time = s
@@ -599,7 +996,7 @@ fn draw_traces(frame: &mut Frame, area: Rect, app: &mut App) {
                 &s.trace_id
             };
 
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(short_time.to_string()).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(s.service.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(s.operation.clone()),
@@ -608,30 +1005,260 @@ fn draw_traces(frame: &mut Frame, area: Rect, app: &mut App) {
                 Cell::from(s.status.clone())
                     .style(Style::default().fg(status_color(&s.status))),
                 Cell::from(short_trace.to_string()).style(Style::default().fg(Color::DarkGray)),
+            ];
+            for col in &pinned {
+                let val = span_attr_value(s, col);
+                let style = if val.is_empty() {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                cells.push(Cell::from(if val.is_empty() { "-".to_string() } else { val }).style(style));
+            }
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut widths: Vec<Constraint> = vec![
+        Constraint::Length(13),
+        Constraint::Length(20),
+        Constraint::Min(20),
+        Constraint::Length(10),
+        Constraint::Length(7),
+        Constraint::Length(17),
+    ];
+    for _ in &app.pinned_columns {
+        widths.push(Constraint::Length(18));
+    }
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .title(if app.filter_text.is_empty() {
+                    format!(" Traces ({}) ", app.spans.len())
+                } else {
+                    format!(" Traces ({}/{}) ", filtered_len, app.spans.len())
+                })
+                .borders(Borders::ALL),
+        )
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn draw_attr_picker(frame: &mut Frame, area: Rect, app: &mut App) {
+    let picker = match app.attr_picker.as_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Center a popup over the area
+    let popup_width = 40u16.min(area.width.saturating_sub(4));
+    let popup_height = (picker.keys.len() as u16 + 3).min(area.height.saturating_sub(2)).max(5);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    if picker.keys.is_empty() {
+        let msg = Paragraph::new(" No attributes found.")
+            .block(
+                Block::default()
+                    .title(" Pin Column (a/esc:close) ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            );
+        frame.render_widget(msg, popup_area);
+        return;
+    }
+
+    let pinned = &app.pinned_columns;
+    let rows: Vec<Row> = picker
+        .keys
+        .iter()
+        .map(|k| {
+            let is_pinned = pinned.contains(k);
+            let marker = if is_pinned { "[x]" } else { "[ ]" };
+            let style = if is_pinned {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(marker).style(style),
+                Cell::from(k.clone()).style(style),
             ])
         })
         .collect();
 
     let table = Table::new(
         rows,
-        [
-            Constraint::Length(13),
-            Constraint::Length(20),
-            Constraint::Min(20),
-            Constraint::Length(10),
-            Constraint::Length(7),
-            Constraint::Length(17),
-        ],
+        [Constraint::Length(4), Constraint::Min(10)],
     )
-    .header(header)
     .block(
         Block::default()
-            .title(format!(" Traces ({}) ", app.spans.len()))
-            .borders(Borders::ALL),
+            .title(" Pin Column (enter:toggle, a/esc:close) ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    frame.render_stateful_widget(table, popup_area, &mut picker.state);
+}
+
+fn draw_selected_span_properties(frame: &mut Frame, area: Rect, app: &App) {
+    let span = match app
+        .table_state
+        .selected()
+        .and_then(|i| app.filtered_spans().into_iter().nth(i))
+    {
+        Some(s) => s,
+        None => {
+            let msg = Paragraph::new(" No span selected.")
+                .block(Block::default().title(" Properties ").borders(Borders::ALL));
+            frame.render_widget(msg, area);
+            return;
+        }
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" trace_id: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&span.trace_id),
+            Span::raw("    "),
+            Span::styled("span_id: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&span.span_id),
+            Span::raw("    "),
+            Span::styled("parent: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(span.parent_span_id.as_deref().unwrap_or("none")),
+        ]),
+        Line::from(vec![
+            Span::styled(" service: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&span.service, Style::default().fg(service_color(&span.service))),
+            Span::raw("    "),
+            Span::styled("operation: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&span.operation),
+            Span::raw("    "),
+            Span::styled("status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&span.status, Style::default().fg(status_color(&span.status))),
+            Span::raw("    "),
+            Span::styled("duration: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.2}ms", span.duration_ms),
+                Style::default().fg(duration_color(span.duration_ms)),
+            ),
+            Span::raw("    "),
+            Span::styled("start: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&span.start_time),
+        ]),
+    ];
+
+    if let Some(obj) = span.attributes.as_object() {
+        if !obj.is_empty() {
+            let mut attr_spans: Vec<Span> =
+                vec![Span::styled(" attrs: ", Style::default().fg(Color::DarkGray))];
+            for (i, (k, v)) in obj.iter().enumerate() {
+                if i > 0 {
+                    attr_spans.push(Span::raw("  "));
+                }
+                let val = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                attr_spans.push(Span::styled(
+                    format!("{k}="),
+                    Style::default().fg(Color::Yellow),
+                ));
+                attr_spans.push(Span::raw(val));
+            }
+            lines.push(Line::from(attr_spans));
+        }
+    }
+
+    if let Some(events) = span.events.as_array() {
+        for evt in events {
+            let name = evt["name"].as_str().unwrap_or("-");
+            let mut evt_spans: Vec<Span> = vec![Span::styled(
+                format!(" event({name}): "),
+                Style::default().fg(Color::Magenta),
+            )];
+            if let Some(attrs) = evt["attributes"].as_object() {
+                for (i, (k, v)) in attrs.iter().enumerate() {
+                    if i > 0 {
+                        evt_spans.push(Span::raw("  "));
+                    }
+                    let val = match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    evt_spans.push(Span::styled(
+                        format!("{k}="),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                    evt_spans.push(Span::raw(val));
+                }
+            }
+            lines.push(Line::from(evt_spans));
+        }
+    }
+
+    let block = Block::default().title(" Properties ").borders(Borders::ALL);
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_selected_timeline_properties(frame: &mut Frame, area: Rect, app: &App) {
+    let trace = match app
+        .timeline_state
+        .selected()
+        .and_then(|i| app.filtered_live_traces().into_iter().nth(i))
+        .map(|(_, t)| t)
+    {
+        Some(t) => t,
+        None => {
+            let msg = Paragraph::new(" No trace selected.")
+                .block(Block::default().title(" Properties ").borders(Borders::ALL));
+            frame.render_widget(msg, area);
+            return;
+        }
+    };
+
+    let status_str = if trace.has_error { "error" } else { "ok" };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" trace_id: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&trace.trace_id),
+        ]),
+        Line::from(vec![
+            Span::styled(" service: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &trace.service,
+                Style::default().fg(service_color(&trace.service)),
+            ),
+            Span::raw("    "),
+            Span::styled("operation: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&trace.operation),
+            Span::raw("    "),
+            Span::styled("status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(status_str, Style::default().fg(status_color(status_str))),
+        ]),
+        Line::from(vec![
+            Span::styled(" duration: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.2}ms", trace.duration_ms),
+                Style::default().fg(duration_color(trace.duration_ms)),
+            ),
+            Span::raw("    "),
+            Span::styled("spans: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(trace.span_count.to_string()),
+        ]),
+    ];
+
+    let block = Block::default().title(" Properties ").borders(Borders::ALL);
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_services(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -685,6 +1312,157 @@ fn draw_services(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     frame.render_widget(table, area);
+}
+
+fn draw_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
+    if app.live_traces_sorted.is_empty() {
+        let msg = Paragraph::new(" Waiting for traces...")
+            .block(Block::default().title(" Live Timeline ").borders(Borders::ALL));
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+
+    let label_width: u16 = 30;
+    let duration_width: u16 = 10;
+    let spans_width: u16 = 6;
+    let bar_width = inner
+        .width
+        .saturating_sub(label_width + duration_width + spans_width + 4);
+
+    // Determine time window
+    let window_ms = app.timeline_window_secs * 1000.0;
+    let window_end = app
+        .live_traces_sorted
+        .iter()
+        .map(|t| t.end_time_ms)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let window_start = window_end - window_ms;
+
+    let title = format!(
+        " Live Timeline ({}) | window: {:.0}s | +/- zoom ",
+        app.live_traces_sorted.len(),
+        app.timeline_window_secs
+    );
+    let block = block.title(title);
+
+    // Time axis header
+    let header_row = {
+        let axis_width = bar_width as usize;
+        let left_label = format!("-{:.0}s", app.timeline_window_secs);
+        let mid_label = format!("-{:.0}s", app.timeline_window_secs / 2.0);
+        let right_label = "now";
+
+        let mut axis = " ".repeat(axis_width);
+        if axis_width > left_label.len() {
+            axis.replace_range(0..left_label.len(), &left_label);
+        }
+        let mid_pos = axis_width / 2;
+        if mid_pos + mid_label.len() < axis_width {
+            axis.replace_range(mid_pos..mid_pos + mid_label.len(), &mid_label);
+        }
+        if axis_width >= right_label.len() {
+            let end_pos = axis_width - right_label.len();
+            axis.replace_range(end_pos..axis_width, right_label);
+        }
+
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from(axis).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(""),
+            Cell::from(""),
+        ])
+    };
+
+    // Apply text filter then time window
+    let text_filtered = app.filtered_live_traces();
+    let visible: Vec<(usize, &LiveTraceRow)> = text_filtered
+        .into_iter()
+        .filter(|(_, t)| t.end_time_ms >= window_start && t.start_time_ms <= window_end)
+        .collect();
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .map(|(_, trace)| {
+            let svc_short = if trace.service.len() > 14 {
+                &trace.service[..14]
+            } else {
+                &trace.service
+            };
+            let max_op = 14usize;
+            let op_short = if trace.operation.len() > max_op {
+                &trace.operation[..max_op]
+            } else {
+                &trace.operation
+            };
+            let label = format!("{svc_short} {op_short}");
+            let label = if label.len() > label_width as usize {
+                format!("{}…", &label[..label_width as usize - 1])
+            } else {
+                format!("{:<width$}", label, width = label_width as usize)
+            };
+
+            let offset_pct =
+                ((trace.start_time_ms - window_start) / window_ms).clamp(0.0, 1.0);
+            let width_pct =
+                (trace.duration_ms / window_ms).clamp(0.005, (1.0 - offset_pct).max(0.005));
+
+            let color = if trace.has_error {
+                Color::Red
+            } else {
+                service_color(&trace.service)
+            };
+            let status_str = if trace.has_error { "error" } else { "ok" };
+            let bar =
+                render_waterfall_bar(offset_pct, width_pct, bar_width, color, status_str);
+
+            let dur = format!("{:>7.0}ms", trace.duration_ms);
+            let spans_label = format!("{:>4}", trace.span_count);
+
+            Row::new(vec![
+                Cell::from(label).style(Style::default().fg(service_color(&trace.service))),
+                Cell::from(bar),
+                Cell::from(dur).style(Style::default().fg(duration_color(trace.duration_ms))),
+                Cell::from(spans_label).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    // Map selected index: timeline_state indexes into live_traces_sorted, but table rows
+    // are the visible subset. We need to translate.
+    let selected_sorted_idx = app.timeline_state.selected();
+    let mut display_state = TableState::default();
+    if let Some(sel) = selected_sorted_idx {
+        for (display_idx, (sorted_idx, _)) in visible.iter().enumerate() {
+            if *sorted_idx == sel {
+                display_state.select(Some(display_idx));
+                break;
+            }
+        }
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(label_width),
+            Constraint::Min(bar_width),
+            Constraint::Length(duration_width),
+            Constraint::Length(spans_width),
+        ],
+    )
+    .header(header_row)
+    .block(block)
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    frame.render_stateful_widget(table, area, &mut display_state);
+
+    // Scrollbar
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+    let mut scrollbar_state = ScrollbarState::new(app.live_traces_sorted.len())
+        .position(app.timeline_state.selected().unwrap_or(0));
+    frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 fn draw_trace_detail(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -986,6 +1764,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(" ERROR: ", Style::default().fg(Color::Red).bold()),
             Span::styled(err, Style::default().fg(Color::Red)),
         ])
+    } else if app.attr_picker.is_some() {
+        Line::from(vec![
+            Span::styled(" j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":navigate  "),
+            Span::styled("enter", Style::default().fg(Color::Cyan)),
+            Span::raw(":toggle  "),
+            Span::styled("a/esc", Style::default().fg(Color::Cyan)),
+            Span::raw(":close  "),
+        ])
+    } else if app.filter_input.is_some() {
+        Line::from(vec![
+            Span::styled(" enter", Style::default().fg(Color::Cyan)),
+            Span::raw(":apply  "),
+            Span::styled("esc", Style::default().fg(Color::Cyan)),
+            Span::raw(":cancel  "),
+        ])
     } else if app.comment_input.is_some() {
         Line::from(vec![
             Span::styled(" enter", Style::default().fg(Color::Cyan)),
@@ -1004,11 +1798,38 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(":comment  "),
         ])
+    } else if app.tab == Tab::Timeline {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::raw(":quit  "),
+            Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
+            Span::raw(":tab  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":nav  "),
+            Span::styled("enter", Style::default().fg(Color::Cyan)),
+            Span::raw(":trace  "),
+            Span::styled("+/-", Style::default().fg(Color::Cyan)),
+            Span::raw(":zoom  "),
+            Span::styled("space", Style::default().fg(Color::Cyan)),
+            Span::raw(":pause  "),
+            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::raw(":filter  "),
+            if !app.filter_text.is_empty() {
+                Span::styled("\\", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
+            if !app.filter_text.is_empty() {
+                Span::raw(":clear  ")
+            } else {
+                Span::raw("")
+            },
+        ])
     } else {
         Line::from(vec![
             Span::styled(" q", Style::default().fg(Color::Cyan)),
             Span::raw(":quit  "),
-            Span::styled("1/2", Style::default().fg(Color::Cyan)),
+            Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
             Span::raw(":tab  "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(":nav  "),
@@ -1016,6 +1837,28 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(":trace  "),
             Span::styled("space", Style::default().fg(Color::Cyan)),
             Span::raw(":pause  "),
+            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::raw(":filter  "),
+            if app.tab == Tab::Traces && app.table_state.selected().is_some() {
+                Span::styled("a", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
+            if app.tab == Tab::Traces && app.table_state.selected().is_some() {
+                Span::raw(":columns  ")
+            } else {
+                Span::raw("")
+            },
+            if !app.filter_text.is_empty() {
+                Span::styled("\\", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
+            if !app.filter_text.is_empty() {
+                Span::raw(":clear  ")
+            } else {
+                Span::raw("")
+            },
         ])
     };
 
@@ -1033,7 +1876,7 @@ pub async fn run(
     let mut terminal = ratatui::init();
 
     let mut app = App::new(server, service, status, interval);
-    app.poll_data().await;
+    app.poll_initial().await;
 
     let result = run_loop(&mut terminal, &mut app).await;
 
@@ -1045,15 +1888,18 @@ pub async fn run(
 }
 
 async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
-    let mut poll_timer = tokio::time::interval(app.poll_interval);
-    poll_timer.tick().await; // consume first immediate tick
+    let mut services_timer = tokio::time::interval(app.services_interval);
+    services_timer.tick().await; // consume first immediate tick
 
     loop {
         terminal.draw(|frame| draw(frame, app))?;
 
         tokio::select! {
-            _ = poll_timer.tick() => {
-                app.poll_data().await;
+            Some(json) = app.sse_rx.recv() => {
+                app.ingest_sse(&json);
+            }
+            _ = services_timer.tick() => {
+                app.poll_services().await;
             }
             ready = tokio::task::spawn_blocking(|| {
                 event::poll(Duration::from_millis(50)).unwrap_or(false)
@@ -1061,10 +1907,20 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 if ready.unwrap_or(false) {
                     if let Event::Key(key) = event::read()? {
                         if key.kind == KeyEventKind::Press {
+                            let current_tab = app.tab;
                             match app.handle_key(key.code) {
                                 Some("load_trace") => {
-                                    if let Some(span) = app.selected_span() {
-                                        let trace_id = span.trace_id.clone();
+                                    let trace_id = if current_tab == Tab::Timeline {
+                                        app.timeline_state.selected().and_then(|i| {
+                                            app.filtered_live_traces().get(i).map(|(_, t)| t.trace_id.clone())
+                                        })
+                                    } else {
+                                        app.table_state.selected().and_then(|i| {
+                                            app.filtered_spans().get(i).map(|s| s.trace_id.clone())
+                                        })
+                                    };
+                                    if let Some(trace_id) = trace_id {
+                                        app.prev_tab = current_tab;
                                         app.tab = Tab::Detail;
                                         app.load_trace(&trace_id).await;
                                     }

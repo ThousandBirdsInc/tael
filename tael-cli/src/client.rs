@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 pub struct TaelClient {
     base_url: String,
@@ -13,6 +16,34 @@ impl TaelClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: Client::new(),
         }
+    }
+
+    pub fn subscribe_live(
+        &self,
+        service: Option<String>,
+        status: Option<String>,
+    ) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let http = self.http.clone();
+        let base_url = self.base_url.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match sse_read_loop(&http, &base_url, service.as_deref(), status.as_deref(), &tx)
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(_) => {
+                        if tx.is_closed() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        });
+
+        rx
     }
 
     pub async fn query_traces(
@@ -134,4 +165,55 @@ impl TaelClient {
 
         Ok(resp)
     }
+}
+
+async fn sse_read_loop(
+    http: &Client,
+    base_url: &str,
+    service: Option<&str>,
+    status: Option<&str>,
+    tx: &mpsc::UnboundedSender<String>,
+) -> Result<()> {
+    let mut params: Vec<(&str, &str)> = Vec::new();
+    if let Some(s) = service {
+        params.push(("service", s));
+    }
+    if let Some(s) = status {
+        params.push(("status", s));
+    }
+
+    let mut response = http
+        .get(format!("{base_url}/api/v1/traces/live"))
+        .query(&params)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut buffer = String::new();
+    loop {
+        match response.chunk().await? {
+            Some(chunk) => {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_block = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
+
+                    for line in event_block.lines() {
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            if !data.is_empty() {
+                                if tx.send(data.to_string()).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+
+    Ok(())
 }

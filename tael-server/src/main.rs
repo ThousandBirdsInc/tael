@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod ingest;
+mod span_bus;
 mod storage;
 
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
 use config::ServerConfig;
+use span_bus::SpanBus;
 use storage::DuckDbStore;
 
 #[tokio::main]
@@ -21,6 +23,7 @@ async fn main() -> Result<()> {
 
     let config = ServerConfig::from_env();
     let store = Arc::new(DuckDbStore::new(&config.data_dir)?);
+    let bus = Arc::new(SpanBus::new()?);
 
     tracing::info!(
         otlp_grpc = %config.otlp_grpc_addr,
@@ -31,9 +34,10 @@ async fn main() -> Result<()> {
 
     let grpc_handle = tokio::spawn({
         let store = Arc::clone(&store);
+        let bus = Arc::clone(&bus);
         let addr = config.otlp_grpc_addr.parse()?;
         async move {
-            let trace_service = ingest::otlp::OtlpTraceService::new(store);
+            let trace_service = ingest::otlp::OtlpTraceService::new(store, bus);
             TonicServer::builder()
                 .add_service(
                     opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer::new(trace_service),
@@ -46,9 +50,10 @@ async fn main() -> Result<()> {
 
     let rest_handle = tokio::spawn({
         let store = Arc::clone(&store);
+        let bus = Arc::clone(&bus);
         let addr = config.rest_api_addr.clone();
         async move {
-            let app = api::rest::router(store);
+            let app = api::rest::router(store, bus);
             let listener = TcpListener::bind(&addr).await.expect("failed to bind REST addr");
             tracing::info!(%addr, "REST API listening");
             axum::serve(listener, app).await.expect("REST server failed");
