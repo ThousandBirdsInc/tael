@@ -18,17 +18,28 @@ No dashboards. No browsers. Just a single binary and structured data.
 
 [![asciicast](https://asciinema.org/a/svewi9ncgeH52UFP.svg)](https://asciinema.org/a/svewi9ncgeH52UFP)
 
+## Installation
+
+```bash
+# Install from crates.io
+cargo install tael-server
+cargo install tael-cli
+```
+
+Or build from source:
+
+```bash
+cargo build --release
+```
+
 ## Quickstart
 
 ```bash
-# Build
-cargo build --release
-
 # Start the server (OTLP on :4317, REST API on :7701)
-./target/release/tael-server
+tael-server
 
 # In another terminal — send sample traces
-./target/release/tael-test
+cargo run --bin tael-test
 
 # Query
 tael services --format table
