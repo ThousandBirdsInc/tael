@@ -115,6 +115,97 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn query_logs(
+        &self,
+        service: Option<&str>,
+        severity: Option<&str>,
+        body_contains: Option<&str>,
+        trace_id: Option<&str>,
+        last: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        if let Some(s) = severity {
+            params.push(("severity", s.to_string()));
+        }
+        if let Some(b) = body_contains {
+            params.push(("body_contains", b.to_string()));
+        }
+        if let Some(t) = trace_id {
+            params.push(("trace_id", t.to_string()));
+        }
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/logs", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+
+        Ok(resp)
+    }
+
+    pub async fn query_metrics(
+        &self,
+        service: Option<&str>,
+        name: Option<&str>,
+        metric_type: Option<&str>,
+        last: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        if let Some(n) = name {
+            params.push(("name", n.to_string()));
+        }
+        if let Some(t) = metric_type {
+            params.push(("metric_type", t.to_string()));
+        }
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+
+        Ok(resp)
+    }
+
+    pub async fn promql_query(&self, query: &str, last: Option<&str>) -> Result<Value> {
+        let mut params = vec![("query", query.to_string())];
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics/query", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn add_comment(
         &self,
         trace_id: &str,

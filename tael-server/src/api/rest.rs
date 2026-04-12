@@ -3,29 +3,32 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::get,
+    routing::{get, post},
 };
 use serde::Deserialize;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
+use crate::log_bus::LogBus;
 use crate::span_bus::SpanBus;
 use crate::storage::DuckDbStore;
-use crate::storage::models::TraceQuery;
+use crate::storage::models::{LogQuery, MetricQuery, TraceQuery};
 
 #[derive(Clone)]
 struct AppState {
     store: Arc<DuckDbStore>,
     bus: Arc<SpanBus>,
+    log_bus: Arc<LogBus>,
 }
 
-pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>) -> Router {
-    let state = AppState { store, bus };
+pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>, log_bus: Arc<LogBus>) -> Router {
+    let state = AppState { store, bus, log_bus };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
         .route("/api/v1/traces/live", get(live_traces))
@@ -35,6 +38,11 @@ pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>) -> Router {
             "/api/v1/traces/{trace_id}/comments",
             get(get_comments).post(add_comment),
         )
+        .route("/api/v1/logs", get(query_logs))
+        .route("/api/v1/logs/live", get(live_logs))
+        .route("/api/v1/metrics", get(query_metrics))
+        .route("/api/v1/metrics/query", get(promql_query))
+        .route("/api/v1/write", post(prom_remote_write))
         .route("/healthz", get(healthz))
         .with_state(state)
 }
@@ -218,6 +226,196 @@ async fn get_comments(
             axum::Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+// ── Log endpoints ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct LogQueryParams {
+    service: Option<String>,
+    severity: Option<String>,
+    body_contains: Option<String>,
+    trace_id: Option<String>,
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn query_logs(
+    State(state): State<AppState>,
+    Query(params): Query<LogQueryParams>,
+) -> impl IntoResponse {
+    let query = LogQuery {
+        service: params.service,
+        severity: params.severity,
+        body_contains: params.body_contains,
+        trace_id: params.trace_id,
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: params.limit,
+    };
+
+    match state.store.query_logs(&query) {
+        Ok(logs) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "logs": logs, "count": logs.len() })),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "query_logs failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveLogParams {
+    service: Option<String>,
+    severity: Option<String>,
+}
+
+async fn live_logs(
+    State(state): State<AppState>,
+    Query(params): Query<LiveLogParams>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.log_bus.subscribe();
+    let service_filter = params.service;
+    let severity_filter = params.severity;
+
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        let json = result.ok()?;
+        let filtered =
+            filter_log_batch(&json, service_filter.as_deref(), severity_filter.as_deref());
+        filtered.map(|data| Ok::<_, Infallible>(Event::default().data(data)))
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn filter_log_batch(
+    json: &str,
+    service: Option<&str>,
+    severity: Option<&str>,
+) -> Option<String> {
+    if service.is_none() && severity.is_none() {
+        return Some(json.to_string());
+    }
+
+    let logs: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    let filtered: Vec<&serde_json::Value> = logs
+        .iter()
+        .filter(|l| {
+            if let Some(svc) = service {
+                if l["service"].as_str() != Some(svc) {
+                    return false;
+                }
+            }
+            if let Some(sev) = severity {
+                if l["severity"].as_str() != Some(sev) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    serde_json::to_string(&filtered).ok()
+}
+
+// ── Metric endpoints ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MetricQueryParams {
+    service: Option<String>,
+    name: Option<String>,
+    metric_type: Option<String>,
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn query_metrics(
+    State(state): State<AppState>,
+    Query(params): Query<MetricQueryParams>,
+) -> impl IntoResponse {
+    let query = MetricQuery {
+        service: params.service,
+        name: params.name,
+        metric_type: params.metric_type,
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: params.limit,
+    };
+
+    match state.store.query_metrics(&query) {
+        Ok(metrics) => (
+            StatusCode::OK,
+            axum::Json(
+                serde_json::json!({ "metrics": metrics, "count": metrics.len() }),
+            ),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "query_metrics failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PromqlParams {
+    query: String,
+    last: Option<String>,
+}
+
+async fn promql_query(
+    State(state): State<AppState>,
+    Query(params): Query<PromqlParams>,
+) -> impl IntoResponse {
+    let lookback = params
+        .last
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(300);
+
+    let expr = match crate::promql::parse(&params.query) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": format!("parse error: {e}") })),
+            );
+        }
+    };
+
+    match crate::promql::evaluate(&state.store, &expr, lookback) {
+        Ok(series) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "query": params.query,
+                "series": series,
+                "count": series.len(),
+            })),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "promql evaluate failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+async fn prom_remote_write(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    crate::ingest::prom_remote_write::handle_write(state.store, body).await
 }
 
 async fn healthz() -> &'static str {

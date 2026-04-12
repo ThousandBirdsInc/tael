@@ -30,3 +30,5 @@ tracing-subscriber.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 walrus-rust.workspace = true
+snap.workspace = true
+bytes.workspace = true

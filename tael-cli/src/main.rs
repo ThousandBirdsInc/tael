@@ -91,6 +91,48 @@ enum QuerySignal {
         #[arg(long, default_value = "100")]
         limit: u32,
     },
+    /// Search and filter metrics
+    Metrics {
+        /// PromQL subset expression (e.g. `rate(http_requests[5m])`)
+        #[arg(long)]
+        query: Option<String>,
+        /// Filter by service name (ignored when --query is set)
+        #[arg(long)]
+        service: Option<String>,
+        /// Filter by metric name (ignored when --query is set)
+        #[arg(long)]
+        name: Option<String>,
+        /// Filter by metric type (gauge, sum, histogram, summary)
+        #[arg(long = "type")]
+        metric_type: Option<String>,
+        /// Time window (e.g. 1h, 30m, 7d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max results to return
+        #[arg(long, default_value = "500")]
+        limit: u32,
+    },
+    /// Search and filter logs
+    Logs {
+        /// Filter by service name
+        #[arg(long)]
+        service: Option<String>,
+        /// Filter by severity (trace, debug, info, warn, error, fatal)
+        #[arg(long)]
+        severity: Option<String>,
+        /// Search log body text (substring match)
+        #[arg(long)]
+        body_contains: Option<String>,
+        /// Filter by trace ID
+        #[arg(long)]
+        trace_id: Option<String>,
+        /// Time window (e.g. 1h, 30m, 7d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max results to return
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -154,6 +196,46 @@ async fn main() -> Result<()> {
                     min_duration,
                     max_duration,
                     status,
+                    last,
+                    limit,
+                )
+                .await?;
+            }
+            QuerySignal::Metrics {
+                query,
+                service,
+                name,
+                metric_type,
+                last,
+                limit,
+            } => {
+                commands::query::metrics(
+                    &client,
+                    &cli.format,
+                    query,
+                    service,
+                    name,
+                    metric_type,
+                    last,
+                    limit,
+                )
+                .await?;
+            }
+            QuerySignal::Logs {
+                service,
+                severity,
+                body_contains,
+                trace_id,
+                last,
+                limit,
+            } => {
+                commands::query::logs(
+                    &client,
+                    &cli.format,
+                    service,
+                    severity,
+                    body_contains,
+                    trace_id,
                     last,
                     limit,
                 )

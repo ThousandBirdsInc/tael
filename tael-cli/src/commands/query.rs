@@ -45,3 +45,60 @@ pub async fn traces(
     output::render(format, &result, output::print_spans_table);
     Ok(())
 }
+
+#[allow(clippy::too_many_arguments)]
+pub async fn logs(
+    client: &TaelClient,
+    format: &OutputFormat,
+    service: Option<String>,
+    severity: Option<String>,
+    body_contains: Option<String>,
+    trace_id: Option<String>,
+    last: Option<String>,
+    limit: u32,
+) -> Result<()> {
+    let result = client
+        .query_logs(
+            service.as_deref(),
+            severity.as_deref(),
+            body_contains.as_deref(),
+            trace_id.as_deref(),
+            last.as_deref(),
+            limit,
+        )
+        .await?;
+
+    output::render(format, &result, output::print_logs_table);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn metrics(
+    client: &TaelClient,
+    format: &OutputFormat,
+    query: Option<String>,
+    service: Option<String>,
+    name: Option<String>,
+    metric_type: Option<String>,
+    last: Option<String>,
+    limit: u32,
+) -> Result<()> {
+    if let Some(q) = query {
+        let result = client.promql_query(&q, last.as_deref()).await?;
+        output::render(format, &result, output::print_series_table);
+        return Ok(());
+    }
+
+    let result = client
+        .query_metrics(
+            service.as_deref(),
+            name.as_deref(),
+            metric_type.as_deref(),
+            last.as_deref(),
+            limit,
+        )
+        .await?;
+
+    output::render(format, &result, output::print_metrics_table);
+    Ok(())
+}

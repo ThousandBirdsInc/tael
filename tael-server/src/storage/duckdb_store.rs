@@ -5,7 +5,10 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use duckdb::{params, Connection};
 
-use super::models::{Span, SpanStatus, TraceComment, TraceQuery};
+use super::models::{
+    LogQuery, LogRecord, LogSeverity, MetricPoint, MetricQuery, MetricType, Span, SpanStatus,
+    TraceComment, TraceQuery,
+};
 
 fn parse_timestamp(s: &str) -> DateTime<Utc> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
@@ -91,6 +94,37 @@ impl DuckDbStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_comments_trace_id ON trace_comments(trace_id);
+
+            CREATE TABLE IF NOT EXISTS logs (
+                timestamp          TIMESTAMP NOT NULL,
+                observed_timestamp TIMESTAMP NOT NULL,
+                trace_id           VARCHAR,
+                span_id            VARCHAR,
+                severity           VARCHAR NOT NULL DEFAULT 'unspecified',
+                severity_text      VARCHAR NOT NULL DEFAULT '',
+                body               VARCHAR NOT NULL DEFAULT '',
+                service            VARCHAR NOT NULL,
+                attributes         JSON
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
+            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_logs_severity ON logs(severity);
+            CREATE INDEX IF NOT EXISTS idx_logs_trace_id ON logs(trace_id);
+
+            CREATE TABLE IF NOT EXISTS metrics (
+                timestamp   TIMESTAMP NOT NULL,
+                service     VARCHAR NOT NULL,
+                name        VARCHAR NOT NULL,
+                metric_type VARCHAR NOT NULL DEFAULT 'unknown',
+                value       DOUBLE NOT NULL,
+                unit        VARCHAR NOT NULL DEFAULT '',
+                attributes  JSON
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_metrics_service ON metrics(service);
+            CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name);
+            CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
             ",
         )?;
         Ok(())
@@ -279,6 +313,183 @@ impl DuckDbStore {
             services.push(row?);
         }
         Ok(services)
+    }
+
+    // ── Log storage ─────────────────────────────────────────────────
+
+    pub fn insert_logs(&self, logs: &[LogRecord]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "INSERT INTO logs
+             (timestamp, observed_timestamp, trace_id, span_id, severity,
+              severity_text, body, service, attributes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )?;
+
+        for log in logs {
+            let attrs = serde_json::to_string(&log.attributes)?;
+            stmt.execute(params![
+                log.timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                log.observed_timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                log.trace_id,
+                log.span_id,
+                log.severity.to_string(),
+                log.severity_text,
+                log.body,
+                log.service,
+                attrs,
+            ])?;
+        }
+        Ok(())
+    }
+
+    pub fn query_logs(&self, query: &LogQuery) -> Result<Vec<LogRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT timestamp::VARCHAR, observed_timestamp::VARCHAR, trace_id, span_id,
+                    severity, severity_text, body, service, attributes
+             FROM logs WHERE 1=1",
+        );
+        let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+
+        if let Some(ref svc) = query.service {
+            sql.push_str(" AND service = ?");
+            param_values.push(Box::new(svc.clone()));
+        }
+        if let Some(ref sev) = query.severity {
+            sql.push_str(" AND severity = ?");
+            param_values.push(Box::new(sev.clone()));
+        }
+        if let Some(ref body) = query.body_contains {
+            sql.push_str(" AND body LIKE ?");
+            param_values.push(Box::new(format!("%{body}%")));
+        }
+        if let Some(ref tid) = query.trace_id {
+            sql.push_str(" AND trace_id = ?");
+            param_values.push(Box::new(tid.clone()));
+        }
+        if let Some(secs) = query.last_seconds {
+            sql.push_str(&format!(
+                " AND timestamp >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"
+            ));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let params_ref: Vec<&dyn duckdb::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            let ts_str: String = row.get(0)?;
+            let obs_str: String = row.get(1)?;
+            let attrs_str: String = row.get(8)?;
+            let severity_str: String = row.get(4)?;
+
+            Ok(LogRecord {
+                timestamp: parse_timestamp(&ts_str),
+                observed_timestamp: parse_timestamp(&obs_str),
+                trace_id: row.get(2)?,
+                span_id: row.get(3)?,
+                severity: LogSeverity::from_str(&severity_str),
+                severity_text: row.get(5)?,
+                body: row.get(6)?,
+                service: row.get(7)?,
+                attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+            })
+        })?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push(row?);
+        }
+        Ok(logs)
+    }
+
+    // ── Metric storage ──────────────────────────────────────────────
+
+    pub fn insert_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "INSERT INTO metrics
+             (timestamp, service, name, metric_type, value, unit, attributes)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
+
+        for m in metrics {
+            let attrs = serde_json::to_string(&m.attributes)?;
+            stmt.execute(params![
+                m.timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                m.service,
+                m.name,
+                m.metric_type.to_string(),
+                m.value,
+                m.unit,
+                attrs,
+            ])?;
+        }
+        Ok(())
+    }
+
+    pub fn query_metrics(&self, query: &MetricQuery) -> Result<Vec<MetricPoint>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT timestamp::VARCHAR, service, name, metric_type, value, unit, attributes
+             FROM metrics WHERE 1=1",
+        );
+        let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+
+        if let Some(ref svc) = query.service {
+            sql.push_str(" AND service = ?");
+            param_values.push(Box::new(svc.clone()));
+        }
+        if let Some(ref name) = query.name {
+            sql.push_str(" AND name = ?");
+            param_values.push(Box::new(name.clone()));
+        }
+        if let Some(ref mt) = query.metric_type {
+            sql.push_str(" AND metric_type = ?");
+            param_values.push(Box::new(mt.clone()));
+        }
+        if let Some(secs) = query.last_seconds {
+            sql.push_str(&format!(
+                " AND timestamp >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"
+            ));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(500);
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let params_ref: Vec<&dyn duckdb::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            let ts_str: String = row.get(0)?;
+            let mt_str: String = row.get(3)?;
+            let attrs_str: String = row.get(6)?;
+
+            Ok(MetricPoint {
+                timestamp: parse_timestamp(&ts_str),
+                service: row.get(1)?,
+                name: row.get(2)?,
+                metric_type: MetricType::from_str(&mt_str),
+                value: row.get(4)?,
+                unit: row.get(5)?,
+                attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+            })
+        })?;
+
+        let mut metrics = Vec::new();
+        for row in rows {
+            metrics.push(row?);
+        }
+        Ok(metrics)
     }
 }
 

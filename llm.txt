@@ -1,0 +1,213 @@
+# tael — LLM usage notes
+
+Context for agents using the `tael` CLI or querying a tael server.
+Covers the command surface, the HTTP query surface, and the known
+limits — so you don't generate calls that silently fail or return
+misleading results.
+
+## CLI quickstart
+
+`tael` is a thin client over the tael server's REST API. Default server
+is `http://127.0.0.1:7701`; override with `--server <url>`.
+
+Global flags (must appear before or after the subcommand, not nested):
+- `--server <url>` — server base URL
+- `--format json|table` — output format, default `json`. Prefer `json`
+  for machine parsing; `table` is for humans.
+
+### Querying data
+
+```
+tael query traces [flags]
+tael query logs    [flags]
+tael query metrics [flags]
+```
+
+**Traces** — filter spans:
+- `--service <name>`         exact service match
+- `--operation <substr>`     substring match on span operation
+- `--min-duration <dur>`     e.g. `100ms`, `1s`, `500` (bare number = ms)
+- `--max-duration <dur>`
+- `--status ok|error|unset`
+- `--last <dur>`             window, e.g. `5m`, `1h`, `24h`, `7d`
+- `--limit <n>`              default 100
+
+Example: `tael query traces --service api --status error --last 15m`
+
+**Logs** — filter log records:
+- `--service <name>`
+- `--severity trace|debug|info|warn|error|fatal`
+- `--body-contains <substr>`  substring, **not** regex
+- `--trace-id <id>`           exact match (find logs attached to a trace)
+- `--last <dur>`
+- `--limit <n>`               default 100
+
+Example: `tael query logs --severity error --last 1h --body-contains timeout`
+
+**Metrics** — two modes:
+
+*Filter mode* (simpler, recommended for most agent use cases):
+- `--service <name>`
+- `--name <metric_name>`      exact match
+- `--type gauge|sum|histogram|summary`  (will not match remote-write data)
+- `--last <dur>`
+- `--limit <n>`               default 500
+
+*PromQL mode* — set `--query`; the filter flags above are ignored
+except `--last`:
+- `--query "<expr>"`          PromQL subset (see section below)
+- `--last <dur>`              lookback for bare selectors; `rate()` uses
+                              its own `[...]` bracket instead
+
+Examples:
+```
+tael query metrics --name http_requests --service api --last 5m
+tael query metrics --query 'rate(http_requests{service="api"}[5m])'
+tael query metrics --query 'sum by (service) (http_requests)'
+```
+
+### Fetching a full trace
+
+```
+tael get trace <trace_id>
+```
+
+Returns every span in the trace, ordered by start time. Use this after
+`tael query traces` finds something interesting.
+
+### Services
+
+```
+tael services
+```
+
+Lists every service that has emitted spans, with span count, trace
+count, average span duration, and error rate. Good starting point for
+exploration when you don't know what services exist.
+
+### Comments on traces
+
+Persistent annotations attached to a trace (or a specific span) — used
+by agents to leave notes across sessions.
+
+```
+tael comment add <trace_id> "<body>" [--author <name>] [--span-id <id>]
+tael comment list <trace_id>
+```
+
+### Live / TUI
+
+```
+tael live [--service <name>] [--status <s>] [--interval <secs>]
+```
+
+Interactive ratatui feed of incoming spans. Primarily a human tool — not
+useful from an agent. Skip unless explicitly asked.
+
+### Server
+
+```
+tael server status
+```
+
+Health-check the server (hits `/healthz`).
+
+### Output parsing notes
+
+With `--format json` (default), responses have these top-level shapes:
+- `tael query traces` → `{"spans": [...]}`
+- `tael get trace` → `{"trace_id", "span_count", "spans": [...]}`
+- `tael services` → `{"services": [...]}`
+- `tael query logs` → `{"logs": [...], "count": N}`
+- `tael query metrics` (filter mode) → `{"metrics": [...], "count": N}`
+- `tael query metrics --query` → `{"query", "series": [...], "count": N}`
+- `tael comment list` → `{"comments": [...], "count": N}`
+
+Errors are returned as `{"error": "..."}` with a non-2xx HTTP status.
+
+## PromQL subset (`GET /api/v1/metrics/query?query=...&last=...`)
+
+The server implements a **small hand-rolled PromQL-ish parser**, not real
+PromQL. Stick to the grammar below.
+
+### Supported
+
+- Bare selector:       `metric_name`
+- Labelled selector:   `metric_name{label="value", other!="x"}`
+- Rate over range:     `rate(metric_name{...}[5m])`
+- Aggregators:         `sum|avg|min|max|count(expr)`
+                       `sum by (label1,label2) (expr)`
+                       `sum(expr) by (label1,label2)`
+- Duration units:      `s`, `m`, `h`, `d`
+- Synthetic labels:    `service` (maps to the resource service name),
+                       `__name__` (maps to the metric name)
+- `last=` query param: lookback window for bare selectors (default 5m).
+                       Ignored for `rate()`, which uses its own bracket.
+
+### NOT supported — will fail to parse or produce wrong results
+
+- Binary operators between series: `a / b`, `a + b`, comparisons, `and/or/unless`
+- `without (...)` clauses — only `by (...)` is recognized
+- Regex matchers: `=~`, `!~` (only `=` and `!=` work)
+- Offset modifier: `metric offset 1h`
+- Subqueries: `rate(metric[5m:1m])`
+- Range queries / `/api/v1/query_range` — all evaluation is **instant**
+- `histogram_quantile`, `topk`, `bottomk`, `quantile`, `stddev`, `stdvar`
+- Scalar literals, `vector()`, `time()`, `timestamp()`
+- `@` modifier, `absent()`, label_replace/label_join
+- Nested binary ops or arithmetic inside aggregators
+
+### Rate semantics caveat
+
+`rate(sel[dur])` computes `max(last - first, 0) / elapsed_seconds` across
+all samples in the window — a naive counter-reset clamp. This differs
+from Prometheus, which extrapolates across scrape boundaries. Expect
+small numerical drift vs. a real Prometheus server, especially on short
+windows or sparse series. Good enough for trend detection; don't use it
+for SLO math.
+
+### Histogram metrics
+
+OTLP Histogram and ExponentialHistogram data points are stored as a
+single row with `value = sum` and `metric_type = "histogram"`. Bucket
+boundaries, counts, and min/max are dropped. You cannot compute
+percentiles from stored histograms. If you need p95/p99, aggregate at
+the client before export.
+
+## Prometheus remote-write (`POST /api/v1/write`)
+
+- Accepts Prometheus remote-write v1: Snappy-compressed protobuf body.
+- Label mapping: `__name__` → metric name; `service.name` or `job` →
+  service; everything else → attributes.
+- Remote-write v1 carries no type information, so every ingested point
+  is stored with `metric_type = "unknown"`. Queries filtering by
+  `--type gauge` etc. will not match remote-write data.
+- `NaN` samples (Prometheus "stale" markers) are dropped on ingest.
+- No metadata handling, no exemplars, no native histograms.
+
+## Filter-mode metric query (`GET /api/v1/metrics`)
+
+If you don't need PromQL, the simpler endpoint supports:
+`service`, `name` (exact), `metric_type`, `last`, `limit`.
+This is often more reliable for agents than constructing PromQL.
+
+## Log query (`GET /api/v1/logs`)
+
+Supports: `service`, `severity`, `body_contains` (substring, not regex),
+`trace_id`, `last`, `limit`. No structured field querying beyond those —
+attributes are stored as JSON but not indexed or queryable yet.
+
+## Trace query (`GET /api/v1/traces`)
+
+Supports: `service`, `operation` (substring), `min_duration_ms`,
+`max_duration_ms`, `status` (`ok|error|unset`), `last`, `limit`. No
+attribute filtering yet.
+
+## General
+
+- All timestamps returned are UTC ISO 8601.
+- Default limits: traces/logs 100, metrics 500. Raise with `limit=`.
+- The server is single-node DuckDB. Treat queries scanning > ~1M rows
+  as slow; prefer narrow `last=` windows.
+- Auth is off by default; the server binds to `127.0.0.1` only unless
+  reconfigured.
