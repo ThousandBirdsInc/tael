@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-const SKILL_MD: &str = include_str!("../../../SKILL.md");
+const SKILL_MD: &str = include_str!("../../SKILL.md");
 const SKILL_NAME: &str = "tael";
 
 fn resolve_dir(project: bool) -> Result<PathBuf> {
