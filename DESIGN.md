@@ -114,10 +114,11 @@ tael query traces --service=api-gateway --min-duration=500ms --status=error --la
 tael query metrics 'rate(http_requests_total{status="500"}[5m])'
 ```
 
-**Cross-signal correlation** — the killer feature. Given a trace ID, pull associated metrics and logs. Given a metric spike, find correlated traces:
+**Cross-signal correlation** — the killer feature. Given a trace ID, pull every span, every log tagged with that `trace_id`, and all metrics from the touched services inside the trace's time window:
 ```
-tael correlate --metric='http_latency_p99' --threshold='>2s' --last=30m
+tael correlate --trace <trace-id>
 ```
+Future work: metric-driven correlation (`--metric http_latency_p99 --threshold '>2s'`) to walk the other direction.
 
 ### 4. CLI (`tael`)
 
@@ -153,7 +154,7 @@ tael summarize --last=1h              # agent-friendly summary of system health
 - **`tael summarize`**: returns a structured health summary an agent can use to decide what to investigate further. Includes: top errors, latency regressions, anomalous metrics, and recent deploys correlated with changes.
 - **`tael anomalies`**: surfaces statistically significant deviations without requiring the agent to define thresholds.
 - **`tael correlate`**: eliminates manual cross-signal pivoting — the agent says "this metric spiked, what's related?" and gets traces + logs back.
-- **`tael watch --exit-on=<condition>`**: an agent can subscribe to a query and get notified (via stdout) when a condition is met, then exit. Useful for "watch this deploy and tell me if error rate exceeds 1%."
+- **`tael watch`**: polls the summary endpoint on an interval and prints signed deltas per tick (span count, error count, error rate, p95, log errors, metric volume). A future `--exit-on=<condition>` flag will let an agent subscribe to a query and exit once a threshold is crossed ("watch this deploy and tell me if error rate exceeds 1%").
 - **`tael diff`**: compare a time range against a baseline. Agents use this to answer "is this deploy worse than the last one?"
 
 ### 5. API Server
@@ -259,25 +260,25 @@ This lets agents like Claude Code call observability tools without shelling out.
 ## Milestones
 
 ### M1: Foundation
-- [ ] Project scaffolding (Rust workspace, CI, linting)
-- [ ] OTLP gRPC receiver for traces
-- [ ] DuckDB trace storage with basic schema
-- [ ] `tael query traces` with service/duration/status filters
-- [ ] `tael get trace <id>` with structured JSON output
+- [x] Project scaffolding (Rust workspace, CI, linting)
+- [x] OTLP gRPC receiver for traces
+- [x] DuckDB trace storage with basic schema
+- [x] `tael query traces` with service/duration/status filters
+- [x] `tael get trace <id>` with structured JSON output
 
 ### M2: Metrics + Logs
-- [ ] OTLP metrics receiver
-- [ ] Prometheus remote-write receiver
-- [ ] DuckDB metric storage
-- [ ] OTLP log receiver + storage
-- [ ] `tael query metrics` with PromQL subset
-- [ ] `tael query logs` with field filters
+- [x] OTLP metrics receiver
+- [x] Prometheus remote-write receiver
+- [x] DuckDB metric storage
+- [x] OTLP log receiver + storage
+- [x] `tael query metrics` with PromQL subset
+- [x] `tael query logs` with field filters
 
 ### M3: Agent-Native Features
-- [ ] `tael summarize` — system health digest
-- [ ] `tael anomalies` — statistical anomaly detection
-- [ ] `tael correlate` — cross-signal correlation
-- [ ] `tael watch` — streaming queries
+- [x] `tael summarize` — system health digest
+- [x] `tael anomalies` — baseline-vs-current regression detection
+- [x] `tael correlate` — cross-signal correlation by trace ID
+- [x] `tael watch` — polling summary deltas
 - [ ] `tael diff` — baseline comparison
 - [ ] `tael topology` — service dependency graph
 

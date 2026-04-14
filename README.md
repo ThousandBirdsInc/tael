@@ -87,6 +87,51 @@ tael comment add <trace-id> "This query needs an index" --span-id <span-id>
 tael comment list <trace-id>
 ```
 
+### Health Summary, Anomalies, Correlation, Watch
+Agent-friendly analysis commands built on top of the core query layer.
+
+```bash
+# Aggregated health digest over a window (traces, top services, top error
+# ops, log severity breakdown, metric volume)
+tael summarize --last 1h
+tael summarize --last 15m --service api-gateway --format table
+
+# Services whose error rate or p95 regressed vs a baseline window
+tael anomalies --last 5m --baseline 30m
+tael anomalies --last 10m --baseline 2h --service cart
+
+# Pull spans, logs, and time-window metrics for a single trace
+tael correlate --trace <trace-id>
+
+# Poll the summary endpoint on an interval and print signed deltas per tick
+tael watch --last 1m --interval 10
+```
+
+`anomalies` flags a service when its current-window error rate rises ≥5%
+absolute over baseline, or p95 latency regresses ≥1.5× (severity bumps at
+10%/25% error delta and 2×/3× latency ratio). `correlate` takes a trace ID
+and returns the spans, any logs tagged with that `trace_id`, and metrics
+from the touched services within the trace's time range.
+
+### Claude Code Skill
+`tael` ships with a [Claude Code skill](./SKILL.md) so Claude Code picks up telemetry-querying instructions automatically when you're debugging inside a project that uses tael. Install it once:
+
+```bash
+# Personal install (~/.claude/skills/tael/SKILL.md) — available in every project
+tael skill install
+
+# Project-scoped install (.claude/skills/tael/SKILL.md) — committed to this repo
+tael skill install --project
+
+# Overwrite an existing install
+tael skill install --force
+
+# Just show where it would be written
+tael skill where
+```
+
+Restart any running Claude Code session after the first install so it picks up the new skill directory. Subsequent `--force` re-installs take effect within the session.
+
 ### Interactive TUI
 `tael live` launches a terminal UI with live-updating trace feed, service health, and a waterfall trace visualizer.
 
@@ -130,11 +175,18 @@ tael [OPTIONS] <COMMAND>
 
 Commands:
   query traces    Search and filter traces
+  query logs      Search and filter logs
+  query metrics   Query metrics (incl. PromQL subset)
   get trace       Get a full trace by ID
   services        List known services and their health
   comment add     Add a comment to a trace
   comment list    List comments on a trace
   live            Interactive TUI trace feed
+  summarize       Aggregated health summary over a window
+  anomalies       Surface services that regressed vs a baseline window
+  correlate       Pull spans + logs + metrics for a trace ID
+  watch           Poll the summary endpoint and print deltas per tick
+  skill install   Install the tael skill into Claude Code
   server status   Check server health
 
 Global Options:
@@ -153,6 +205,35 @@ Global Options:
 | `--max-duration` | Maximum span duration | `--max-duration 1s` |
 | `--last` | Time window | `--last 1h` |
 | `--limit` | Max results (default 100) | `--limit 50` |
+
+### `tael summarize`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--last` | Time window (default 1h) | `--last 15m` |
+| `--service` | Filter to a single service | `--service cart` |
+
+### `tael anomalies`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--last` | Current window (default 1h) | `--last 5m` |
+| `--baseline` | Baseline window (default 6× current) | `--baseline 1h` |
+| `--service` | Filter to a single service | `--service api` |
+
+### `tael correlate`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--trace` | Trace ID to pull across signals | `--trace a1b2c3…` |
+
+### `tael watch`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--last` | Summary window (default 1m) | `--last 30s` |
+| `--service` | Filter to a single service | `--service api` |
+| `--interval` | Poll interval in seconds (default 10) | `--interval 5` |
 
 ## Architecture
 

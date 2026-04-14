@@ -24,10 +24,11 @@ Trigger this skill proactively on:
 **Debugging order of operations** (do this even without being asked):
 
 1. Is a tael server reachable? `tael --format json server status`. If not, skip to code reading.
-2. Is the affected service emitting data? `tael --format json services` — check that the service appears and has a non-zero `span_count`.
-3. Are there error spans in the relevant window? `tael --format json query traces --service <name> --status error --last 15m`.
-4. For each suspicious trace, pull the full tree (`get trace`) and correlated logs (`query logs --trace-id ...`).
-5. **Only then** start reading code, armed with a specific trace ID, the failing span's operation, and the error message from the logs.
+2. What's unhealthy right now? `tael --format json summarize --last 1h` and `tael --format json anomalies --last 5m --baseline 30m` — use these to pick a service and a failure mode before drilling in.
+3. Is the affected service emitting data? `tael --format json services` — check that the service appears and has a non-zero `span_count`.
+4. Are there error spans in the relevant window? `tael --format json query traces --service <name> --status error --last 15m`.
+5. For each suspicious trace, pull spans + logs + metrics in one shot: `tael --format json correlate --trace <trace_id>`.
+6. **Only then** start reading code, armed with a specific trace ID, the failing span's operation, and the error message from the logs.
 
 Do not invoke for: questions about the tael codebase itself (read code normally), or telemetry stored outside tael (other APMs, Datadog, Honeycomb, etc.).
 
@@ -40,6 +41,22 @@ Do not invoke for: questions about the tael codebase itself (read code normally)
 ## Investigation playbook
 
 Follow this order when you don't know where to start. Each step narrows the search.
+
+### 0. Snapshot: what's unhealthy right now?
+
+Before drilling in, grab a system-wide digest. Two commands cover this:
+
+```bash
+# Aggregated health over a window: spans/errors/p50-p99, top services,
+# top error operations, log severity breakdown, metric volume.
+tael --format json summarize --last 1h
+
+# Services whose error rate or p95 regressed vs a baseline window.
+# Default baseline is 6× the current window.
+tael --format json anomalies --last 5m --baseline 30m
+```
+
+`summarize` returns `{window_seconds, traces, top_services, top_error_operations, logs, metrics}` — read `top_error_operations` first, then `top_services` sorted by span count. `anomalies` returns `{anomalies: [{service, kind, severity, current, baseline, delta, description}]}` where `kind` is `error_rate` or `latency_p95` and `severity` is `info|warning|critical`. If `anomalies` is empty at reasonable thresholds, jump straight to step 1.
 
 ### 1. Orient: what services exist?
 
@@ -79,7 +96,15 @@ Returns `{"trace_id", "span_count", "spans": [...]}` — every span in the trace
 
 ### 4. Correlate with logs
 
-Given a `trace_id`, find structured logs attached to it:
+Given a `trace_id`, the one-shot path is `tael correlate` — it returns the trace, every log tagged with that `trace_id`, and metrics from the touched services inside the trace's time window, in a single response:
+
+```bash
+tael --format json correlate --trace <trace_id>
+```
+
+Returns `{trace_id, span_count, services, start_time, end_time, duration_ms, error_count, logs: [...], metrics: [...]}`. Prefer this over three separate queries when you already have a trace ID in hand.
+
+If you only need the logs (e.g. for keyword grep), the narrow form still works:
 
 ```bash
 tael --format json query logs --trace-id <trace_id>
@@ -132,7 +157,18 @@ Returns `{"query", "series": [...], "count": N}`. Supported syntax:
 
 When filter mode suffices, prefer it. PromQL here is a small subset and easy to misuse.
 
-### 6. Leave a note for future sessions
+### 6. Watch an ongoing change
+
+When the user is mid-deploy, mid-migration, or otherwise wants to know whether something is getting worse over the next few minutes, use `watch`. It polls `summarize` on an interval and prints signed deltas (span count, error count, error rate, p95, log errors, metric volume) per tick:
+
+```bash
+tael --format table watch --last 1m --interval 10
+tael --format table watch --last 30s --interval 5 --service api-gateway
+```
+
+Use JSON output if you want to consume ticks programmatically. There's no built-in `--exit-on` yet — to turn a watch into an alert, read ticks until a threshold is crossed, then exit.
+
+### 7. Leave a note for future sessions
 
 When you find something non-obvious, attach a comment to the trace so the next agent session has your findings:
 
@@ -275,6 +311,10 @@ query logs       → {"logs": [...], "count": N}
 query metrics    → {"metrics": [...], "count": N}                  (filter mode)
 query metrics    → {"query", "series": [...], "count": N}          (--query mode)
 comment list     → {"comments": [...], "count": N}
+summarize        → {"window_seconds", "traces", "top_services", "top_error_operations", "logs", "metrics"}
+anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}
+correlate        → {"trace_id", "span_count", "services", "start_time", "end_time", "duration_ms", "error_count", "logs": [...], "metrics": [...]}
+watch            → {"timestamp", "window_seconds", "traces", "logs", "metrics"}   (one JSON object per tick)
 <error>          → {"error": "..."}   (with non-2xx HTTP status)
 ```
 

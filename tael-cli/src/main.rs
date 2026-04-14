@@ -102,6 +102,11 @@ enum Commands {
         #[command(subcommand)]
         action: ServerAction,
     },
+    /// Install the tael Claude Code skill
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,6 +214,25 @@ enum CommentAction {
 enum ServerAction {
     /// Show server status
     Status,
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Install SKILL.md into Claude Code's skills directory
+    Install {
+        /// Install into ./.claude/skills/tael/ instead of ~/.claude/skills/tael/
+        #[arg(long)]
+        project: bool,
+        /// Overwrite an existing SKILL.md at the destination
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print the destination path without writing anything
+    Where {
+        /// Resolve the project-local path instead of the personal path
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[tokio::main]
@@ -340,6 +364,14 @@ async fn main() -> Result<()> {
         Commands::Server { action } => match action {
             ServerAction::Status => {
                 commands::server::status(&client, &cli.format).await?;
+            }
+        },
+        Commands::Skill { action } => match action {
+            SkillAction::Install { project, force } => {
+                commands::skill::install(project, force)?;
+            }
+            SkillAction::Where { project } => {
+                commands::skill::print_path(project)?;
             }
         },
     }

@@ -5,5 +5,6 @@ pub mod get;
 pub mod query;
 pub mod server;
 pub mod services;
+pub mod skill;
 pub mod summarize;
 pub mod watch;
