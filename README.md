@@ -258,8 +258,8 @@ cargo run --bin tael -- query traces --format table
 See [DESIGN.md](DESIGN.md) for the full design document and milestone plan.
 
 - [x] **M1**: OTLP trace ingestion, DuckDB storage, CLI queries, trace comments, TUI
-- [ ] **M2**: Metrics + logs ingestion, PromQL subset
-- [ ] **M3**: `tael summarize`, `tael anomalies`, `tael correlate`, `tael watch`
+- [x] **M2**: Metrics + logs ingestion, PromQL subset
+- [x] **M3**: `tael summarize`, `tael anomalies`, `tael correlate`, `tael watch`
 - [ ] **M4**: ClickHouse backend, MCP server, auth, packaging
 
 ## License

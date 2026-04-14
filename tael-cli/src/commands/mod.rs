@@ -1,5 +1,9 @@
+pub mod anomalies;
 pub mod comment;
+pub mod correlate;
 pub mod get;
 pub mod query;
 pub mod server;
 pub mod services;
+pub mod summarize;
+pub mod watch;

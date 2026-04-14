@@ -6,8 +6,9 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use duckdb::{params, Connection};
 
 use super::models::{
-    LogQuery, LogRecord, LogSeverity, MetricPoint, MetricQuery, MetricType, Span, SpanStatus,
-    TraceComment, TraceQuery,
+    Anomaly, AnomalyReport, CorrelateReport, ErrorOperation, LogQuery, LogRecord, LogSeverity,
+    LogSummary, MetricPoint, MetricQuery, MetricSummary, MetricType, ServiceSummary, Span,
+    SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
 };
 
 fn parse_timestamp(s: &str) -> DateTime<Utc> {
@@ -490,6 +491,396 @@ impl DuckDbStore {
             metrics.push(row?);
         }
         Ok(metrics)
+    }
+
+    pub fn query_summary(
+        &self,
+        last_seconds: i64,
+        service: Option<&str>,
+    ) -> Result<SummaryReport> {
+        let conn = self.conn.lock().unwrap();
+
+        let span_time_clause = format!(
+            "start_time >= current_timestamp::TIMESTAMP - INTERVAL '{last_seconds} seconds'"
+        );
+        let ts_time_clause = format!(
+            "timestamp >= current_timestamp::TIMESTAMP - INTERVAL '{last_seconds} seconds'"
+        );
+
+        let svc_clause = if service.is_some() { " AND service = ?" } else { "" };
+        let svc_owned = service.map(|s| s.to_string());
+        let build_params = || -> Vec<&dyn duckdb::ToSql> {
+            match &svc_owned {
+                Some(s) => vec![s as &dyn duckdb::ToSql],
+                None => vec![],
+            }
+        };
+
+        // ── Traces aggregate ─────────────────────────────────────────
+        let traces_sql = format!(
+            "SELECT
+                COUNT(*)::BIGINT,
+                COUNT(DISTINCT trace_id)::BIGINT,
+                SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::BIGINT,
+                COALESCE(AVG(duration_ms), 0.0),
+                COALESCE(MAX(duration_ms), 0.0),
+                COALESCE(quantile_cont(duration_ms, 0.5), 0.0),
+                COALESCE(quantile_cont(duration_ms, 0.95), 0.0),
+                COALESCE(quantile_cont(duration_ms, 0.99), 0.0)
+             FROM spans WHERE {span_time_clause}{svc_clause}"
+        );
+        let mut stmt = conn.prepare(&traces_sql)?;
+        let traces: TraceSummary = stmt.query_row(build_params().as_slice(), |row| {
+            let span_count: i64 = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+            let error_count: i64 = row.get::<_, Option<i64>>(2)?.unwrap_or(0);
+            let error_rate = if span_count > 0 {
+                error_count as f64 / span_count as f64
+            } else {
+                0.0
+            };
+            Ok(TraceSummary {
+                span_count,
+                trace_count: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                error_count,
+                error_rate,
+                avg_ms: row.get(3)?,
+                max_ms: row.get(4)?,
+                p50_ms: row.get(5)?,
+                p95_ms: row.get(6)?,
+                p99_ms: row.get(7)?,
+            })
+        })?;
+        drop(stmt);
+
+        // ── Top services by span count ───────────────────────────────
+        let top_svc_sql = format!(
+            "SELECT service,
+                    COUNT(*)::BIGINT,
+                    SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::DOUBLE / NULLIF(COUNT(*), 0)::DOUBLE,
+                    COALESCE(quantile_cont(duration_ms, 0.95), 0.0)
+             FROM spans WHERE {span_time_clause}{svc_clause}
+             GROUP BY service
+             ORDER BY 2 DESC
+             LIMIT 5"
+        );
+        let mut stmt = conn.prepare(&top_svc_sql)?;
+        let top_services: Vec<ServiceSummary> = stmt
+            .query_map(build_params().as_slice(), |row| {
+                Ok(ServiceSummary {
+                    service: row.get(0)?,
+                    span_count: row.get(1)?,
+                    error_rate: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    p95_ms: row.get(3)?,
+                })
+            })?
+            .collect::<duckdb::Result<_>>()?;
+        drop(stmt);
+
+        // ── Top error operations ─────────────────────────────────────
+        let err_op_sql = format!(
+            "SELECT service, operation, COUNT(*)::BIGINT
+             FROM spans
+             WHERE status='error' AND {span_time_clause}{svc_clause}
+             GROUP BY service, operation
+             ORDER BY 3 DESC
+             LIMIT 5"
+        );
+        let mut stmt = conn.prepare(&err_op_sql)?;
+        let top_error_operations: Vec<ErrorOperation> = stmt
+            .query_map(build_params().as_slice(), |row| {
+                Ok(ErrorOperation {
+                    service: row.get(0)?,
+                    operation: row.get(1)?,
+                    error_count: row.get(2)?,
+                })
+            })?
+            .collect::<duckdb::Result<_>>()?;
+        drop(stmt);
+
+        // ── Logs aggregate ───────────────────────────────────────────
+        let logs_sql = format!(
+            "SELECT
+                COUNT(*)::BIGINT,
+                SUM(CASE WHEN severity IN ('error','fatal') THEN 1 ELSE 0 END)::BIGINT,
+                SUM(CASE WHEN severity='warn' THEN 1 ELSE 0 END)::BIGINT,
+                SUM(CASE WHEN severity='info' THEN 1 ELSE 0 END)::BIGINT,
+                SUM(CASE WHEN severity IN ('debug','trace') THEN 1 ELSE 0 END)::BIGINT
+             FROM logs WHERE {ts_time_clause}{svc_clause}"
+        );
+        let mut stmt = conn.prepare(&logs_sql)?;
+        let logs: LogSummary = stmt.query_row(build_params().as_slice(), |row| {
+            Ok(LogSummary {
+                total: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                error: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                warn: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                info: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                debug: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            })
+        })?;
+        drop(stmt);
+
+        // ── Metrics aggregate ────────────────────────────────────────
+        let metrics_sql = format!(
+            "SELECT COUNT(*)::BIGINT, COUNT(DISTINCT name)::BIGINT
+             FROM metrics WHERE {ts_time_clause}{svc_clause}"
+        );
+        let mut stmt = conn.prepare(&metrics_sql)?;
+        let metrics: MetricSummary = stmt.query_row(build_params().as_slice(), |row| {
+            Ok(MetricSummary {
+                point_count: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                unique_names: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            })
+        })?;
+        drop(stmt);
+
+        Ok(SummaryReport {
+            window_seconds: last_seconds,
+            service_filter: service.map(|s| s.to_string()),
+            traces,
+            top_services,
+            top_error_operations,
+            logs,
+            metrics,
+        })
+    }
+
+    pub fn query_anomalies(
+        &self,
+        current_seconds: i64,
+        baseline_seconds: i64,
+        service: Option<&str>,
+    ) -> Result<AnomalyReport> {
+        let conn = self.conn.lock().unwrap();
+        let svc_owned = service.map(|s| s.to_string());
+        let svc_clause = if service.is_some() { " AND service = ?" } else { "" };
+
+        // Per-service stats for a window whose end = now and start = now - window.
+        let stats_sql = |window: i64| -> String {
+            format!(
+                "SELECT service,
+                        COUNT(*)::BIGINT AS span_count,
+                        SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::DOUBLE
+                            / NULLIF(COUNT(*), 0)::DOUBLE AS error_rate,
+                        COALESCE(quantile_cont(duration_ms, 0.95), 0.0) AS p95_ms
+                 FROM spans
+                 WHERE start_time >= current_timestamp::TIMESTAMP - INTERVAL '{window} seconds'{svc_clause}
+                 GROUP BY service"
+            )
+        };
+
+        let build_params = || -> Vec<&dyn duckdb::ToSql> {
+            match &svc_owned {
+                Some(s) => vec![s as &dyn duckdb::ToSql],
+                None => vec![],
+            }
+        };
+
+        let mut current_stats: std::collections::HashMap<String, (i64, f64, f64)> =
+            std::collections::HashMap::new();
+        let mut stmt = conn.prepare(&stats_sql(current_seconds))?;
+        let rows = stmt.query_map(build_params().as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for r in rows {
+            let (svc, span_count, error_rate, p95) = r?;
+            current_stats.insert(svc, (span_count, error_rate, p95));
+        }
+        drop(stmt);
+
+        let mut baseline_stats: std::collections::HashMap<String, (i64, f64, f64)> =
+            std::collections::HashMap::new();
+        let mut stmt = conn.prepare(&stats_sql(baseline_seconds))?;
+        let rows = stmt.query_map(build_params().as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for r in rows {
+            let (svc, span_count, error_rate, p95) = r?;
+            baseline_stats.insert(svc, (span_count, error_rate, p95));
+        }
+        drop(stmt);
+
+        let mut anomalies = Vec::new();
+        for (svc, (cur_count, cur_err, cur_p95)) in &current_stats {
+            if *cur_count < 5 {
+                continue;
+            }
+            let (base_count, base_err, base_p95) =
+                baseline_stats.get(svc).copied().unwrap_or((0, 0.0, 0.0));
+
+            let err_delta = cur_err - base_err;
+            if err_delta >= 0.05 && *cur_err > 0.0 {
+                let severity = if err_delta >= 0.25 {
+                    "critical"
+                } else if err_delta >= 0.10 {
+                    "warning"
+                } else {
+                    "info"
+                };
+                anomalies.push(Anomaly {
+                    service: svc.clone(),
+                    kind: "error_rate".into(),
+                    severity: severity.into(),
+                    current: *cur_err,
+                    baseline: base_err,
+                    delta: err_delta,
+                    description: format!(
+                        "Error rate rose {:.1}% → {:.1}% (baseline {:.1}%, {} spans)",
+                        base_err * 100.0,
+                        cur_err * 100.0,
+                        base_err * 100.0,
+                        cur_count
+                    ),
+                });
+            }
+
+            if base_p95 > 0.0 && base_count >= 5 {
+                let ratio = cur_p95 / base_p95;
+                if ratio >= 1.5 && *cur_p95 > 50.0 {
+                    let severity = if ratio >= 3.0 {
+                        "critical"
+                    } else if ratio >= 2.0 {
+                        "warning"
+                    } else {
+                        "info"
+                    };
+                    anomalies.push(Anomaly {
+                        service: svc.clone(),
+                        kind: "latency_p95".into(),
+                        severity: severity.into(),
+                        current: *cur_p95,
+                        baseline: base_p95,
+                        delta: cur_p95 - base_p95,
+                        description: format!(
+                            "p95 latency {:.1}ms → {:.1}ms ({:.1}× baseline)",
+                            base_p95, cur_p95, ratio
+                        ),
+                    });
+                }
+            }
+        }
+
+        anomalies.sort_by(|a, b| {
+            let rank = |s: &str| match s {
+                "critical" => 0,
+                "warning" => 1,
+                _ => 2,
+            };
+            rank(&a.severity).cmp(&rank(&b.severity))
+        });
+
+        Ok(AnomalyReport {
+            current_seconds,
+            baseline_seconds,
+            service_filter: svc_owned,
+            anomalies,
+        })
+    }
+
+    pub fn query_correlate(&self, trace_id: &str) -> Result<Option<CorrelateReport>> {
+        let spans = self.get_trace(trace_id)?;
+        if spans.is_empty() {
+            return Ok(None);
+        }
+
+        let start_time = spans
+            .iter()
+            .map(|s| s.start_time)
+            .min()
+            .unwrap_or_else(Utc::now);
+        let end_time = spans
+            .iter()
+            .map(|s| s.end_time)
+            .max()
+            .unwrap_or_else(Utc::now);
+        let duration_ms = (end_time - start_time).num_milliseconds() as f64;
+        let error_count = spans
+            .iter()
+            .filter(|s| matches!(s.status, SpanStatus::Error))
+            .count() as i64;
+
+        let mut services: Vec<String> =
+            spans.iter().map(|s| s.service.clone()).collect();
+        services.sort();
+        services.dedup();
+
+        let logs = self.query_logs(&LogQuery {
+            trace_id: Some(trace_id.to_string()),
+            limit: Some(500),
+            ..Default::default()
+        })?;
+
+        // Metrics overlapping the trace's time range, scoped to touched services.
+        let metrics = {
+            let conn = self.conn.lock().unwrap();
+            let start = start_time
+                .naive_utc()
+                .format("%Y-%m-%d %H:%M:%S%.6f")
+                .to_string();
+            let end = end_time
+                .naive_utc()
+                .format("%Y-%m-%d %H:%M:%S%.6f")
+                .to_string();
+
+            let placeholders = std::iter::repeat("?")
+                .take(services.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT timestamp::VARCHAR, service, name, metric_type, value, unit, attributes
+                 FROM metrics
+                 WHERE timestamp BETWEEN ?::TIMESTAMP AND ?::TIMESTAMP
+                   AND service IN ({placeholders})
+                 ORDER BY timestamp ASC
+                 LIMIT 500"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<&dyn duckdb::ToSql> =
+                vec![&start as &dyn duckdb::ToSql, &end as &dyn duckdb::ToSql];
+            for s in &services {
+                params_vec.push(s as &dyn duckdb::ToSql);
+            }
+            let rows = stmt.query_map(params_vec.as_slice(), |row| {
+                let ts_str: String = row.get(0)?;
+                let mt_str: String = row.get(3)?;
+                let attrs_str: String = row.get(6)?;
+                Ok(MetricPoint {
+                    timestamp: parse_timestamp(&ts_str),
+                    service: row.get(1)?,
+                    name: row.get(2)?,
+                    metric_type: MetricType::from_str(&mt_str),
+                    value: row.get(4)?,
+                    unit: row.get(5)?,
+                    attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            out
+        };
+
+        Ok(Some(CorrelateReport {
+            trace_id: trace_id.to_string(),
+            span_count: spans.len(),
+            services,
+            start_time: start_time.to_rfc3339(),
+            end_time: end_time.to_rfc3339(),
+            duration_ms,
+            error_count,
+            logs,
+            metrics,
+        }))
     }
 }
 

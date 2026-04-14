@@ -42,6 +42,9 @@ pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>, log_bus: Arc<LogBus>) 
         .route("/api/v1/logs/live", get(live_logs))
         .route("/api/v1/metrics", get(query_metrics))
         .route("/api/v1/metrics/query", get(promql_query))
+        .route("/api/v1/summary", get(query_summary))
+        .route("/api/v1/anomalies", get(query_anomalies))
+        .route("/api/v1/correlate", get(query_correlate))
         .route("/api/v1/write", post(prom_remote_write))
         .route("/healthz", get(healthz))
         .with_state(state)
@@ -403,6 +406,99 @@ async fn promql_query(
         ),
         Err(e) => {
             tracing::error!(error = %e, "promql evaluate failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SummaryParams {
+    last: Option<String>,
+    service: Option<String>,
+}
+
+async fn query_summary(
+    State(state): State<AppState>,
+    Query(params): Query<SummaryParams>,
+) -> impl IntoResponse {
+    let last_seconds = params
+        .last
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(3600);
+
+    match state.store.query_summary(last_seconds, params.service.as_deref()) {
+        Ok(report) => (StatusCode::OK, axum::Json(serde_json::to_value(&report).unwrap())),
+        Err(e) => {
+            tracing::error!(error = %e, "query_summary failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AnomalyParams {
+    last: Option<String>,
+    baseline: Option<String>,
+    service: Option<String>,
+}
+
+async fn query_anomalies(
+    State(state): State<AppState>,
+    Query(params): Query<AnomalyParams>,
+) -> impl IntoResponse {
+    let current_seconds = params
+        .last
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(3600);
+    let baseline_seconds = params
+        .baseline
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(current_seconds * 6);
+
+    match state
+        .store
+        .query_anomalies(current_seconds, baseline_seconds, params.service.as_deref())
+    {
+        Ok(report) => (StatusCode::OK, axum::Json(serde_json::to_value(&report).unwrap())),
+        Err(e) => {
+            tracing::error!(error = %e, "query_anomalies failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CorrelateParams {
+    trace: String,
+}
+
+async fn query_correlate(
+    State(state): State<AppState>,
+    Query(params): Query<CorrelateParams>,
+) -> impl IntoResponse {
+    match state.store.query_correlate(&params.trace) {
+        Ok(Some(report)) => (
+            StatusCode::OK,
+            axum::Json(serde_json::to_value(&report).unwrap()),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "trace not found" })),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "query_correlate failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": e.to_string() })),

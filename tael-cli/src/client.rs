@@ -244,6 +244,67 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn summary(&self, last: Option<&str>, service: Option<&str>) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/summary", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn anomalies(
+        &self,
+        last: Option<&str>,
+        baseline: Option<&str>,
+        service: Option<&str>,
+    ) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        if let Some(b) = baseline {
+            params.push(("baseline", b.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/anomalies", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn correlate(&self, trace: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/correlate", self.base_url))
+            .query(&[("trace", trace)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn healthz(&self) -> Result<String> {
         let resp = self
             .http

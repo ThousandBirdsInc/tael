@@ -204,6 +204,218 @@ pub fn print_series_table(value: &Value) {
     println!("{table}");
 }
 
+pub fn print_summary(value: &Value) {
+    let window = value["window_seconds"].as_i64().unwrap_or(0);
+    let svc_filter = value["service_filter"].as_str().unwrap_or("(all)");
+    println!("Summary — last {window}s, service: {svc_filter}");
+    println!();
+
+    let traces = &value["traces"];
+    let mut t = Table::new();
+    t.set_header(vec!["Metric", "Value"]);
+    t.add_row(vec![Cell::new("Spans"), Cell::new(traces["span_count"].as_i64().unwrap_or(0).to_string())]);
+    t.add_row(vec![Cell::new("Traces"), Cell::new(traces["trace_count"].as_i64().unwrap_or(0).to_string())]);
+    t.add_row(vec![Cell::new("Errors"), Cell::new(traces["error_count"].as_i64().unwrap_or(0).to_string())]);
+    t.add_row(vec![
+        Cell::new("Error rate"),
+        Cell::new(format!("{:.2}%", traces["error_rate"].as_f64().unwrap_or(0.0) * 100.0)),
+    ]);
+    t.add_row(vec![Cell::new("Avg duration"), Cell::new(format!("{:.1} ms", traces["avg_ms"].as_f64().unwrap_or(0.0)))]);
+    t.add_row(vec![Cell::new("p50"), Cell::new(format!("{:.1} ms", traces["p50_ms"].as_f64().unwrap_or(0.0)))]);
+    t.add_row(vec![Cell::new("p95"), Cell::new(format!("{:.1} ms", traces["p95_ms"].as_f64().unwrap_or(0.0)))]);
+    t.add_row(vec![Cell::new("p99"), Cell::new(format!("{:.1} ms", traces["p99_ms"].as_f64().unwrap_or(0.0)))]);
+    t.add_row(vec![Cell::new("Max"), Cell::new(format!("{:.1} ms", traces["max_ms"].as_f64().unwrap_or(0.0)))]);
+    println!("Traces");
+    println!("{t}");
+    println!();
+
+    if let Some(svcs) = value["top_services"].as_array() {
+        if !svcs.is_empty() {
+            let mut st = Table::new();
+            st.set_header(vec!["Service", "Spans", "Error Rate", "p95 (ms)"]);
+            for s in svcs {
+                st.add_row(vec![
+                    Cell::new(s["service"].as_str().unwrap_or("-")),
+                    Cell::new(s["span_count"].as_i64().unwrap_or(0).to_string()),
+                    Cell::new(format!("{:.2}%", s["error_rate"].as_f64().unwrap_or(0.0) * 100.0)),
+                    Cell::new(format!("{:.1}", s["p95_ms"].as_f64().unwrap_or(0.0))),
+                ]);
+            }
+            println!("Top services");
+            println!("{st}");
+            println!();
+        }
+    }
+
+    if let Some(ops) = value["top_error_operations"].as_array() {
+        if !ops.is_empty() {
+            let mut et = Table::new();
+            et.set_header(vec!["Service", "Operation", "Errors"]);
+            for o in ops {
+                et.add_row(vec![
+                    Cell::new(o["service"].as_str().unwrap_or("-")),
+                    Cell::new(o["operation"].as_str().unwrap_or("-")),
+                    Cell::new(o["error_count"].as_i64().unwrap_or(0).to_string()),
+                ]);
+            }
+            println!("Top error operations");
+            println!("{et}");
+            println!();
+        }
+    }
+
+    let logs = &value["logs"];
+    let mut lt = Table::new();
+    lt.set_header(vec!["Severity", "Count"]);
+    lt.add_row(vec![Cell::new("total"), Cell::new(logs["total"].as_i64().unwrap_or(0).to_string())]);
+    lt.add_row(vec![Cell::new("error"), Cell::new(logs["error"].as_i64().unwrap_or(0).to_string())]);
+    lt.add_row(vec![Cell::new("warn"), Cell::new(logs["warn"].as_i64().unwrap_or(0).to_string())]);
+    lt.add_row(vec![Cell::new("info"), Cell::new(logs["info"].as_i64().unwrap_or(0).to_string())]);
+    lt.add_row(vec![Cell::new("debug"), Cell::new(logs["debug"].as_i64().unwrap_or(0).to_string())]);
+    println!("Logs");
+    println!("{lt}");
+    println!();
+
+    let metrics = &value["metrics"];
+    let mut mt = Table::new();
+    mt.set_header(vec!["Metric", "Value"]);
+    mt.add_row(vec![Cell::new("Points"), Cell::new(metrics["point_count"].as_i64().unwrap_or(0).to_string())]);
+    mt.add_row(vec![Cell::new("Unique names"), Cell::new(metrics["unique_names"].as_i64().unwrap_or(0).to_string())]);
+    println!("Metrics");
+    println!("{mt}");
+}
+
+pub fn print_anomalies(value: &Value) {
+    let cur = value["current_seconds"].as_i64().unwrap_or(0);
+    let base = value["baseline_seconds"].as_i64().unwrap_or(0);
+    let svc = value["service_filter"].as_str().unwrap_or("(all)");
+    println!("Anomalies — current {cur}s vs baseline {base}s, service: {svc}");
+    println!();
+
+    let anomalies = match value["anomalies"].as_array() {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            println!("No anomalies detected.");
+            return;
+        }
+    };
+
+    let mut t = Table::new();
+    t.set_header(vec!["Severity", "Service", "Kind", "Current", "Baseline", "Description"]);
+    for a in anomalies {
+        t.add_row(vec![
+            Cell::new(a["severity"].as_str().unwrap_or("-")),
+            Cell::new(a["service"].as_str().unwrap_or("-")),
+            Cell::new(a["kind"].as_str().unwrap_or("-")),
+            Cell::new(format!("{:.3}", a["current"].as_f64().unwrap_or(0.0))),
+            Cell::new(format!("{:.3}", a["baseline"].as_f64().unwrap_or(0.0))),
+            Cell::new(a["description"].as_str().unwrap_or("-")),
+        ]);
+    }
+    println!("{t}");
+}
+
+pub fn print_correlate(value: &Value) {
+    if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
+        println!("{err}");
+        return;
+    }
+    let trace_id = value["trace_id"].as_str().unwrap_or("-");
+    let span_count = value["span_count"].as_i64().unwrap_or(0);
+    let dur = value["duration_ms"].as_f64().unwrap_or(0.0);
+    let errors = value["error_count"].as_i64().unwrap_or(0);
+    let services: Vec<&str> = value["services"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    println!("Trace {trace_id}");
+    println!("  spans: {span_count}  errors: {errors}  duration: {dur:.1} ms");
+    println!("  services: {}", services.join(", "));
+    println!(
+        "  window: {} → {}",
+        value["start_time"].as_str().unwrap_or("-"),
+        value["end_time"].as_str().unwrap_or("-")
+    );
+    println!();
+
+    let logs = value["logs"].as_array().cloned().unwrap_or_default();
+    if logs.is_empty() {
+        println!("Logs: (none)");
+    } else {
+        let mut lt = Table::new();
+        lt.set_header(vec!["Timestamp", "Service", "Severity", "Body"]);
+        for l in logs.iter().take(50) {
+            let body = l["body"].as_str().unwrap_or("-");
+            let short = if body.len() > 80 { &body[..80] } else { body };
+            lt.add_row(vec![
+                Cell::new(l["timestamp"].as_str().unwrap_or("-")),
+                Cell::new(l["service"].as_str().unwrap_or("-")),
+                Cell::new(l["severity"].as_str().unwrap_or("-")),
+                Cell::new(short),
+            ]);
+        }
+        println!("Logs ({}):", logs.len());
+        println!("{lt}");
+    }
+    println!();
+
+    let metrics = value["metrics"].as_array().cloned().unwrap_or_default();
+    if metrics.is_empty() {
+        println!("Metrics: (none in trace window)");
+    } else {
+        let mut mt = Table::new();
+        mt.set_header(vec!["Timestamp", "Service", "Name", "Type", "Value"]);
+        for m in metrics.iter().take(50) {
+            mt.add_row(vec![
+                Cell::new(m["timestamp"].as_str().unwrap_or("-")),
+                Cell::new(m["service"].as_str().unwrap_or("-")),
+                Cell::new(m["name"].as_str().unwrap_or("-")),
+                Cell::new(m["metric_type"].as_str().unwrap_or("-")),
+                Cell::new(format!("{:.3}", m["value"].as_f64().unwrap_or(0.0))),
+            ]);
+        }
+        println!("Metrics ({}):", metrics.len());
+        println!("{mt}");
+    }
+}
+
+pub fn print_watch_tick(delta: &Value) {
+    let ts = delta["timestamp"].as_str().unwrap_or("-");
+    let tr = &delta["traces"];
+    let lg = &delta["logs"];
+    let mt = &delta["metrics"];
+    let fmt_signed_i = |v: i64| {
+        if v >= 0 {
+            format!("+{v}")
+        } else {
+            v.to_string()
+        }
+    };
+    let fmt_signed_f = |v: f64| {
+        if v >= 0.0 {
+            format!("+{v:.2}")
+        } else {
+            format!("{v:.2}")
+        }
+    };
+    println!(
+        "[{ts}] spans={} ({}) errors={} ({}) err_rate={:.2}% ({}) p95={:.1}ms ({}) logs.err={} ({}) metrics={} ({})",
+        tr["span_count"].as_i64().unwrap_or(0),
+        fmt_signed_i(tr["delta_span_count"].as_i64().unwrap_or(0)),
+        tr["error_count"].as_i64().unwrap_or(0),
+        fmt_signed_i(tr["delta_error_count"].as_i64().unwrap_or(0)),
+        tr["error_rate"].as_f64().unwrap_or(0.0) * 100.0,
+        fmt_signed_f(tr["delta_error_rate"].as_f64().unwrap_or(0.0) * 100.0),
+        tr["p95_ms"].as_f64().unwrap_or(0.0),
+        fmt_signed_f(tr["delta_p95_ms"].as_f64().unwrap_or(0.0)),
+        lg["error"].as_i64().unwrap_or(0),
+        fmt_signed_i(lg["delta_error"].as_i64().unwrap_or(0)),
+        mt["point_count"].as_i64().unwrap_or(0),
+        fmt_signed_i(mt["delta_point_count"].as_i64().unwrap_or(0)),
+    );
+}
+
 pub fn render(format: &OutputFormat, value: &Value, table_fn: fn(&Value)) {
     match format {
         OutputFormat::Json => print_json(value),

@@ -58,6 +58,45 @@ enum Commands {
         #[arg(long, default_value = "2")]
         interval: u64,
     },
+    /// Aggregated health summary over a time window
+    Summarize {
+        /// Time window (e.g. 1h, 30m, 7d). Defaults to 1h.
+        #[arg(long)]
+        last: Option<String>,
+        /// Filter to a single service
+        #[arg(long)]
+        service: Option<String>,
+    },
+    /// Surface services whose error-rate or p95 regressed vs a baseline window
+    Anomalies {
+        /// Current window (default 1h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Baseline window to compare against (default: 6× current)
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Filter to a single service
+        #[arg(long)]
+        service: Option<String>,
+    },
+    /// Pull spans, logs, and metrics for a trace ID
+    Correlate {
+        /// Trace ID to correlate across signals
+        #[arg(long)]
+        trace: String,
+    },
+    /// Poll the summary endpoint and print deltas between samples
+    Watch {
+        /// Summary window (default 1m)
+        #[arg(long)]
+        last: Option<String>,
+        /// Filter to a single service
+        #[arg(long)]
+        service: Option<String>,
+        /// Poll interval in seconds
+        #[arg(long, default_value = "10")]
+        interval: u64,
+    },
     /// Server management
     Server {
         #[command(subcommand)]
@@ -277,6 +316,26 @@ async fn main() -> Result<()> {
             interval,
         } => {
             tui::run(&cli.server, service, status, interval).await?;
+        }
+        Commands::Summarize { last, service } => {
+            commands::summarize::run(&client, &cli.format, last, service).await?;
+        }
+        Commands::Anomalies {
+            last,
+            baseline,
+            service,
+        } => {
+            commands::anomalies::run(&client, &cli.format, last, baseline, service).await?;
+        }
+        Commands::Correlate { trace } => {
+            commands::correlate::run(&client, &cli.format, &trace).await?;
+        }
+        Commands::Watch {
+            last,
+            service,
+            interval,
+        } => {
+            commands::watch::run(&client, &cli.format, last, service, interval).await?;
         }
         Commands::Server { action } => match action {
             ServerAction::Status => {

@@ -196,6 +196,98 @@ pub struct MetricQuery {
     pub limit: Option<u32>,
 }
 
+// ── Summary models ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryReport {
+    pub window_seconds: i64,
+    pub service_filter: Option<String>,
+    pub traces: TraceSummary,
+    pub top_services: Vec<ServiceSummary>,
+    pub top_error_operations: Vec<ErrorOperation>,
+    pub logs: LogSummary,
+    pub metrics: MetricSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceSummary {
+    pub span_count: i64,
+    pub trace_count: i64,
+    pub error_count: i64,
+    pub error_rate: f64,
+    pub avg_ms: f64,
+    pub max_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSummary {
+    pub service: String,
+    pub span_count: i64,
+    pub error_rate: f64,
+    pub p95_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorOperation {
+    pub service: String,
+    pub operation: String,
+    pub error_count: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogSummary {
+    pub total: i64,
+    pub error: i64,
+    pub warn: i64,
+    pub info: i64,
+    pub debug: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricSummary {
+    pub point_count: i64,
+    pub unique_names: i64,
+}
+
+// ── Anomaly models ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnomalyReport {
+    pub current_seconds: i64,
+    pub baseline_seconds: i64,
+    pub service_filter: Option<String>,
+    pub anomalies: Vec<Anomaly>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Anomaly {
+    pub service: String,
+    pub kind: String,
+    pub severity: String,
+    pub current: f64,
+    pub baseline: f64,
+    pub delta: f64,
+    pub description: String,
+}
+
+// ── Correlate models ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelateReport {
+    pub trace_id: String,
+    pub span_count: usize,
+    pub services: Vec<String>,
+    pub start_time: String,
+    pub end_time: String,
+    pub duration_ms: f64,
+    pub error_count: i64,
+    pub logs: Vec<LogRecord>,
+    pub metrics: Vec<MetricPoint>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LogQuery {
     pub service: Option<String>,
