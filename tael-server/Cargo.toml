@@ -32,3 +32,7 @@ uuid.workspace = true
 walrus-rust.workspace = true
 snap.workspace = true
 bytes.workspace = true
+form_urlencoded.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

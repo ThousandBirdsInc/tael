@@ -11,6 +11,14 @@ use super::models::{
     SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
 };
 
+/// Build a JSON path expression for a single top-level attribute key.
+/// Quoting `$."<key>"` lets dotted keys (e.g. `http.method`) work, since the
+/// unquoted form `$.http.method` would walk into a nested object.
+fn json_path_for_key(key: &str) -> String {
+    let escaped = key.replace('\\', r"\\").replace('"', r#"\""#);
+    format!(r#"$."{escaped}""#)
+}
+
 fn parse_timestamp(s: &str) -> DateTime<Utc> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
@@ -192,6 +200,11 @@ impl DuckDbStore {
         }
         if let Some(secs) = query.last_seconds {
             sql.push_str(&format!(" AND start_time >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"));
+        }
+        for (k, v) in &query.attributes {
+            sql.push_str(" AND json_extract_string(attributes, ?) = ?");
+            param_values.push(Box::new(json_path_for_key(k)));
+            param_values.push(Box::new(v.clone()));
         }
 
         sql.push_str(" ORDER BY start_time DESC");
@@ -891,4 +904,87 @@ pub struct ServiceInfo {
     pub trace_count: i64,
     pub avg_duration_ms: f64,
     pub error_rate: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn span(trace_id: &str, attrs: &[(&str, &str)]) -> Span {
+        let now = Utc::now();
+        let mut attributes = HashMap::new();
+        for (k, v) in attrs {
+            attributes.insert((*k).to_string(), (*v).to_string());
+        }
+        Span {
+            trace_id: trace_id.into(),
+            span_id: format!("{trace_id}-span"),
+            parent_span_id: None,
+            service: "svc".into(),
+            operation: "op".into(),
+            start_time: now,
+            end_time: now,
+            duration_ms: 1.0,
+            status: SpanStatus::Ok,
+            attributes,
+            events: vec![],
+        }
+    }
+
+    fn store() -> DuckDbStore {
+        let dir = tempfile::tempdir().unwrap();
+        DuckDbStore::new(dir.path().to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn attribute_filter_matches_dotted_key() {
+        let s = store();
+        s.insert_spans(&[
+            span("a", &[("http.method", "GET"), ("http.status_code", "200")]),
+            span("b", &[("http.method", "POST"), ("http.status_code", "500")]),
+        ])
+        .unwrap();
+
+        let q = TraceQuery {
+            attributes: vec![("http.method".into(), "GET".into())],
+            ..Default::default()
+        };
+        let got = s.query_traces(&q).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].trace_id, "a");
+    }
+
+    #[test]
+    fn attribute_filters_are_anded() {
+        let s = store();
+        s.insert_spans(&[
+            span("a", &[("http.method", "GET"), ("http.status_code", "200")]),
+            span("b", &[("http.method", "GET"), ("http.status_code", "500")]),
+        ])
+        .unwrap();
+
+        let q = TraceQuery {
+            attributes: vec![
+                ("http.method".into(), "GET".into()),
+                ("http.status_code".into(), "500".into()),
+            ],
+            ..Default::default()
+        };
+        let got = s.query_traces(&q).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].trace_id, "b");
+    }
+
+    #[test]
+    fn attribute_filter_misses_when_value_differs() {
+        let s = store();
+        s.insert_spans(&[span("a", &[("env", "prod")])]).unwrap();
+
+        let q = TraceQuery {
+            attributes: vec![("env".into(), "staging".into())],
+            ..Default::default()
+        };
+        assert!(s.query_traces(&q).unwrap().is_empty());
+    }
 }

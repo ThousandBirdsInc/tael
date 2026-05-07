@@ -71,6 +71,10 @@ pub struct TraceQuery {
     pub status: Option<String>,
     pub last_seconds: Option<i64>,
     pub limit: Option<u32>,
+    /// Equality filters on span attributes. Each entry is ANDed.
+    /// Keys with characters outside `[A-Za-z0-9._\-:/]` are rejected at the storage layer.
+    #[serde(default)]
+    pub attributes: Vec<(String, String)>,
 }
 
 // ── Log models ──────────────────────────────────────────────────────

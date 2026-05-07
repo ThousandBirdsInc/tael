@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "tael-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2925,19 +2925,21 @@ dependencies = [
 
 [[package]]
 name = "tael-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
  "bytes",
  "chrono",
  "duckdb",
+ "form_urlencoded",
  "hex",
  "opentelemetry-proto",
  "prost",
  "serde",
  "serde_json",
  "snap",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2950,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "tael-test"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "hex",

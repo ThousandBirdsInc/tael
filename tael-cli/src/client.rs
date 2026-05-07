@@ -46,6 +46,7 @@ impl TaelClient {
         rx
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_traces(
         &self,
         service: Option<&str>,
@@ -55,6 +56,7 @@ impl TaelClient {
         status: Option<&str>,
         last: Option<&str>,
         limit: u32,
+        attributes: &[(String, String)],
     ) -> Result<Value> {
         let mut params = vec![("limit", limit.to_string())];
         if let Some(s) = service {
@@ -74,6 +76,9 @@ impl TaelClient {
         }
         if let Some(l) = last {
             params.push(("last", l.to_string()));
+        }
+        for (k, v) in attributes {
+            params.push(("attribute", format!("{k}={v}")));
         }
 
         let resp = self

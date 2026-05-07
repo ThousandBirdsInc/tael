@@ -26,9 +26,11 @@ pub async fn traces(
     status: Option<String>,
     last: Option<String>,
     limit: u32,
+    attribute: Vec<String>,
 ) -> Result<()> {
     let min_ms = min_duration.as_deref().and_then(parse_duration_ms);
     let max_ms = max_duration.as_deref().and_then(parse_duration_ms);
+    let attributes = parse_attribute_args(&attribute)?;
 
     let result = client
         .query_traces(
@@ -39,11 +41,27 @@ pub async fn traces(
             status.as_deref(),
             last.as_deref(),
             limit,
+            &attributes,
         )
         .await?;
 
     output::render(format, &result, output::print_spans_table);
     Ok(())
+}
+
+fn parse_attribute_args(args: &[String]) -> Result<Vec<(String, String)>> {
+    args.iter()
+        .map(|raw| {
+            let (k, v) = raw.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--attribute expects key=value, got {raw:?}")
+            })?;
+            let k = k.trim();
+            if k.is_empty() {
+                anyhow::bail!("--attribute key cannot be empty (got {raw:?})");
+            }
+            Ok((k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

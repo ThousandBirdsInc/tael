@@ -134,6 +134,10 @@ enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "100")]
         limit: u32,
+        /// Filter by span attribute, repeatable. Format: key=value
+        /// (e.g. --attribute http.method=GET --attribute http.status_code=500)
+        #[arg(long = "attribute")]
+        attribute: Vec<String>,
     },
     /// Search and filter metrics
     Metrics {
@@ -250,6 +254,7 @@ async fn main() -> Result<()> {
                 status,
                 last,
                 limit,
+                attribute,
             } => {
                 commands::query::traces(
                     &client,
@@ -261,6 +266,7 @@ async fn main() -> Result<()> {
                     status,
                     last,
                     limit,
+                    attribute,
                 )
                 .await?;
             }

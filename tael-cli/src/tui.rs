@@ -365,6 +365,7 @@ impl App {
                 self.status_filter.as_deref(),
                 Some("1h"),
                 200,
+                &[],
             )
             .await
         {

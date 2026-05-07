@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::StatusCode,
     response::{
         IntoResponse,
@@ -79,6 +79,7 @@ fn parse_duration_to_seconds(s: &str) -> Option<i64> {
 async fn query_traces(
     State(state): State<AppState>,
     Query(params): Query<TraceQueryParams>,
+    RawQuery(raw): RawQuery,
 ) -> impl IntoResponse {
     let query = TraceQuery {
         service: params.service,
@@ -88,6 +89,7 @@ async fn query_traces(
         status: params.status,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        attributes: parse_attribute_params(raw.as_deref()),
     };
 
     match state.store.query_traces(&query) {
@@ -100,6 +102,26 @@ async fn query_traces(
             )
         }
     }
+}
+
+/// Pull repeated `attribute=key=value` pairs out of a raw query string.
+/// `serde_urlencoded` (axum's default Query parser) keeps only the last value
+/// for duplicate keys, so we re-parse the raw string to collect all of them.
+fn parse_attribute_params(raw: Option<&str>) -> Vec<(String, String)> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    form_urlencoded::parse(raw.as_bytes())
+        .filter(|(k, _)| k == "attribute")
+        .filter_map(|(_, v)| {
+            let (key, value) = v.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
