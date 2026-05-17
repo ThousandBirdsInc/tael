@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -63,6 +63,13 @@ struct App {
     // Pinned attribute columns
     pinned_columns: Vec<String>,
     attr_picker: Option<AttrPicker>,
+    // Fullscreen span viewer
+    span_viewer: Option<SpanViewer>,
+}
+
+struct SpanViewer {
+    span: SpanRow,
+    scroll: u16,
 }
 
 struct AttrPicker {
@@ -180,6 +187,22 @@ impl App {
             filter_text: String::new(),
             pinned_columns: Vec::new(),
             attr_picker: None,
+            span_viewer: None,
+        }
+    }
+
+    fn open_span_viewer(&mut self) {
+        let span = match self.tab {
+            Tab::Traces => self
+                .table_state
+                .selected()
+                .and_then(|i| self.filtered_spans().into_iter().nth(i))
+                .cloned(),
+            Tab::Detail => self.selected_waterfall_span().cloned(),
+            _ => None,
+        };
+        if let Some(s) = span {
+            self.span_viewer = Some(SpanViewer { span: s, scroll: 0 });
         }
     }
 
@@ -457,6 +480,32 @@ impl App {
 
     /// Returns action: None = normal, Some("load_trace") = load trace, Some("submit_comment") = submit
     fn handle_key(&mut self, code: KeyCode) -> Option<&'static str> {
+        // Fullscreen span viewer mode
+        if let Some(ref mut viewer) = self.span_viewer {
+            match code {
+                KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('q') => {
+                    self.span_viewer = None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    viewer.scroll = viewer.scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    viewer.scroll = viewer.scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown | KeyCode::Char('d') => {
+                    viewer.scroll = viewer.scroll.saturating_add(10);
+                }
+                KeyCode::PageUp | KeyCode::Char('u') => {
+                    viewer.scroll = viewer.scroll.saturating_sub(10);
+                }
+                KeyCode::Char('g') => {
+                    viewer.scroll = 0;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         // Attribute picker mode
         if let Some(ref mut picker) = self.attr_picker {
             match code {
@@ -585,6 +634,9 @@ impl App {
                 if self.tab == Tab::Traces && self.table_state.selected().is_some() {
                     self.open_attr_picker();
                 }
+            }
+            KeyCode::Char('v') => {
+                self.open_span_viewer();
             }
             KeyCode::Char('c') => {
                 if self.tab == Tab::Detail {
@@ -887,6 +939,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_footer(frame, chunks[2], app);
+
+    // Fullscreen span viewer overlays everything
+    if let Some(ref viewer) = app.span_viewer {
+        draw_span_viewer(frame, frame.area(), viewer);
+    }
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -1759,11 +1816,170 @@ fn draw_comments(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_span_viewer(frame: &mut Frame, area: Rect, viewer: &SpanViewer) {
+    let span = &viewer.span;
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled("trace_id:   ", Style::default().fg(Color::DarkGray)),
+        Span::raw(span.trace_id.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("span_id:    ", Style::default().fg(Color::DarkGray)),
+        Span::raw(span.span_id.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("parent:     ", Style::default().fg(Color::DarkGray)),
+        Span::raw(
+            span.parent_span_id
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("service:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            span.service.clone(),
+            Style::default().fg(service_color(&span.service)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("operation:  ", Style::default().fg(Color::DarkGray)),
+        Span::raw(span.operation.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("status:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            span.status.clone(),
+            Style::default().fg(status_color(&span.status)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("duration:   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.2}ms", span.duration_ms),
+            Style::default().fg(duration_color(span.duration_ms)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("start_time: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(span.start_time.clone()),
+    ]));
+
+    let render_value = |v: &Value| -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            Value::Object(_) | Value::Array(_) => {
+                serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+            }
+            other => other.to_string(),
+        }
+    };
+
+    if let Some(obj) = span.attributes.as_object() {
+        if !obj.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "── Attributes ──",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+            let mut keys: Vec<&String> = obj.keys().collect();
+            keys.sort();
+            for k in keys {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{k}:"),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )]));
+                let val = render_value(&obj[k]);
+                for vline in val.split('\n') {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::raw(vline.to_string()),
+                    ]));
+                }
+            }
+        }
+    }
+
+    if let Some(events) = span.events.as_array() {
+        if !events.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "── Events ──",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for evt in events {
+                let name = evt["name"].as_str().unwrap_or("-");
+                let ts = evt["timestamp"].as_str().unwrap_or("");
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("[{name}] "),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(ts.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+                if let Some(attrs) = evt["attributes"].as_object() {
+                    let mut keys: Vec<&String> = attrs.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(format!("{k}:"), Style::default().fg(Color::Yellow)),
+                        ]));
+                        let val = render_value(&attrs[k]);
+                        for vline in val.split('\n') {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::raw(vline.to_string()),
+                            ]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let title = format!(
+        " Span Detail │ {} │ {} │ v/esc:close  j/k:scroll  u/d:page  g:top ",
+        span.service, span.operation
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    frame.render_widget(Clear, area);
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((viewer.scroll, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(ref err) = app.last_error {
         Line::from(vec![
             Span::styled(" ERROR: ", Style::default().fg(Color::Red).bold()),
             Span::styled(err, Style::default().fg(Color::Red)),
+        ])
+    } else if app.span_viewer.is_some() {
+        Line::from(vec![
+            Span::styled(" v/esc", Style::default().fg(Color::Cyan)),
+            Span::raw(":close  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":scroll  "),
+            Span::styled("u/d", Style::default().fg(Color::Cyan)),
+            Span::raw(":page  "),
+            Span::styled("g", Style::default().fg(Color::Cyan)),
+            Span::raw(":top  "),
         ])
     } else if app.attr_picker.is_some() {
         Line::from(vec![
@@ -1796,6 +2012,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(":back  "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(":navigate  "),
+            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::raw(":view  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(":comment  "),
         ])
@@ -1847,6 +2065,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             },
             if app.tab == Tab::Traces && app.table_state.selected().is_some() {
                 Span::raw(":columns  ")
+            } else {
+                Span::raw("")
+            },
+            if app.tab == Tab::Traces && app.table_state.selected().is_some() {
+                Span::styled("v", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
+            if app.tab == Tab::Traces && app.table_state.selected().is_some() {
+                Span::raw(":view  ")
             } else {
                 Span::raw("")
             },
