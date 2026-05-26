@@ -1,262 +1,215 @@
 #!/usr/bin/env python3
-"""Generate the animated tael banner SVG.
+"""Generate the tael banner SVG — an animated trace flamegraph.
 
-Same recipe as the palimpsest banner: matrix glyph rain, a scrolling live
-metric stream with a pulsing tracker, a typed shell command, and cycling
-telemetry log lines — themed teal for `tael`.
+What it depicts is what tael ingests: a single distributed trace
+(OTLP spans) for an AI-agent request, laid out as an icicle flamegraph
+(root on top, children nested below, x-axis = wall-clock time). A reveal
+sweep replays the trace left-to-right behind a playhead; the hot
+`gen_ai.chat` path glows; a time ruler frames the whole 4.2s trace.
 
     python3 .github/gen-banner.py > .github/tael-banner.svg
 """
-import math
-import random
-
-random.seed(7701)  # tael's REST port — deterministic output
 
 W, H = 1200, 360
-
-# --- teal palette --------------------------------------------------------
-PRIMARY = "#2dd4bf"   # tael teal
-BRIGHT = "#5eead4"    # highlighted glyph / caret
-GLYPH_DIM = "#115e54" # trailing rain glyphs
-LOG_FILL = "#3f8a7d"
-SUB_FILL = "#7fd8c9"
-
 MONO = ("'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', "
         "'DejaVu Sans Mono', Menlo, Consolas, monospace")
 
-# glyphs: terminal punctuation + greek + otel/trace flavor
-GLYPHS = list("0123456789abcdefxABCDEF<>{}[]:;=~/\\|+-.•·→↳⎯στλμπσΔΣΩ")
+# flamegraph geometry
+GX, GW = 60, 1080          # left edge, total width
+GTOP = 170                 # top of row 0
+ROW = 30                   # row pitch
+BAR = 25                   # bar height
+GAP = 2                    # rounded-corner radius / inset
+TRACE_MS = 4200            # total trace duration -> maps to GW
+
+# palette: teal base, warm hot-path (a flamegraph that stays on-brand)
+COL = {
+    "http":  "#2dd4bf",    # tael teal
+    "db":    "#22d3ee",    # cyan
+    "cache": "#34d399",    # green
+    "cpu":   "#4ade80",    # lime
+    "ai":    "#fbbf24",    # amber  (LLM / hot path)
+    "ai_hot":"#fb923c",    # orange (inference)
+    "err":   "#f87171",    # red    (retry / error)
+}
+TEXT_ON_BAR = "#04201b"
+CYCLE = 6.0                # seconds per replay loop
+
+
+# A span = (label, duration_ms, kind, [children], hot?)
+def span(label, ms, kind, children=None, hot=False):
+    return {"label": label, "ms": ms, "kind": kind,
+            "kids": children or [], "hot": hot}
+
+TRACE = span("POST /v1/agent/run", TRACE_MS, "http", [
+    span("auth.verify", 180, "cpu"),
+    span("db.query orders", 760, "db", [
+        span("pg.connect", 120, "db"),
+        span("pg.exec SELECT", 540, "db"),
+    ]),
+    span("gen_ai.chat claude-opus-4", 2600, "ai", [
+        span("build_prompt", 140, "cpu"),
+        span("inference", 2200, "ai_hot", [
+            span("decode tokens", 1500, "ai_hot"),
+        ], hot=True),
+        span("stream_response", 160, "ai"),
+    ], hot=True),
+    span("tools.exec", 360, "cpu", [
+        span("http.fetch · retry", 300, "err"),
+    ]),
+    span("cache.set", 90, "cache"),
+])
+
+
+def layout(node, x, w, depth, out, hot_rects):
+    """Recursively emit span rects; collect hot ones for the glow pass."""
+    y = GTOP + depth * ROW
+    fill = COL[node["kind"]]
+    rx = x + GAP
+    rw = max(0, w - GAP)
+    rect = (f'      <rect x="{rx:.1f}" y="{y}" width="{rw:.1f}" height="{BAR}" '
+            f'rx="2.5" fill="{fill}"/>')
+    out.append(rect)
+    if node["hot"]:
+        hot_rects.append((rx, y, rw))
+
+    # label if the bar is wide enough to hold a few chars
+    if rw > 56:
+        max_chars = int((rw - 14) / 7.3)
+        txt = node["label"]
+        if len(txt) > max_chars:
+            txt = txt[:max(1, max_chars - 1)] + "…"
+        out.append(
+            f'      <text x="{rx + 7:.1f}" y="{y + 17}" fill="{TEXT_ON_BAR}" '
+            f'font-family="{MONO}" font-size="12" font-weight="600">{esc(txt)}</text>'
+        )
+
+    # children laid out left-aligned within this span's time range
+    scale = w / node["ms"]
+    cx = x
+    for kid in node["kids"]:
+        cw = kid["ms"] * scale
+        layout(kid, cx, cw, depth + 1, out, hot_rects)
+        cx += cw
+
 
 def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def rain_columns():
+def time_ruler():
+    """Faint vertical gridlines + second labels across the trace."""
     out = []
-    n_cols = 43
-    step_x = W / n_cols
-    rows = 32          # glyphs per column (covers 360 + 330 scroll)
-    for c in range(n_cols):
-        x = round(8 + c * step_x, 1)
-        dur = round(random.uniform(3.4, 6.2), 2)
-        delay = round(-random.uniform(0, dur), 2)
-        bright_at = random.randrange(rows)   # which glyph leads the trail
-        tspans = []
-        for r in range(rows):
-            y = r * 22
-            g = random.choice(GLYPHS)
-            if r == bright_at:
-                fill, op = BRIGHT, "1.0"
-            else:
-                # fade ramp behind the bright head
-                d = (r - bright_at) % rows
-                op = round(max(0.04, 0.9 - d * 0.07), 3)
-                fill = GLYPH_DIM
-            tspans.append(
-                f'<tspan x="{x}" y="{y}" fill="{fill}" '
-                f'fill-opacity="{op}">{esc(g)}</tspan>'
-            )
+    px_per_ms = GW / TRACE_MS
+    bottom = GTOP + 5 * ROW - (ROW - BAR)   # a touch below deepest row
+    sec = 0
+    while sec * 1000 <= TRACE_MS:
+        x = GX + sec * 1000 * px_per_ms
         out.append(
-            f'    <g style="animation: rain {dur}s linear {delay}s infinite;">'
-            f'<text class="glyphs">{"".join(tspans)}</text></g>'
+            f'    <line x1="{x:.1f}" y1="{GTOP - 12}" x2="{x:.1f}" y2="{bottom}" '
+            f'stroke="#2dd4bf" stroke-opacity="0.08" stroke-width="1"/>'
         )
+        out.append(
+            f'    <text x="{x + 4:.1f}" y="{GTOP - 16}" fill="#3f8a7d" '
+            f'font-family="{MONO}" font-size="11">{sec}s</text>'
+        )
+        sec += 1
     return "\n".join(out)
 
 
-# --- live metric stream --------------------------------------------------
-BASE_Y, BAND = 191.0, 9.0   # graph sits in the 177..205 band
-MARKER_X = 1050.0
-SCROLL = 900.0
-
-def metric_points():
-    # smooth-ish random walk, enough points to scroll 900px and wrap
-    pts, y = [], BASE_Y
-    for i in range(94):
-        y += random.uniform(-3.2, 3.2)
-        y = max(BASE_Y - BAND, min(BASE_Y + BAND, y))
-        pts.append((150 + i * 20, round(y, 1)))
-    return pts
-
-def y_at(pts, data_x):
-    # nearest sample's y for the point currently under the marker
-    best = min(pts, key=lambda p: abs(p[0] - data_x))
-    return best[1]
-
-def metric_path(pts):
-    line = "M " + " L ".join(f"{x} {y}" for x, y in pts)
-    last_x = pts[-1][0]
-    area = line + f" L {last_x} 205 L 150 205 Z"
-    return area, line
-
-def track_keyframes(pts):
-    frames = 46
-    rows = []
-    for k in range(frames):
-        t = k / (frames - 1)
-        data_x = MARKER_X + SCROLL * t
-        pct = round(t * 100, 3)
-        rows.append(f"        {pct}% {{ transform: translateY({y_at(pts, data_x)}px); }}")
-    return "\n".join(rows)
-
-
-# --- typed shell command + caret ----------------------------------------
-SUBTITLE = "tael query traces --status error"
-SUB_X = 400
-SUB_LEN = 408           # textLength in px
-CYCLE = 6.0             # seconds
-TYPE_FRAC = 0.58        # fraction of cycle spent typing
-
-def typed_clip_and_caret():
-    steps = len(SUBTITLE)
-    char_w = SUB_LEN / steps
-    # discrete keyTimes for the reveal, then hold
-    kt, widths, xs = [], [], []
-    for i in range(steps + 1):
-        t = (i / steps) * TYPE_FRAC
-        kt.append(round(t, 5))
-        widths.append(round(i * char_w, 1))
-        xs.append(round(SUB_X + i * char_w, 1))
-    kt.append(1.0); widths.append(widths[-1]); xs.append(xs[-1])
-    kt_s = ";".join(str(v) for v in kt)
-    w_s = ";".join(str(v) for v in widths)
-    x_s = ";".join(str(v) for v in xs)
-
-    clip = (
-        f'    <clipPath id="subClip"><rect x="{SUB_X}" y="258" '
-        f'width="{SUB_LEN}" height="28">'
-        f'<animate attributeName="width" dur="{CYCLE}s" repeatCount="indefinite" '
-        f'calcMode="discrete" keyTimes="{kt_s}" values="{w_s}"/></rect></clipPath>'
-    )
-    caret = (
-        f'  <rect x="{xs[-1]}" y="265" width="11" height="19" rx="1" fill="{BRIGHT}">\n'
-        f'    <animate attributeName="x" dur="{CYCLE}s" repeatCount="indefinite" '
-        f'calcMode="discrete" keyTimes="{kt_s}" values="{x_s}"/>\n'
-        f'    <animate attributeName="opacity" dur="{CYCLE}s" repeatCount="indefinite" '
-        f'calcMode="discrete" keyTimes="0;0.58;0.64;0.7;0.76;0.82;0.88;0.94;1" '
-        f'values="1;1;0;1;0;1;0;1;1"/>\n'
-        f'  </rect>'
-    )
-    return clip, caret
-
-
-LOGS = [
-    "ingest OTLP :: 1,204 spans → tiered store @ block 0x3F",
-    "gen_ai.completion 847 tokens · $0.0123 · claude-opus-4",
-    "query traces WHERE status=error · 38ms · 12 hits",
-]
-
-
 def build():
-    pts = metric_points()
-    area, line = metric_path(pts)
-    sub_clip, caret = typed_clip_and_caret()
+    rects, hot = [], []
+    layout(TRACE, GX, GW, 0, rects, hot)
+    spans_svg = "\n".join(rects)
 
-    log_styles = []
-    nlogs = len(LOGS)
-    win = 100.0 / nlogs
-    for i, txt in enumerate(LOGS):
-        a = i * (100.0 / nlogs)
-        log_styles.append(
-            f"      @keyframes log{i} {{ 0%,{a:.1f}% {{opacity:0}} "
-            f"{a+4:.1f}%,{a+win-6:.1f}% {{opacity:.5}} "
-            f"{a+win-2:.1f}%,100% {{opacity:0}} }}"
-        )
-    log_kf = "\n".join(log_styles)
-    log_dur = 9.6
-    log_texts = "\n".join(
-        f'  <text x="600" y="338" text-anchor="middle" class="logline" '
-        f'style="animation: log{i} {log_dur}s ease-in-out infinite;">{txt}</text>'
-        for i, txt in enumerate(LOGS)
+    # glow overlays for the hot (LLM) path — gentle pulse
+    glow = "\n".join(
+        f'    <rect class="hot" x="{x:.1f}" y="{y}" width="{w:.1f}" height="{BAR}" '
+        f'rx="2.5" fill="none" stroke="#ffe7a0" stroke-width="1.5"/>'
+        for x, y, w in hot
     )
+
+    bottom = GTOP + 5 * ROW - (ROW - BAR)
+    ph_top, ph_bot = GTOP - 12, bottom
+
+    # reveal mask + playhead keyframes (replay the trace, then hold, then loop)
+    # width: grow 0->GW over 0..62%, hold to 93%, snap reset under cover of fade
+    mask_kt = "0;0.62;0.93;1"
+    mask_w  = f"0;{GW};{GW};0"
+    ph_x    = f"{GX};{GX+GW};{GX+GW};{GX}"
 
     return f'''<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="{H}" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#02100e"/>
-      <stop offset="0.55" stop-color="#04130f"/>
-      <stop offset="1" stop-color="#061712"/>
+      <stop offset="0.5" stop-color="#04130f"/>
+      <stop offset="1" stop-color="#061a14"/>
     </linearGradient>
-    <radialGradient id="halo" cx="600" cy="132" r="430" gradientUnits="userSpaceOnUse" gradientTransform="matrix(1 0 0 0.34 0 87)">
-      <stop offset="0" stop-color="#000000" stop-opacity="0.92"/>
-      <stop offset="0.6" stop-color="#000000" stop-opacity="0.72"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    <radialGradient id="glowbg" cx="600" cy="245" r="640" gradientUnits="userSpaceOnUse" gradientTransform="matrix(1 0 0 0.42 0 142)">
+      <stop offset="0" stop-color="#0c3b32" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#0c3b32" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="vignette" cx="600" cy="180" r="720" gradientUnits="userSpaceOnUse">
+    <radialGradient id="vignette" cx="600" cy="180" r="760" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#000" stop-opacity="0"/>
-      <stop offset="0.72" stop-color="#000" stop-opacity="0"/>
-      <stop offset="1" stop-color="#000" stop-opacity="0.7"/>
+      <stop offset="0.7" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.6"/>
     </radialGradient>
-    <linearGradient id="metricArea" x1="0" y1="177" x2="0" y2="205" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{PRIMARY}" stop-opacity="0.34"/>
-      <stop offset="1" stop-color="{PRIMARY}" stop-opacity="0"/>
+    <linearGradient id="phGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7cf2e0" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#7cf2e0" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7cf2e0" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="fadeGrad" x1="150" y1="0" x2="1050" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
-      <stop offset="0.5" stop-color="#fff" stop-opacity="1"/>
-      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
-    </linearGradient>
-    <mask id="metricFade"><rect x="150" y="177" width="900" height="28" fill="url(#fadeGrad)"/></mask>
-    <clipPath id="metricClip"><rect x="150" y="177" width="900" height="28"/></clipPath>
-    <clipPath id="rainClip"><rect x="0" y="0" width="{W}" height="{H}"/></clipPath>
-{sub_clip}
+
+    <clipPath id="reveal">
+      <rect x="{GX}" y="{GTOP - 16}" width="0" height="200">
+        <animate attributeName="width" dur="{CYCLE}s" repeatCount="indefinite"
+                 keyTimes="{mask_kt}" values="{mask_w}"/>
+      </rect>
+    </clipPath>
 
     <style>
-      .glyphs {{ font-family: {MONO}; font-size: 19px; font-weight: 500; }}
-      .logline {{ font-family: {MONO}; font-size: 15px; fill: {LOG_FILL}; letter-spacing: 1px; opacity: 0; }}
-      @keyframes rain {{ from {{ transform: translateY(-330px); }} to {{ transform: translateY(0); }} }}
-      @keyframes scrollx {{ from {{ transform: translateX(0); }} to {{ transform: translateX(-{int(SCROLL)}px); }} }}
-      @keyframes track {{
-{track_keyframes(pts)}
-      }}
-      @keyframes pulse {{ 0%,100% {{ opacity: .55; transform: scale(1); }} 50% {{ opacity: 1; transform: scale(1.7); }} }}
-      .metric {{ animation: scrollx 7s linear infinite; }}
-      .track {{ animation: track 7s linear infinite; }}
-      .pulse {{ transform-box: fill-box; transform-origin: center; animation: pulse 1.6s ease-in-out infinite; }}
-{log_kf}
+      @keyframes hotpulse {{ 0%,100% {{ opacity:.25 }} 50% {{ opacity:.9 }} }}
+      .hot {{ animation: hotpulse 1.7s ease-in-out infinite; }}
+      @keyframes fadeloop {{ 0% {{opacity:0}} 5% {{opacity:1}} 90% {{opacity:1}} 99%,100% {{opacity:0}} }}
+      .replay {{ animation: fadeloop {CYCLE}s linear infinite; }}
       @media (prefers-reduced-motion: reduce) {{
-        .glyphs, .metric, .track, .pulse, .logline {{ animation: none !important; }}
-        .track {{ transform: translateY({pts[0][1]}px); }}
-        .logline {{ opacity: .18; }}
+        .hot {{ animation: none !important; opacity:.6 }}
+        .replay {{ animation: none !important; opacity:1 }}
       }}
     </style>
   </defs>
 
   <rect width="{W}" height="{H}" fill="url(#bg)"/>
+  <rect width="{W}" height="{H}" fill="url(#glowbg)"/>
 
-  <!-- matrix glyph rain: terminal punctuation x greek x trace glyphs -->
-  <g clip-path="url(#rainClip)" opacity="0.6">
-{rain_columns()}
-  </g>
+  <!-- wordmark + tagline -->
+  <text x="{GX}" y="96" fill="#2dd4bf" font-family="{MONO}" font-size="78" font-weight="700" letter-spacing="3">tael</text>
+  <text x="{GX + 4}" y="126" fill="#5ec8b8" font-family="{MONO}" font-size="16" letter-spacing="0.5">AI-agent-native observability · OTLP traces · logs · metrics</text>
 
-  <!-- dark halo lifts the wordmark off the rain -->
-  <rect width="{W}" height="{H}" fill="url(#halo)"/>
+  <!-- trace caption (top-right) -->
+  <text x="{GX + GW}" y="96" text-anchor="end" fill="#3f8a7d" font-family="{MONO}" font-size="13">trace 7f3a…c1 · {TRACE_MS/1000:.1f}s · 12 spans</text>
+  <text x="{GX + GW}" y="126" text-anchor="end" fill="#fbbf24" font-family="{MONO}" font-size="13" opacity="0.85">▮ gen_ai.chat · 847 tok · $0.0123</text>
 
-  <!-- the wordmark -->
-  <text x="600" y="132" text-anchor="middle" fill="{PRIMARY}" font-family="{MONO}" font-size="104" font-weight="700" letter-spacing="6">tael</text>
+  <!-- time ruler -->
+{time_ruler()}
 
-  <!-- live metric stream: scrolls left, fades out on the left half -->
-  <g mask="url(#metricFade)">
-    <g clip-path="url(#metricClip)">
-      <g class="metric">
-        <path d="{area}" fill="url(#metricArea)"/>
-        <path d="{line}" fill="none" stroke="{PRIMARY}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      </g>
+  <!-- the flamegraph: drawn once, revealed by the sweep, looping -->
+  <g class="replay">
+    <g clip-path="url(#reveal)">
+{spans_svg}
+{glow}
     </g>
-  </g>
-  <line x1="{int(MARKER_X)}" y1="177" x2="{int(MARKER_X)}" y2="205" stroke="{BRIGHT}" stroke-opacity="0.3" stroke-width="1"/>
-  <g class="track">
-    <circle cx="{int(MARKER_X)}" cy="0" r="7" fill="{BRIGHT}" opacity="0.2"/>
-    <circle class="pulse" cx="{int(MARKER_X)}" cy="0" r="3.2" fill="{BRIGHT}"/>
-  </g>
 
-  <!-- typed shell command + live block caret -->
-  <g clip-path="url(#subClip)">
-    <text x="{SUB_X}" y="280" text-anchor="start" textLength="{SUB_LEN}" lengthAdjust="spacingAndGlyphs" fill="{SUB_FILL}" font-family="{MONO}" font-size="19">{SUBTITLE}</text>
+    <!-- playhead riding the reveal edge -->
+    <rect x="{GX}" y="{ph_top}" width="2" height="{ph_bot - ph_top}" fill="url(#phGrad)">
+      <animate attributeName="x" dur="{CYCLE}s" repeatCount="indefinite"
+               keyTimes="{mask_kt}" values="{ph_x}"/>
+    </rect>
+    <circle cx="{GX}" cy="{ph_top}" r="3.5" fill="#7cf2e0">
+      <animate attributeName="cx" dur="{CYCLE}s" repeatCount="indefinite"
+               keyTimes="{mask_kt}" values="{ph_x}"/>
+    </circle>
   </g>
-{caret}
-
-  <!-- cycling telemetry log -->
-{log_texts}
 
   <rect width="{W}" height="{H}" fill="url(#vignette)"/>
 </svg>
