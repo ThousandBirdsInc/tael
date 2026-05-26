@@ -8,12 +8,24 @@ keywords.workspace = true
 categories.workspace = true
 description = "AI-agent-native observability — a single `tael` binary that runs the OTLP ingest/storage server (`tael serve`) and queries, visualizes, and annotates traces"
 
+# `cargo binstall tael-cli` downloads a prebuilt binary from the GitHub Release
+# for the matching `v{version}` tag instead of compiling from source. Archive
+# layout and tag naming are produced by .github/workflows/release.yml.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/tael-cli-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "tael-cli-v{ version }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/tael-cli-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [[bin]]
 name = "tael"
 path = "src/main.rs"
 
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.4.0" }
+tael-server = { path = "../tael-server", version = "0.4.1" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

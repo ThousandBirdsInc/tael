@@ -1,0 +1,98 @@
+name: release
+
+# Build prebuilt `tael` binaries on every `v*` tag and attach them to the
+# matching GitHub Release. This is what makes `cargo binstall tael-cli` fast:
+# binstall downloads one of these archives instead of compiling the bundled
+# DuckDB C++ amalgamation (~1.4 GB of object code) from source.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # Fail fast if the pushed tag doesn't match the workspace version, so we never
+  # publish a `v{version}` release whose binaries binstall can't resolve (the
+  # binstall URL is derived from the crate version, not the tag).
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag cargo=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not match workspace version '$version' in Cargo.toml"
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux on older glibc (22.04) for broader binary compatibility.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          # macOS: Intel (macos-13) and Apple Silicon (macos-14), both native.
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Build only the CLI crate (it pulls in tael-server). Native target on
+      # each runner, so the bundled DuckDB C++ compiles with the host toolchain.
+      - name: Build
+        run: cargo build --release --locked -p tael-cli --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stage="tael-cli-v${version}-${{ matrix.target }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/tael" "$stage/"
+          cp README.md "$stage/" 2>/dev/null || true
+          tar czf "$stage.tar.gz" "$stage"
+          echo "ASSET=$stage.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          $stage = "tael-cli-v$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tael.exe" $stage
+          Copy-Item README.md $stage -ErrorAction SilentlyContinue
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          "ASSET=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
