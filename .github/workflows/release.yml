@@ -42,11 +42,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          # macOS: Intel (macos-13) and Apple Silicon (macos-14), both native.
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # Both macOS targets build on the Apple-Silicon runner (macos-14):
+          # aarch64 natively, x86_64 via cross-compile. macos-13 (Intel) runners
+          # are scarce and can queue for hours, so we avoid them.
           - os: macos-14
             target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
           # No Windows target: the WAL dependency (walrus-rust) uses unix-only
           # positioned file I/O (std::os::unix::fs::FileExt), so tael does not
           # build on Windows — via this workflow or `cargo install`.
