@@ -31,6 +31,9 @@ No dashboards. No browsers. Just a single `tael` binary — server and client in
 
 ## Installation
 
+Supported on macOS (Intel + Apple Silicon) and Linux (x86_64 + aarch64).
+Windows is not supported — a dependency in the WAL uses unix-only file I/O.
+
 ```bash
 # Fastest — download a prebuilt `tael` binary (no compilation)
 cargo binstall tael-cli

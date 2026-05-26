@@ -47,8 +47,9 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # No Windows target: the WAL dependency (walrus-rust) uses unix-only
+          # positioned file I/O (std::os::unix::fs::FileExt), so tael does not
+          # build on Windows — via this workflow or `cargo install`.
     steps:
       - uses: actions/checkout@v4
 
@@ -66,8 +67,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p tael-cli --target ${{ matrix.target }}
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -77,18 +77,6 @@ jobs:
           cp README.md "$stage/" 2>/dev/null || true
           tar czf "$stage.tar.gz" "$stage"
           echo "ASSET=$stage.tar.gz" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
-          $stage = "tael-cli-v$version-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/tael.exe" $stage
-          Copy-Item README.md $stage -ErrorAction SilentlyContinue
-          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
-          "ASSET=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
