@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec cargo run --bin tael-server "$@"
+exec cargo run --bin tael -- serve "$@"

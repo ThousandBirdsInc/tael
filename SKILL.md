@@ -5,7 +5,7 @@ description: Debug running code by querying traces, logs, and metrics from the l
 
 # tael — agent-native observability
 
-`tael` is a local-first observability CLI/server that ingests OpenTelemetry (OTLP traces, logs, metrics) and Prometheus remote-write, stores it in DuckDB, and exposes it through a small CLI designed for LLM agents. Use it instead of a web UI when the user needs answers from telemetry data.
+`tael` is a local-first observability tool — server and client in one `tael` binary — that ingests OpenTelemetry (OTLP traces, logs, metrics) and Prometheus remote-write, stores it in a purpose-built tiered engine (hot LSM tier + Parquet cold tier; a DuckDB backend is available via `--storage duckdb`), and exposes it through a small CLI designed for LLM agents. Use it instead of a web UI when the user needs answers from telemetry data.
 
 ## When to invoke this skill
 
@@ -34,7 +34,8 @@ Do not invoke for: questions about the tael codebase itself (read code normally)
 
 ## Prerequisites
 
-- `tael` must be on `PATH`. If the command is missing, tell the user to `cargo install tael-cli` or build from this repo with `cargo build --release`.
+- `tael` must be on `PATH`. If the command is missing, tell the user to `cargo install tael-cli` (one binary, server included) or build from this repo with `cargo build --release`.
+- The server runs from the same binary: `tael serve` starts OTLP ingest (gRPC :4317) and the REST API (:7701). If `server status` fails, the user likely hasn't started it.
 - Default server URL is `http://127.0.0.1:7701`. If the user's server is elsewhere, pass `--server <url>` on every call.
 - Default output is JSON. **Always pass `--format json` explicitly** so you get a stable shape, even though it's the default — it makes your intent clear and protects against config changes.
 
@@ -77,6 +78,8 @@ Key filters (all optional):
 - `--operation <substr>` — substring match on span operation/route
 - `--min-duration <dur>` / `--max-duration <dur>` — `100ms`, `1s`, bare number = ms
 - `--status ok|error|unset`
+- `--attribute key=value` — exact span-attribute match; repeatable and ANDed (e.g. `--attribute http.method=GET --attribute http.status_code=500`)
+- `--text <query>` — full-text search over LLM prompt/completion payloads (e.g. `--text "rate limit"`); tael-backend storage only
 - `--last <dur>` — `5m`, `1h`, `24h`, `7d`
 - `--limit <n>` — default 100
 
@@ -177,6 +180,19 @@ tael comment add <trace_id> "root cause: N+1 query in user loader" --author clau
 ```
 
 Don't annotate every trace — only when you've done real investigation that would otherwise have to be redone.
+
+### SQL escape hatch (advanced)
+
+When the structured commands can't express the cut you need — a `GROUP BY` the
+CLI doesn't offer, a join across signals, an aggregate over attributes — drop to
+read-only SQL over the telemetry tables (`spans`, `logs`, `metrics`,
+`trace_comments`):
+
+```bash
+tael --format json query sql "SELECT service, COUNT(*) AS n FROM spans WHERE status = 'error' GROUP BY service ORDER BY n DESC"
+```
+
+Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected. Reach for this only after the purpose-built commands above; they're faster to write and harder to get wrong.
 
 ## Instrumenting apps to export to tael
 
@@ -297,9 +313,11 @@ If the service doesn't appear, the usual culprits are: wrong endpoint, wrong pro
 
 **Log body search is substring, not regex.** `--body-contains "5\d\d"` will not do what you think.
 
-**Attribute filtering on traces is not implemented.** You can filter by service/operation/duration/status but not by span attributes. If you need attribute filtering, pull a broader set and filter the JSON yourself.
+**Attribute filtering is exact-match only.** `--attribute key=value` filters spans by attribute (repeatable, ANDed), but matches the whole value exactly — no substring or regex on attribute values. For partial matches, pull a broader set and filter the JSON yourself.
 
-**Single-node DuckDB.** Keep `--last` windows narrow (minutes to hours) when the user's server is busy. Scanning millions of rows is slow.
+**`--text` search needs the tael-backend storage.** Full-text payload search is served by the default engine's index; under `--storage duckdb` it returns nothing. (LLM prompt/completion text is the only thing indexed — not span attributes or log bodies yet.)
+
+**Single-node engine.** tael runs as one node: reads scan the in-memory/LSM hot tier for recent data and Parquet for older data. Keep `--last` windows narrow (minutes to hours) when the server is busy — wide scans over millions of rows are slow.
 
 ## Output shape cheat sheet
 
@@ -310,6 +328,7 @@ get trace        → {"trace_id", "span_count", "spans": [...]}
 query logs       → {"logs": [...], "count": N}
 query metrics    → {"metrics": [...], "count": N}                  (filter mode)
 query metrics    → {"query", "series": [...], "count": N}          (--query mode)
+query sql        → {"rows": [...], "count": N}
 comment list     → {"comments": [...], "count": N}
 summarize        → {"window_seconds", "traces", "top_services", "top_error_operations", "logs", "metrics"}
 anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}
