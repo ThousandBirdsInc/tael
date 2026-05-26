@@ -57,6 +57,7 @@ impl TaelClient {
         last: Option<&str>,
         limit: u32,
         attributes: &[(String, String)],
+        text: Option<&str>,
     ) -> Result<Value> {
         let mut params = vec![("limit", limit.to_string())];
         if let Some(s) = service {
@@ -80,6 +81,9 @@ impl TaelClient {
         for (k, v) in attributes {
             params.push(("attribute", format!("{k}={v}")));
         }
+        if let Some(t) = text {
+            params.push(("text", t.to_string()));
+        }
 
         let resp = self
             .http
@@ -91,6 +95,18 @@ impl TaelClient {
             .json::<Value>()
             .await?;
 
+        Ok(resp)
+    }
+
+    pub async fn query_sql(&self, query: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/sql", self.base_url))
+            .query(&[("q", query)])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
         Ok(resp)
     }
 

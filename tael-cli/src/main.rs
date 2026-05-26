@@ -138,6 +138,10 @@ enum QuerySignal {
         /// (e.g. --attribute http.method=GET --attribute http.status_code=500)
         #[arg(long = "attribute")]
         attribute: Vec<String>,
+        /// Full-text search over LLM prompt/completion payloads
+        /// (tael-backend storage only; e.g. --text "rate limit")
+        #[arg(long)]
+        text: Option<String>,
     },
     /// Search and filter metrics
     Metrics {
@@ -180,6 +184,13 @@ enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "100")]
         limit: u32,
+    },
+    /// Run a read-only SQL query over the telemetry tables
+    /// (spans, logs, metrics, trace_comments)
+    Sql {
+        /// The SQL query (SELECT/WITH only), e.g.
+        /// "SELECT service, COUNT(*) FROM spans GROUP BY service"
+        query: String,
     },
 }
 
@@ -255,6 +266,7 @@ async fn main() -> Result<()> {
                 last,
                 limit,
                 attribute,
+                text,
             } => {
                 commands::query::traces(
                     &client,
@@ -267,6 +279,7 @@ async fn main() -> Result<()> {
                     last,
                     limit,
                     attribute,
+                    text,
                 )
                 .await?;
             }
@@ -309,6 +322,9 @@ async fn main() -> Result<()> {
                     limit,
                 )
                 .await?;
+            }
+            QuerySignal::Sql { query } => {
+                commands::query::sql(&client, &cli.format, &query).await?;
             }
         },
         Commands::Get { resource } => match resource {

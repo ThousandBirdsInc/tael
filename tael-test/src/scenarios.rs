@@ -163,3 +163,46 @@ pub fn fast_burst() -> ExportTraceServiceRequest {
         resource_spans: vec![resource_spans("api-gateway", all_spans)],
     }
 }
+
+/// An LLM chat request instrumented with OpenTelemetry GenAI semantic
+/// conventions (`gen_ai.*`). Exercises the typed `LlmSpan` extraction path.
+pub fn llm_chat_request() -> ExportTraceServiceRequest {
+    let tid = trace_id();
+
+    let root = SpanSpec::new("POST /v1/chat", &tid)
+        .duration(1850)
+        .attr(str_attr("http.method", "POST"))
+        .attr(str_attr("http.route", "/v1/chat"))
+        .attr(int_attr("http.status_code", 200));
+    let root_sid = root.span_id.clone();
+
+    // The LLM call itself, following gen_ai.* conventions.
+    let llm = SpanSpec::new("chat anthropic", &tid)
+        .parent(&root_sid)
+        .offset(20)
+        .duration(1790)
+        .attr(str_attr("gen_ai.system", "anthropic"))
+        .attr(str_attr("gen_ai.operation.name", "chat"))
+        .attr(str_attr("gen_ai.request.model", "claude-opus-4-7"))
+        .attr(str_attr("gen_ai.response.model", "claude-opus-4-7"))
+        .attr(int_attr("gen_ai.usage.input_tokens", 1240))
+        .attr(int_attr("gen_ai.usage.output_tokens", 380))
+        .attr(str_attr("gen_ai.usage.cost", "0.0213"))
+        .attr(str_attr("gen_ai.request.temperature", "0.7"))
+        .attr(str_attr("gen_ai.response.finish_reasons", "end_turn"))
+        .attr(str_attr(
+            "gen_ai.prompt",
+            "You are a helpful assistant.\nUser: Summarize the OTLP spec.",
+        ))
+        .attr(str_attr(
+            "gen_ai.completion",
+            "OTLP is the OpenTelemetry wire protocol for traces, metrics, and logs.",
+        ));
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![
+            resource_spans("api-gateway", vec![root.build()]),
+            resource_spans("llm-proxy", vec![llm.build()]),
+        ],
+    }
+}

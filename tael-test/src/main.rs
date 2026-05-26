@@ -19,6 +19,7 @@ async fn main() -> Result<()> {
         ("error in payment service", scenarios::payment_error()),
         ("fan-out to downstream services", scenarios::fanout_request()),
         ("burst of fast requests", scenarios::fast_burst()),
+        ("LLM chat request (gen_ai.*)", scenarios::llm_chat_request()),
     ];
 
     for (name, request) in batches {

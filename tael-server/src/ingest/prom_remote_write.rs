@@ -15,7 +15,7 @@ use axum::{body::Bytes, http::StatusCode, response::IntoResponse};
 use chrono::{DateTime, Utc};
 use prost::Message;
 
-use crate::storage::DuckDbStore;
+use crate::storage::Store;
 use crate::storage::models::{MetricPoint, MetricType};
 
 // ── Minimal Prometheus remote-write proto ───────────────────────────
@@ -53,8 +53,8 @@ pub struct Sample {
 
 // ── Handler ─────────────────────────────────────────────────────────
 
-pub async fn handle_write(store: Arc<DuckDbStore>, body: Bytes) -> impl IntoResponse {
-    match decode_and_insert(&store, &body) {
+pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoResponse {
+    match decode_and_insert(store.as_ref(), &body) {
         Ok(count) => {
             tracing::debug!(metric_points = count, "ingested prom remote-write");
             StatusCode::NO_CONTENT.into_response()
@@ -70,7 +70,7 @@ pub async fn handle_write(store: Arc<DuckDbStore>, body: Bytes) -> impl IntoResp
     }
 }
 
-fn decode_and_insert(store: &DuckDbStore, body: &[u8]) -> Result<usize> {
+fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
     let mut decoder = snap::raw::Decoder::new();
     let decompressed = decoder
         .decompress_vec(body)

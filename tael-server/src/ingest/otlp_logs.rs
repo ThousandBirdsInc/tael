@@ -9,17 +9,22 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
 use tonic::{Request, Response, Status};
 
 use crate::log_bus::LogBus;
-use crate::storage::DuckDbStore;
 use crate::storage::models::{LogRecord, LogSeverity};
+use crate::storage::{BlobStore, Store};
+
+/// Log bodies larger than this are offloaded to the blob store (stack traces,
+/// dumped payloads). Tuned against real corpora later (design Open Q #7).
+const LOG_BODY_BLOB_THRESHOLD: usize = 8 * 1024;
 
 pub struct OtlpLogsService {
-    store: Arc<DuckDbStore>,
+    store: Arc<dyn Store>,
+    blobs: Arc<BlobStore>,
     bus: Arc<LogBus>,
 }
 
 impl OtlpLogsService {
-    pub fn new(store: Arc<DuckDbStore>, bus: Arc<LogBus>) -> Self {
-        Self { store, bus }
+    pub fn new(store: Arc<dyn Store>, blobs: Arc<BlobStore>, bus: Arc<LogBus>) -> Self {
+        Self { store, blobs, bus }
     }
 }
 
@@ -106,6 +111,20 @@ impl LogsService for OtlpLogsService {
                         }
                     }
 
+                    // Offload oversized bodies to the blob store, keeping only
+                    // the hash inline. Dedups repeated stack traces for free.
+                    let (body, body_sha256) = if body.len() > LOG_BODY_BLOB_THRESHOLD {
+                        match self.blobs.put(body.as_bytes()) {
+                            Ok(hash) => (String::new(), Some(hash)),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to store log body blob");
+                                (body, None)
+                            }
+                        }
+                    } else {
+                        (body, None)
+                    };
+
                     logs.push(LogRecord {
                         timestamp,
                         observed_timestamp,
@@ -116,6 +135,7 @@ impl LogsService for OtlpLogsService {
                         body,
                         service: service_name.clone(),
                         attributes,
+                        body_sha256,
                     });
                 }
             }

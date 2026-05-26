@@ -12,15 +12,15 @@ use opentelemetry_proto::tonic::metrics::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use crate::storage::DuckDbStore;
+use crate::storage::Store;
 use crate::storage::models::{MetricPoint, MetricType};
 
 pub struct OtlpMetricsService {
-    store: Arc<DuckDbStore>,
+    store: Arc<dyn Store>,
 }
 
 impl OtlpMetricsService {
-    pub fn new(store: Arc<DuckDbStore>) -> Self {
+    pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
 }

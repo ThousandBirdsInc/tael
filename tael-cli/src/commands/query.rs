@@ -27,6 +27,7 @@ pub async fn traces(
     last: Option<String>,
     limit: u32,
     attribute: Vec<String>,
+    text: Option<String>,
 ) -> Result<()> {
     let min_ms = min_duration.as_deref().and_then(parse_duration_ms);
     let max_ms = max_duration.as_deref().and_then(parse_duration_ms);
@@ -42,6 +43,7 @@ pub async fn traces(
             last.as_deref(),
             limit,
             &attributes,
+            text.as_deref(),
         )
         .await?;
 
@@ -118,5 +120,11 @@ pub async fn metrics(
         .await?;
 
     output::render(format, &result, output::print_metrics_table);
+    Ok(())
+}
+
+pub async fn sql(client: &TaelClient, format: &OutputFormat, query: &str) -> Result<()> {
+    let result = client.query_sql(query).await?;
+    output::render(format, &result, output::print_sql_rows);
     Ok(())
 }

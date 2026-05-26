@@ -15,6 +15,117 @@ pub struct Span {
     pub status: SpanStatus,
     pub attributes: HashMap<String, String>,
     pub events: Vec<SpanEvent>,
+    /// Span kind. `Llm` is a synthetic marker set when GenAI attributes are
+    /// detected during ingestion (see `ingest::otlp`). Defaults keep older
+    /// stored rows and existing call sites working.
+    #[serde(default)]
+    pub kind: SpanKind,
+    /// Typed LLM extension, present iff this span is an LLM call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmSpan>,
+}
+
+/// Span kind. Mirrors the OpenTelemetry `SpanKind`, plus a synthetic `Llm`
+/// variant that marks spans carrying a typed [`LlmSpan`] extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpanKind {
+    #[default]
+    Internal,
+    Server,
+    Client,
+    Producer,
+    Consumer,
+    Llm,
+}
+
+impl std::fmt::Display for SpanKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            SpanKind::Internal => "internal",
+            SpanKind::Server => "server",
+            SpanKind::Client => "client",
+            SpanKind::Producer => "producer",
+            SpanKind::Consumer => "consumer",
+            SpanKind::Llm => "llm",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl SpanKind {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "server" => SpanKind::Server,
+            "client" => SpanKind::Client,
+            "producer" => SpanKind::Producer,
+            "consumer" => SpanKind::Consumer,
+            "llm" => SpanKind::Llm,
+            _ => SpanKind::Internal,
+        }
+    }
+}
+
+/// High-level LLM operation, from `gen_ai.operation.name`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmOperation {
+    #[default]
+    Chat,
+    Completion,
+    Embedding,
+    Tool,
+    Other,
+}
+
+impl LlmOperation {
+    /// Map an OpenTelemetry GenAI `gen_ai.operation.name` value.
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "chat" => LlmOperation::Chat,
+            "text_completion" | "completion" => LlmOperation::Completion,
+            "embeddings" | "embedding" => LlmOperation::Embedding,
+            "execute_tool" | "tool" => LlmOperation::Tool,
+            _ => LlmOperation::Other,
+        }
+    }
+}
+
+/// Typed extension for LLM spans. Well-known GenAI attributes are flattened
+/// into these fields; the unbounded tail stays in `Span::attributes`. Prompt
+/// and completion payloads are content-addressed blobs referenced by hash
+/// (populated in a later phase); only the hashes live here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmSpan {
+    pub provider: String,
+    pub model: String,
+    pub operation: LlmOperation,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+
+    /// Time to first token (streaming responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    /// Mean inter-token latency (streaming responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inter_token_ms: Option<f64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_sha256: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +186,21 @@ pub struct TraceQuery {
     /// Keys with characters outside `[A-Za-z0-9._\-:/]` are rejected at the storage layer.
     #[serde(default)]
     pub attributes: Vec<(String, String)>,
+    /// Full-text query over LLM prompt/completion payloads (Tantivy syntax).
+    /// Only honored by the `tael-backend` storage engine; ignored by DuckDB
+    /// (which doesn't retain payload text).
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Per-service rollup returned by `Store::list_services`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub span_count: i64,
+    pub trace_count: i64,
+    pub avg_duration_ms: f64,
+    pub error_rate: f64,
 }
 
 // ── Log models ──────────────────────────────────────────────────────
@@ -87,9 +213,16 @@ pub struct LogRecord {
     pub span_id: Option<String>,
     pub severity: LogSeverity,
     pub severity_text: String,
+    /// The log body. For oversized bodies this is emptied at ingestion and the
+    /// content moved to the blob store, referenced by [`Self::body_sha256`].
     pub body: String,
     pub service: String,
     pub attributes: HashMap<String, String>,
+    /// Set when the body was offloaded to the content-addressed blob store
+    /// (large bodies, e.g. stack traces). Resolve via the blob store to get
+    /// the original text. `None` for inline bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

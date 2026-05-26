@@ -1,5 +1,6 @@
 /target
 /data
 /wal_files
+wal_files/
 *.duckdb
 *.duckdb.wal

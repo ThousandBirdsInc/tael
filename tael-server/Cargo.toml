@@ -32,6 +32,12 @@ uuid.workspace = true
 walrus-rust.workspace = true
 snap.workspace = true
 bytes.workspace = true
+sha2.workspace = true
+fjall.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+ulid.workspace = true
+tantivy.workspace = true
 form_urlencoded.workspace = true
 
 [dev-dependencies]

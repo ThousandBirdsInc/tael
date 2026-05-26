@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::storage::DuckDbStore;
+use crate::storage::Store;
 use crate::storage::models::{MetricPoint, MetricQuery};
 
 // ── AST ─────────────────────────────────────────────────────────────
@@ -334,7 +334,7 @@ pub struct Series {
 /// when fetching bare selectors (defaults to 5 minutes). `rate(...[dur])`
 /// always uses its own bracket duration.
 pub fn evaluate(
-    store: &DuckDbStore,
+    store: &dyn Store,
     expr: &Expr,
     lookback_seconds: i64,
 ) -> Result<Vec<Series>> {
@@ -352,7 +352,7 @@ pub fn evaluate(
 }
 
 fn fetch_points(
-    store: &DuckDbStore,
+    store: &dyn Store,
     sel: &Selector,
     lookback_seconds: i64,
 ) -> Result<Vec<MetricPoint>> {
@@ -397,7 +397,7 @@ fn matches_labels(point: &MetricPoint, matchers: &[LabelMatcher]) -> bool {
 /// Group points into series keyed by their full label set, preserving
 /// the most-recent sample per series.
 fn eval_selector_instant(
-    store: &DuckDbStore,
+    store: &dyn Store,
     sel: &Selector,
     lookback_seconds: i64,
 ) -> Result<Vec<Series>> {
@@ -417,7 +417,7 @@ fn eval_selector_instant(
 }
 
 fn eval_rate(
-    store: &DuckDbStore,
+    store: &dyn Store,
     sel: &Selector,
     range_seconds: i64,
 ) -> Result<Vec<Series>> {

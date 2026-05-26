@@ -17,18 +17,29 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use crate::log_bus::LogBus;
 use crate::span_bus::SpanBus;
-use crate::storage::DuckDbStore;
 use crate::storage::models::{LogQuery, MetricQuery, TraceQuery};
+use crate::storage::{BlobStore, Store};
 
 #[derive(Clone)]
 struct AppState {
-    store: Arc<DuckDbStore>,
+    store: Arc<dyn Store>,
+    blobs: Arc<BlobStore>,
     bus: Arc<SpanBus>,
     log_bus: Arc<LogBus>,
 }
 
-pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>, log_bus: Arc<LogBus>) -> Router {
-    let state = AppState { store, bus, log_bus };
+pub fn router(
+    store: Arc<dyn Store>,
+    blobs: Arc<BlobStore>,
+    bus: Arc<SpanBus>,
+    log_bus: Arc<LogBus>,
+) -> Router {
+    let state = AppState {
+        store,
+        blobs,
+        bus,
+        log_bus,
+    };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
         .route("/api/v1/traces/live", get(live_traces))
@@ -45,9 +56,35 @@ pub fn router(store: Arc<DuckDbStore>, bus: Arc<SpanBus>, log_bus: Arc<LogBus>) 
         .route("/api/v1/summary", get(query_summary))
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
+        .route("/api/v1/sql", get(query_sql))
+        .route("/api/v1/blobs/{sha256}", get(get_blob))
         .route("/api/v1/write", post(prom_remote_write))
         .route("/healthz", get(healthz))
         .with_state(state)
+}
+
+/// Resolve a content-addressed payload (LLM prompt/completion, or an oversized
+/// log body) by its sha256. Returns the raw bytes as `text/plain`.
+async fn get_blob(
+    State(state): State<AppState>,
+    Path(sha256): Path<String>,
+) -> impl IntoResponse {
+    match state.blobs.get(&sha256) {
+        Ok(Some(bytes)) => (StatusCode::OK, bytes).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "blob not found" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "get_blob failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +96,7 @@ struct TraceQueryParams {
     status: Option<String>,
     last: Option<String>,
     limit: Option<u32>,
+    text: Option<String>,
 }
 
 fn parse_duration_to_seconds(s: &str) -> Option<i64> {
@@ -90,6 +128,7 @@ async fn query_traces(
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
         attributes: parse_attribute_params(raw.as_deref()),
+        text: params.text,
     };
 
     match state.store.query_traces(&query) {
@@ -417,7 +456,7 @@ async fn promql_query(
         }
     };
 
-    match crate::promql::evaluate(&state.store, &expr, lookback) {
+    match crate::promql::evaluate(state.store.as_ref(), &expr, lookback) {
         Ok(series) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -526,6 +565,27 @@ async fn query_correlate(
                 axum::Json(serde_json::json!({ "error": e.to_string() })),
             )
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SqlParams {
+    q: String,
+}
+
+async fn query_sql(
+    State(state): State<AppState>,
+    Query(params): Query<SqlParams>,
+) -> impl IntoResponse {
+    match state.store.query_sql(&params.q) {
+        Ok(rows) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "rows": rows, "count": rows.len() })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

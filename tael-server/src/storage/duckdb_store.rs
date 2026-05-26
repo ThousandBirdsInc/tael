@@ -5,10 +5,11 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use duckdb::{params, Connection};
 
+use super::Store;
 use super::models::{
     Anomaly, AnomalyReport, CorrelateReport, ErrorOperation, LogQuery, LogRecord, LogSeverity,
-    LogSummary, MetricPoint, MetricQuery, MetricSummary, MetricType, ServiceSummary, Span,
-    SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
+    LogSummary, MetricPoint, MetricQuery, MetricSummary, MetricType, ServiceInfo, ServiceSummary,
+    Span, SpanKind, SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
 };
 
 /// Build a JSON path expression for a single top-level attribute key.
@@ -33,6 +34,8 @@ fn row_to_span(row: &duckdb::Row<'_>) -> duckdb::Result<Span> {
     let parent: Option<String> = row.get(2)?;
     let start_str: String = row.get(5)?;
     let end_str: String = row.get(6)?;
+    let kind_str: Option<String> = row.get(11)?;
+    let llm_str: Option<String> = row.get(12)?;
 
     Ok(Span {
         trace_id: row.get(0)?,
@@ -50,6 +53,10 @@ fn row_to_span(row: &duckdb::Row<'_>) -> duckdb::Result<Span> {
         status: SpanStatus::from_str(&status_str),
         attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
         events: serde_json::from_str(&events_str).unwrap_or_default(),
+        kind: kind_str
+            .map(|s| SpanKind::from_str(&s))
+            .unwrap_or(SpanKind::Internal),
+        llm: llm_str.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -85,13 +92,23 @@ impl DuckDbStore {
                 status         VARCHAR NOT NULL DEFAULT 'unset',
                 attributes     JSON,
                 events         JSON,
+                kind           VARCHAR NOT NULL DEFAULT 'internal',
+                llm            JSON,
                 PRIMARY KEY (trace_id, span_id)
             );
+
+            -- Migrate pre-existing databases created before the LLM columns.
+            -- DuckDB's ALTER ... ADD COLUMN rejects constraints, so these are
+            -- added nullable; fresh tables get the constraints from CREATE above,
+            -- and migrated NULL `kind` values are read back as 'internal'.
+            ALTER TABLE spans ADD COLUMN IF NOT EXISTS kind VARCHAR;
+            ALTER TABLE spans ADD COLUMN IF NOT EXISTS llm JSON;
 
             CREATE INDEX IF NOT EXISTS idx_spans_service ON spans(service);
             CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time);
             CREATE INDEX IF NOT EXISTS idx_spans_trace_id ON spans(trace_id);
             CREATE INDEX IF NOT EXISTS idx_spans_status ON spans(status);
+            CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans(kind);
 
             CREATE TABLE IF NOT EXISTS trace_comments (
                 id         VARCHAR NOT NULL PRIMARY KEY,
@@ -113,8 +130,12 @@ impl DuckDbStore {
                 severity_text      VARCHAR NOT NULL DEFAULT '',
                 body               VARCHAR NOT NULL DEFAULT '',
                 service            VARCHAR NOT NULL,
-                attributes         JSON
+                attributes         JSON,
+                body_sha256        VARCHAR
             );
+
+            -- Migrate pre-existing databases (nullable, no constraint).
+            ALTER TABLE logs ADD COLUMN IF NOT EXISTS body_sha256 VARCHAR;
 
             CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
@@ -144,13 +165,19 @@ impl DuckDbStore {
         let mut stmt = conn.prepare(
             "INSERT OR REPLACE INTO spans
              (trace_id, span_id, parent_span_id, service, operation,
-              start_time, end_time, duration_ms, status, attributes, events)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              start_time, end_time, duration_ms, status, attributes, events,
+              kind, llm)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         for span in spans {
             let attrs = serde_json::to_string(&span.attributes)?;
             let events = serde_json::to_string(&span.events)?;
+            let llm = span
+                .llm
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             stmt.execute(params![
                 span.trace_id,
                 span.span_id,
@@ -163,6 +190,8 @@ impl DuckDbStore {
                 span.status.to_string(),
                 attrs,
                 events,
+                span.kind.to_string(),
+                llm,
             ])?;
         }
         Ok(())
@@ -173,7 +202,8 @@ impl DuckDbStore {
 
         let mut sql = String::from(
             "SELECT trace_id, span_id, parent_span_id, service, operation,
-                    start_time::VARCHAR, end_time::VARCHAR, duration_ms, status, attributes, events
+                    start_time::VARCHAR, end_time::VARCHAR, duration_ms, status, attributes, events,
+                    kind, llm
              FROM spans WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
@@ -227,7 +257,8 @@ impl DuckDbStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT trace_id, span_id, parent_span_id, service, operation,
-                    start_time::VARCHAR, end_time::VARCHAR, duration_ms, status, attributes, events
+                    start_time::VARCHAR, end_time::VARCHAR, duration_ms, status, attributes, events,
+                    kind, llm
              FROM spans
              WHERE trace_id = ?
              ORDER BY start_time ASC",
@@ -336,8 +367,8 @@ impl DuckDbStore {
         let mut stmt = conn.prepare(
             "INSERT INTO logs
              (timestamp, observed_timestamp, trace_id, span_id, severity,
-              severity_text, body, service, attributes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              severity_text, body, service, attributes, body_sha256)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         for log in logs {
@@ -352,6 +383,7 @@ impl DuckDbStore {
                 log.body,
                 log.service,
                 attrs,
+                log.body_sha256,
             ])?;
         }
         Ok(())
@@ -362,7 +394,7 @@ impl DuckDbStore {
 
         let mut sql = String::from(
             "SELECT timestamp::VARCHAR, observed_timestamp::VARCHAR, trace_id, span_id,
-                    severity, severity_text, body, service, attributes
+                    severity, severity_text, body, service, attributes, body_sha256
              FROM logs WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
@@ -413,6 +445,7 @@ impl DuckDbStore {
                 body: row.get(6)?,
                 service: row.get(7)?,
                 attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+                body_sha256: row.get(9)?,
             })
         })?;
 
@@ -897,13 +930,127 @@ impl DuckDbStore {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ServiceInfo {
-    pub name: String,
-    pub span_count: i64,
-    pub trace_count: i64,
-    pub avg_duration_ms: f64,
-    pub error_rate: f64,
+impl DuckDbStore {
+    /// Run a read-only SQL query and return rows as JSON objects. Only
+    /// `SELECT`/`WITH` statements are allowed — this is an analyst/agent query
+    /// surface over the `spans`/`logs`/`metrics`/`trace_comments` tables, not a
+    /// mutation path.
+    pub fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        let trimmed = sql.trim_start();
+        let head = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if head != "SELECT" && head != "WITH" {
+            anyhow::bail!("only read-only SELECT/WITH queries are allowed");
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(sql)?;
+        // Column metadata is only valid after execution, so query first, then
+        // read names from the active statement.
+        let mut rows = stmt.query([])?;
+        let column_names: Vec<String> = match rows.as_ref() {
+            Some(s) => (0..s.column_count())
+                .map(|i| s.column_name(i).cloned().unwrap_or_else(|_| "?".to_string()))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut obj = serde_json::Map::with_capacity(column_names.len());
+            for (i, name) in column_names.iter().enumerate() {
+                let value: duckdb::types::Value = row.get(i)?;
+                obj.insert(name.clone(), duck_value_to_json(value));
+            }
+            out.push(serde_json::Value::Object(obj));
+        }
+        Ok(out)
+    }
+}
+
+/// Map a DuckDB dynamic value to JSON. Uncommon types fall back to their debug
+/// string so a query never fails on an exotic column.
+fn duck_value_to_json(v: duckdb::types::Value) -> serde_json::Value {
+    use duckdb::types::Value as V;
+    use serde_json::Value as J;
+    match v {
+        V::Null => J::Null,
+        V::Boolean(b) => J::Bool(b),
+        V::TinyInt(n) => J::from(n),
+        V::SmallInt(n) => J::from(n),
+        V::Int(n) => J::from(n),
+        V::BigInt(n) => J::from(n),
+        V::UTinyInt(n) => J::from(n),
+        V::USmallInt(n) => J::from(n),
+        V::UInt(n) => J::from(n),
+        V::UBigInt(n) => J::from(n),
+        V::Float(f) => serde_json::Number::from_f64(f as f64).map(J::Number).unwrap_or(J::Null),
+        V::Double(f) => serde_json::Number::from_f64(f).map(J::Number).unwrap_or(J::Null),
+        V::Text(s) => J::String(s),
+        other => J::String(format!("{other:?}")),
+    }
+}
+
+/// Forward the inherent `DuckDbStore` methods through the `Store` trait so the
+/// server can depend on `dyn Store`. Bodies live in the inherent impl above so
+/// internal callers and the unit tests keep working unchanged.
+impl Store for DuckDbStore {
+    fn insert_spans(&self, spans: &[Span]) -> Result<()> {
+        DuckDbStore::insert_spans(self, spans)
+    }
+    fn query_traces(&self, query: &TraceQuery) -> Result<Vec<Span>> {
+        DuckDbStore::query_traces(self, query)
+    }
+    fn get_trace(&self, trace_id: &str) -> Result<Vec<Span>> {
+        DuckDbStore::get_trace(self, trace_id)
+    }
+    fn add_comment(
+        &self,
+        trace_id: &str,
+        span_id: Option<&str>,
+        author: &str,
+        body: &str,
+    ) -> Result<TraceComment> {
+        DuckDbStore::add_comment(self, trace_id, span_id, author, body)
+    }
+    fn get_comments(&self, trace_id: &str) -> Result<Vec<TraceComment>> {
+        DuckDbStore::get_comments(self, trace_id)
+    }
+    fn list_services(&self) -> Result<Vec<ServiceInfo>> {
+        DuckDbStore::list_services(self)
+    }
+    fn insert_logs(&self, logs: &[LogRecord]) -> Result<()> {
+        DuckDbStore::insert_logs(self, logs)
+    }
+    fn query_logs(&self, query: &LogQuery) -> Result<Vec<LogRecord>> {
+        DuckDbStore::query_logs(self, query)
+    }
+    fn insert_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
+        DuckDbStore::insert_metrics(self, metrics)
+    }
+    fn query_metrics(&self, query: &MetricQuery) -> Result<Vec<MetricPoint>> {
+        DuckDbStore::query_metrics(self, query)
+    }
+    fn query_summary(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
+        DuckDbStore::query_summary(self, last_seconds, service)
+    }
+    fn query_anomalies(
+        &self,
+        current_seconds: i64,
+        baseline_seconds: i64,
+        service: Option<&str>,
+    ) -> Result<AnomalyReport> {
+        DuckDbStore::query_anomalies(self, current_seconds, baseline_seconds, service)
+    }
+    fn query_correlate(&self, trace_id: &str) -> Result<Option<CorrelateReport>> {
+        DuckDbStore::query_correlate(self, trace_id)
+    }
+    fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        DuckDbStore::query_sql(self, sql)
+    }
 }
 
 #[cfg(test)]
@@ -929,6 +1076,8 @@ mod tests {
             status: SpanStatus::Ok,
             attributes,
             events: vec![],
+            kind: SpanKind::Internal,
+            llm: None,
         }
     }
 
@@ -986,5 +1135,93 @@ mod tests {
             ..Default::default()
         };
         assert!(s.query_traces(&q).unwrap().is_empty());
+    }
+
+    #[test]
+    fn llm_span_round_trips() {
+        use super::super::models::{LlmOperation, LlmSpan};
+
+        let s = store();
+        let mut sp = span("llm", &[]);
+        sp.kind = SpanKind::Llm;
+        sp.llm = Some(LlmSpan {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-7".into(),
+            operation: LlmOperation::Chat,
+            input_tokens: Some(1200),
+            output_tokens: Some(340),
+            total_tokens: Some(1540),
+            cost_usd: Some(0.0185),
+            ..Default::default()
+        });
+        s.insert_spans(&[sp]).unwrap();
+
+        let got = s.get_trace("llm").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, SpanKind::Llm);
+        let llm = got[0].llm.as_ref().expect("llm extension preserved");
+        assert_eq!(llm.model, "claude-opus-4-7");
+        assert_eq!(llm.total_tokens, Some(1540));
+        assert_eq!(llm.cost_usd, Some(0.0185));
+        assert_eq!(llm.operation, LlmOperation::Chat);
+    }
+
+    #[test]
+    fn non_llm_span_has_no_extension_after_round_trip() {
+        let s = store();
+        s.insert_spans(&[span("plain", &[("k", "v")])]).unwrap();
+        let got = s.get_trace("plain").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, SpanKind::Internal);
+        assert!(got[0].llm.is_none());
+    }
+
+    #[test]
+    fn query_sql_reads_and_rejects_mutations() {
+        let s = store();
+        s.insert_spans(&[
+            span("a", &[("env", "prod")]),
+            span("b", &[("env", "prod")]),
+        ])
+        .unwrap();
+
+        let rows = s
+            .query_sql("SELECT service, COUNT(*) AS n FROM spans GROUP BY service")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["service"], serde_json::json!("svc"));
+        assert_eq!(rows[0]["n"], serde_json::json!(2));
+
+        // Mutations are rejected.
+        assert!(s.query_sql("DELETE FROM spans").is_err());
+        assert!(s.query_sql("DROP TABLE spans").is_err());
+    }
+
+    #[test]
+    fn log_body_sha256_round_trips() {
+        let s = store();
+        let log = LogRecord {
+            timestamp: Utc::now(),
+            observed_timestamp: Utc::now(),
+            trace_id: Some("t1".into()),
+            span_id: None,
+            severity: LogSeverity::Error,
+            severity_text: "ERROR".into(),
+            body: String::new(), // offloaded to blob
+            service: "svc".into(),
+            attributes: HashMap::new(),
+            body_sha256: Some("abc123".into()),
+        };
+        s.insert_logs(&[log]).unwrap();
+
+        let got = s
+            .query_logs(&LogQuery {
+                trace_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body_sha256.as_deref(), Some("abc123"));
+        assert!(got[0].body.is_empty());
     }
 }

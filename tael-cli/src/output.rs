@@ -21,8 +21,23 @@ pub fn print_spans_table(value: &Value) {
         return;
     }
 
+    // Only show the LLM column when at least one span is an LLM call, so
+    // non-LLM traces keep their compact layout.
+    let has_llm = spans.iter().any(|s| s.get("llm").is_some_and(|v| !v.is_null()));
+
     let mut table = Table::new();
-    table.set_header(vec!["Trace ID", "Span ID", "Service", "Operation", "Duration (ms)", "Status"]);
+    let mut header = vec![
+        "Trace ID",
+        "Span ID",
+        "Service",
+        "Operation",
+        "Duration (ms)",
+        "Status",
+    ];
+    if has_llm {
+        header.push("LLM");
+    }
+    table.set_header(header);
 
     for span in spans {
         let trace_id = span["trace_id"].as_str().unwrap_or("-");
@@ -31,17 +46,84 @@ pub fn print_spans_table(value: &Value) {
         } else {
             trace_id
         };
-        table.add_row(vec![
+        let mut row = vec![
             Cell::new(format!("{short_trace}…")),
             Cell::new(span["span_id"].as_str().unwrap_or("-")),
             Cell::new(span["service"].as_str().unwrap_or("-")),
             Cell::new(span["operation"].as_str().unwrap_or("-")),
             Cell::new(format!("{:.1}", span["duration_ms"].as_f64().unwrap_or(0.0))),
             Cell::new(span["status"].as_str().unwrap_or("-")),
-        ]);
+        ];
+        if has_llm {
+            row.push(Cell::new(format_llm_summary(&span["llm"])));
+        }
+        table.add_row(row);
     }
 
     println!("{table}");
+}
+
+/// Render `{ "rows": [ {col: val, ...}, ... ] }` from the SQL endpoint as a
+/// table, using the first row's keys as columns. Surfaces an error payload.
+pub fn print_sql_rows(value: &Value) {
+    if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
+        println!("error: {err}");
+        return;
+    }
+    let rows = match value.get("rows").and_then(|r| r.as_array()) {
+        Some(r) if !r.is_empty() => r,
+        _ => {
+            println!("No rows.");
+            return;
+        }
+    };
+    let columns: Vec<String> = match rows[0].as_object() {
+        Some(obj) => obj.keys().cloned().collect(),
+        None => return,
+    };
+    let mut table = Table::new();
+    table.set_header(columns.clone());
+    for row in rows {
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|c| {
+                let v = &row[c];
+                let s = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Null => "-".to_string(),
+                    other => other.to_string(),
+                };
+                Cell::new(s)
+            })
+            .collect();
+        table.add_row(cells);
+    }
+    println!("{table}");
+}
+
+/// One-line summary of a span's LLM extension for the table view, e.g.
+/// `claude-opus-4-7 · 1540 tok · $0.0185`. Returns `-` for non-LLM spans.
+fn format_llm_summary(llm: &Value) -> String {
+    if llm.is_null() {
+        return "-".to_string();
+    }
+    let mut parts = Vec::new();
+    if let Some(model) = llm["model"].as_str().filter(|s| !s.is_empty()) {
+        parts.push(model.to_string());
+    } else if let Some(provider) = llm["provider"].as_str().filter(|s| !s.is_empty()) {
+        parts.push(provider.to_string());
+    }
+    if let Some(tokens) = llm["total_tokens"].as_u64() {
+        parts.push(format!("{tokens} tok"));
+    }
+    if let Some(cost) = llm["cost_usd"].as_f64() {
+        parts.push(format!("${cost:.4}"));
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 pub fn print_services_table(value: &Value) {
