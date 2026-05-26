@@ -6,13 +6,14 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "AI-agent-native observability CLI — query, visualize, and annotate OpenTelemetry traces"
+description = "AI-agent-native observability — a single `tael` binary that runs the OTLP ingest/storage server (`tael serve`) and queries, visualizes, and annotates traces"
 
 [[bin]]
 name = "tael"
 path = "src/main.rs"
 
 [dependencies]
+tael-server = { path = "../tael-server", version = "0.4.0" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

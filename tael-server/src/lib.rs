@@ -1,3 +1,9 @@
+//! tael-server: OTLP ingest, tiered storage, and the REST/gRPC query API.
+//!
+//! Shipped as a library so the `tael` binary can embed it behind `tael serve`
+//! (a single `cargo install`), while still being usable as a standalone crate.
+//! [`run`] is the entrypoint; [`ServerConfig`] configures it.
+
 mod api;
 mod config;
 mod ingest;
@@ -13,7 +19,8 @@ use tokio::net::TcpListener;
 use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
-use config::{ServerConfig, StorageBackend};
+pub use config::{ServerConfig, StorageBackend};
+
 use log_bus::LogBus;
 use span_bus::SpanBus;
 use storage::{BlobStore, DuckDbStore, Store, TaelBackend};
@@ -72,13 +79,16 @@ fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>) {
     });
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+/// Start the server: OTLP gRPC + REST listeners over the configured storage
+/// backend, plus the background maintenance task when running on tael-backend.
+/// Runs until one of the listeners exits.
+pub async fn run(config: ServerConfig) -> Result<()> {
+    // Initialize tracing for the server process. `try_init` so embedding this in
+    // a binary that already set a subscriber is a no-op rather than a panic.
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
-        .init();
+        .try_init();
 
-    let config = ServerConfig::from_env();
     let blobs = Arc::new(BlobStore::new(&config.data_dir)?);
     // The payload search index is shared between the ingest path (writes) and
     // the tael-backend query path (reads); present only when that engine runs.

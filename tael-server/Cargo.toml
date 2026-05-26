@@ -6,11 +6,11 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "AI-agent-native observability server — OTLP trace ingestion with DuckDB storage"
+description = "AI-agent-native observability server library — OTLP ingestion, tiered storage, and the REST/gRPC query API (embedded by the `tael` CLI via `tael serve`)"
 
-[[bin]]
-name = "tael-server"
-path = "src/main.rs"
+[lib]
+name = "tael_server"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true

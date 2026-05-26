@@ -21,8 +21,7 @@ No dashboards. No browsers. Just a single binary and structured data.
 ## Installation
 
 ```bash
-# Install from crates.io
-cargo install tael-server
+# Install from crates.io — one binary, `tael`, with the server built in
 cargo install tael-cli
 ```
 
@@ -36,7 +35,7 @@ cargo build --release
 
 ```bash
 # Start the server (OTLP on :4317, REST API on :7701)
-tael-server
+tael serve
 
 # In another terminal — send sample traces
 cargo run --bin tael-test

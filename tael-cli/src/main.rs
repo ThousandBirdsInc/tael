@@ -29,6 +29,21 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the tael server: OTLP ingest (gRPC :4317), storage, REST API (:7701)
+    Serve {
+        /// OTLP gRPC listen address (env: TAEL_OTLP_GRPC_ADDR)
+        #[arg(long)]
+        otlp_grpc_addr: Option<String>,
+        /// REST API listen address (env: TAEL_REST_API_ADDR)
+        #[arg(long)]
+        rest_api_addr: Option<String>,
+        /// Data directory (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Storage backend: tael-backend (default) or duckdb (env: TAEL_STORAGE)
+        #[arg(long)]
+        storage: Option<String>,
+    },
     /// Query telemetry data
     Query {
         #[command(subcommand)]
@@ -253,9 +268,38 @@ enum SkillAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // `serve` runs the embedded server; it needs no REST client, so handle it
+    // before constructing one.
+    if let Commands::Serve {
+        otlp_grpc_addr,
+        rest_api_addr,
+        data_dir,
+        storage,
+    } = cli.command
+    {
+        // Start from env defaults, then override with any explicit flags.
+        let mut config = tael_server::ServerConfig::from_env();
+        if let Some(a) = otlp_grpc_addr {
+            config.otlp_grpc_addr = a;
+        }
+        if let Some(a) = rest_api_addr {
+            config.rest_api_addr = a;
+        }
+        if let Some(d) = data_dir {
+            config.data_dir = d;
+        }
+        if let Some(s) = storage {
+            config.storage = tael_server::StorageBackend::parse(&s);
+        }
+        return tael_server::run(config).await;
+    }
+
     let client = client::TaelClient::new(&cli.server);
 
     match cli.command {
+        // Handled above; the early return means this arm is never reached.
+        Commands::Serve { .. } => unreachable!(),
         Commands::Query { signal } => match signal {
             QuerySignal::Traces {
                 service,
