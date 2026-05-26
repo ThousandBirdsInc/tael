@@ -16,10 +16,6 @@ pkg-url = "{ repo }/releases/download/v{ version }/tael-cli-v{ version }-{ targe
 pkg-fmt = "tgz"
 bin-dir = "tael-cli-v{ version }-{ target }/{ bin }{ binary-ext }"
 
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/tael-cli-v{ version }-{ target }.zip"
-pkg-fmt = "zip"
-
 [[bin]]
 name = "tael"
 path = "src/main.rs"
