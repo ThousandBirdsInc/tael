@@ -32,7 +32,18 @@ No dashboards. No browsers. Just a single `tael` binary — server and client in
 ## Installation
 
 ```bash
-# Install from crates.io — one binary, `tael`, with the server built in
+# Fastest — download a prebuilt `tael` binary (no compilation)
+cargo binstall tael-cli
+```
+
+`cargo install tael-cli` also works, but compiles the bundled DuckDB engine from
+source (a large C++ build), so it can take several minutes. `cargo binstall`
+fetches a prebuilt binary from the GitHub Release instead and finishes in
+seconds. Install it once with `cargo install cargo-binstall` (or grab it from
+[its releases](https://github.com/cargo-bins/cargo-binstall#installation)).
+
+```bash
+# Compiles from source — slower, but no extra tooling
 cargo install tael-cli
 ```
 
