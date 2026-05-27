@@ -3,7 +3,7 @@ resolver = "2"
 members = ["tael-server", "tael-cli", "tael-test"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/thousandbirdsinc/tael"
@@ -17,7 +17,7 @@ clap = { version = "4", features = ["derive"] }
 duckdb = { version = "1", features = ["bundled"] }
 opentelemetry-proto = { version = "0.29", features = ["gen-tonic", "trace", "logs", "metrics"] }
 prost = "0.13"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -43,3 +43,4 @@ parquet = "58"
 ulid = "1"
 tantivy = "0.22"
 form_urlencoded = "1"
+chitchat = "0.10"

@@ -62,6 +62,14 @@ impl HotTier {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Fsync the LSM journal. The write path persists with `Buffer` after every
+    /// apply (the WAL is the durability boundary); this `SyncAll` is the
+    /// stronger flush used on graceful shutdown so a restart replays less.
+    pub fn flush(&self) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
     // ── Spans ───────────────────────────────────────────────────────
 
     pub fn insert_spans(&self, spans: &[Span]) -> Result<()> {

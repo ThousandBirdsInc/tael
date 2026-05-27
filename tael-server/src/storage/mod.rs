@@ -1,12 +1,16 @@
 mod backend;
 mod blobs;
 mod duckdb_store;
+mod fanout;
 pub mod models;
+mod remote;
 mod search;
 
-pub use backend::TaelBackend;
+pub use backend::{TaelBackend, WalSink};
 pub use blobs::BlobStore;
 pub use duckdb_store::DuckDbStore;
+pub use fanout::FanoutStore;
+pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};
 pub use search::SearchIndex;
 
 use anyhow::Result;
@@ -61,4 +65,32 @@ pub trait Store: Send + Sync {
     /// Read-only SQL query surface (`SELECT`/`WITH`) over the telemetry tables,
     /// returning rows as JSON objects.
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
+
+    // ── Lifecycle / operability (default no-ops) ────────────────────
+    /// Readiness probe — `Ok(())` when this store can serve requests. Backs the
+    /// REST `/readyz` endpoint (`docs/tael-server-scaling-ha.md` §5.4). The
+    /// default is `Ok(())`: an embedded backend that constructed successfully
+    /// and holds its file locks is, by definition, ready. Backends that depend
+    /// on the network (e.g. [`RemoteStore`], [`FanoutStore`](crate::storage))
+    /// override this to probe their dependencies.
+    fn health(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Flush durable buffered state ahead of a graceful shutdown. The WAL fsync
+    /// on the write path is the real durability boundary, so this is
+    /// best-effort: it tightens the hot tier's on-disk state so a restart or
+    /// standby replays less WAL (§5.4 "flush the hot tier"). Default is a no-op.
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Standby entrypoint for WAL replication: durably accept a framed WAL
+    /// record shipped from a leader and bring local state up to it
+    /// (`docs/tael-server-scaling-ha.md` §5.1). Backs the
+    /// `POST /internal/wal/records` endpoint. Default: rejected — only the
+    /// tael-backend engine, which owns a WAL, can act as a standby.
+    fn apply_framed_wal(&self, _framed: &[u8]) -> Result<()> {
+        anyhow::bail!("this store does not accept WAL replication")
+    }
 }

@@ -28,7 +28,8 @@ use std::sync::Arc;
 use super::SearchIndex;
 use cold::ColdTier;
 use hot::HotTier;
-use wal::{WalLog, WalRecord};
+use wal::WalLog;
+pub use wal::{WalRecord, WalSink};
 
 pub struct TaelBackend {
     /// LSM hot tier — serves recent reads.
@@ -50,11 +51,34 @@ impl TaelBackend {
     /// Like [`Self::new`] but with an explicit WAL namespace key — lets tests
     /// run isolated instances (the WAL key is process-global in walrus).
     pub fn with_wal_key(data_dir: &str, wal_key: &str) -> Result<Self> {
+        Self::with_wal_key_and_sinks(data_dir, wal_key, Vec::new(), None)
+    }
+
+    /// Like [`Self::with_wal_key`] but with WAL replication sinks attached: this
+    /// backend runs as a **leader** that ships every appended record to its
+    /// standbys before acking the write (`docs/tael-server-scaling-ha.md` §5.1).
+    /// `required_acks` is how many standbys must confirm before a write returns
+    /// (`None` = all = fully synchronous; `Some(0)` = async best-effort). With
+    /// no sinks the write path is unchanged. A standby on the receiving end
+    /// applies shipped records via `Store::apply_framed_wal`.
+    pub fn with_wal_key_and_sinks(
+        data_dir: &str,
+        wal_key: &str,
+        sinks: Vec<Arc<dyn WalSink>>,
+        required_acks: Option<usize>,
+    ) -> Result<Self> {
         let hot = HotTier::open(data_dir)?;
         let cold = ColdTier::open(data_dir)?;
         let inner = DuckDbStore::new(data_dir)?;
         let search = Arc::new(SearchIndex::open(data_dir)?);
-        let wal = WalLog::new_for_key(wal_key)?;
+        let mut wal = if sinks.is_empty() {
+            WalLog::new_for_key(wal_key)?
+        } else {
+            WalLog::new_for_key_with_sinks(wal_key, sinks)?
+        };
+        if let Some(n) = required_acks {
+            wal = wal.with_required_acks(n);
+        }
         let backend = Self {
             hot,
             cold,
@@ -65,6 +89,7 @@ impl TaelBackend {
         backend.replay()?;
         Ok(backend)
     }
+
 
     /// The shared payload search index — handed to the ingest path so prompt/
     /// completion text is indexed at write time (the text isn't retained on the
@@ -363,6 +388,29 @@ impl Store for TaelBackend {
         // SQL runs over the DuckDB projection, which retains all signals.
         self.inner.query_sql(sql)
     }
+
+    fn flush(&self) -> Result<()> {
+        // Graceful-shutdown flush: tighten the hot tier so a restart/standby
+        // replays less WAL. WAL fsync already guarantees durability.
+        self.hot.flush()
+    }
+
+    /// Standby entrypoint: durably accept a framed WAL record shipped from a
+    /// leader and bring local state up to it. Mirrors the leader's write
+    /// discipline (append → apply → consume) so the standby's WAL, hot tier, and
+    /// projection stay byte-identical and itself replayable — the basis for
+    /// promotion on leader loss (§5.1).
+    fn apply_framed_wal(&self, framed: &[u8]) -> Result<()> {
+        let record = WalRecord::decode(framed)?;
+        self.wal.append_framed(framed)?;
+        match &record {
+            WalRecord::Spans(s) => self.apply_spans(s)?,
+            WalRecord::Logs(l) => self.apply_logs(l)?,
+            WalRecord::Metrics(m) => self.apply_metrics(m)?,
+        }
+        self.wal.mark_applied()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -478,6 +526,67 @@ mod tests {
         assert_eq!(api.trace_count, 1);
         assert_eq!(api.avg_duration_ms, 20.0);
         assert!((api.error_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn standby_rebuilds_identical_state_from_shipped_wal() {
+        use crate::storage::models::{LogRecord, LogSeverity};
+
+        // The standby: a normal backend that is never written to directly.
+        let (standby, _sd, _sg) = backend();
+        let standby = Arc::new(standby);
+
+        // A WAL sink that ships each framed record into the standby — the
+        // in-process stand-in for the (deferred) network transport.
+        struct ReplicaSink(Arc<TaelBackend>);
+        impl WalSink for ReplicaSink {
+            fn append_framed(&self, framed: &[u8]) -> Result<()> {
+                self.0.apply_framed_wal(framed)
+            }
+        }
+
+        // The leader, with the standby attached as a replication sink.
+        let leader_dir = tempfile::tempdir().unwrap();
+        let leader_key = format!("tael-test-leader-{}", uuid::Uuid::new_v4());
+        let _lg = NsGuard(leader_key.clone());
+        let leader = TaelBackend::with_wal_key_and_sinks(
+            leader_dir.path().to_str().unwrap(),
+            &leader_key,
+            vec![Arc::new(ReplicaSink(Arc::clone(&standby)))],
+            None, // synchronous: require all (one) standbys
+        )
+        .unwrap();
+
+        // Write a mix of signals to the leader only.
+        leader
+            .insert_spans(&[
+                span("t1", "s1", "api", 10.0, SpanStatus::Ok),
+                span("t1", "s2", "db", 20.0, SpanStatus::Ok),
+                span("t2", "s3", "api", 5.0, SpanStatus::Error),
+            ])
+            .unwrap();
+        leader
+            .insert_logs(&[LogRecord {
+                timestamp: Utc::now(),
+                observed_timestamp: Utc::now(),
+                trace_id: Some("t1".into()),
+                span_id: None,
+                severity: LogSeverity::Error,
+                severity_text: "ERROR".into(),
+                body: "boom".into(),
+                service: "api".into(),
+                attributes: HashMap::new(),
+                body_sha256: None,
+            }])
+            .unwrap();
+
+        // The standby reconstructed identical state purely from the shipped WAL.
+        assert_eq!(standby.get_trace("t1").unwrap().len(), 2);
+        assert_eq!(standby.get_trace("t2").unwrap().len(), 1);
+        let leader_traces = leader.query_traces(&TraceQuery::default()).unwrap();
+        let standby_traces = standby.query_traces(&TraceQuery::default()).unwrap();
+        assert_eq!(leader_traces.len(), standby_traces.len());
+        assert_eq!(standby_traces.len(), 3);
     }
 
     #[test]
