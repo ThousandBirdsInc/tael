@@ -42,5 +42,25 @@ tantivy.workspace = true
 form_urlencoded.workspace = true
 chitchat.workspace = true
 
+[features]
+# Builds the `storage` bench target (DuckDbStore through the Store trait). Kept
+# behind a feature so the default `cargo bench` stays focused on CPU/blob-store
+# hot paths. Run with: cargo bench --features bench-storage
+bench-storage = []
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "blob_store"
+harness = false
+
+[[bench]]
+name = "storage"
+harness = false
+required-features = ["bench-storage"]
+
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
