@@ -9,13 +9,15 @@ misleading results.
 
 `tael` is a thin client over the tael server's REST API. Default server
 is `http://127.0.0.1:7701`; override with `--server <url>` or, for a
-localhost-only shorthand, `--port <N>`.
+localhost-only shorthand, `--port-rest <N>`.
 
 Global flags (must appear before or after the subcommand, not nested):
 - `--server <url>` — server base URL
-- `--port <N>` — shorthand for `--server http://127.0.0.1:<N>`. For
+- `--port-rest <N>` — shorthand for `--server http://127.0.0.1:<N>`. For
   `tael serve`, sets the REST API listen port instead. Conflicts with
   `--server`.
+- `--port-otel <N>` — (serve only) OTLP gRPC ingest port on 127.0.0.1.
+  Ignored by client commands.
 - `--format json|table` — output format, default `json`. Prefer `json`
   for machine parsing; `table` is for humans.
 

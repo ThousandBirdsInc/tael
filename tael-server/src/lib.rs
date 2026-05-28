@@ -21,12 +21,16 @@ use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
 pub use config::{ServerConfig, StorageBackend};
+pub use storage::models::{
+    LogRecord, LogSeverity, MetricPoint, MetricType, Span, SpanEvent, SpanKind, SpanStatus,
+    TraceQuery,
+};
+pub use storage::{
+    BlobStore, DuckDbStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
+};
 
 use log_bus::LogBus;
 use span_bus::SpanBus;
-use storage::{
-    BlobStore, DuckDbStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
-};
 
 /// Periodically roll spans older than the hot-tier window into the cold tier.
 /// Runs the (blocking) compaction off the async executor. The window
@@ -100,7 +104,10 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         Some(cs) => {
             let coord = cluster::ClusterCoordinator::start(cluster::ClusterConfig {
                 node_id: cs.node_id.clone(),
-                listen_addr: cs.listen_addr.parse().context("parsing TAEL_CLUSTER_LISTEN")?,
+                listen_addr: cs
+                    .listen_addr
+                    .parse()
+                    .context("parsing TAEL_CLUSTER_LISTEN")?,
                 advertise_addr: cs
                     .advertise_addr
                     .parse()
@@ -200,8 +207,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
                 Arc::clone(&blobs),
                 log_bus,
             );
-            let metrics_service =
-                ingest::otlp_metrics::OtlpMetricsService::new(store);
+            let metrics_service = ingest::otlp_metrics::OtlpMetricsService::new(store);
             TonicServer::builder()
                 .add_service(
                     opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer::new(trace_service),
@@ -227,7 +233,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         let addr = config.rest_api_addr.clone();
         async move {
             let app = api::rest::router(store, blobs, bus, log_bus, cluster);
-            let listener = TcpListener::bind(&addr).await.expect("failed to bind REST addr");
+            let listener = TcpListener::bind(&addr)
+                .await
+                .expect("failed to bind REST addr");
             tracing::info!(%addr, "REST API listening");
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
@@ -281,17 +289,20 @@ fn print_startup_banner(config: &ServerConfig) {
 }
 
 /// Pick the CLI flag (if any) needed to reach this REST listener. Empty when
-/// REST is on the CLI default `127.0.0.1:7701`; `--port N` when only the port
-/// differs; full `--server …` otherwise.
+/// REST is on the CLI default `127.0.0.1:7701`; `--port-rest N` when only the
+/// port differs; full `--server …` otherwise.
 fn cli_connect_flag(rest_addr: &str) -> String {
     let (host, port) = match rest_addr.rsplit_once(':') {
         Some((h, p)) => (h, p),
         None => return String::new(),
     };
-    let local = matches!(host, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]");
+    let local = matches!(
+        host,
+        "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]"
+    );
     match (local, port) {
         (true, "7701") => String::new(),
-        (true, p) => format!(" --port {p}"),
+        (true, p) => format!(" --port-rest {p}"),
         (false, _) => format!(" --server http://{rest_addr}"),
     }
 }

@@ -20,11 +20,16 @@ struct Cli {
     #[arg(long, global = true, default_value = "http://127.0.0.1:7701")]
     server: String,
 
-    /// Local port shorthand. For client commands, equivalent to
+    /// REST API port shorthand. For client commands, equivalent to
     /// `--server http://127.0.0.1:<port>`. For `serve`, sets the REST API
     /// listen port to `127.0.0.1:<port>`. Conflicts with `--server`.
     #[arg(long, global = true, conflicts_with = "server")]
-    port: Option<u16>,
+    port_rest: Option<u16>,
+
+    /// OTLP gRPC ingest port (only used by `serve`). Sets the OTLP gRPC
+    /// listen address to `127.0.0.1:<port>`. Ignored by client commands.
+    #[arg(long, global = true)]
+    port_otel: Option<u16>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -288,10 +293,12 @@ async fn main() -> Result<()> {
         let mut config = tael_server::ServerConfig::from_env();
         if let Some(a) = otlp_grpc_addr {
             config.otlp_grpc_addr = a;
+        } else if let Some(p) = cli.port_otel {
+            config.otlp_grpc_addr = format!("127.0.0.1:{p}");
         }
         if let Some(a) = rest_api_addr {
             config.rest_api_addr = a;
-        } else if let Some(p) = cli.port {
+        } else if let Some(p) = cli.port_rest {
             config.rest_api_addr = format!("127.0.0.1:{p}");
         }
         if let Some(d) = data_dir {
@@ -303,7 +310,7 @@ async fn main() -> Result<()> {
         return tael_server::run(config).await;
     }
 
-    let server_url = match cli.port {
+    let server_url = match cli.port_rest {
         Some(p) => format!("http://127.0.0.1:{p}"),
         None => cli.server.clone(),
     };

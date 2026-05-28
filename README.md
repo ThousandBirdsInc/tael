@@ -218,9 +218,11 @@ Commands:
 Global Options:
   --format <json|table>   Output format (default: json)
   --server <URL>          Server address (default: http://127.0.0.1:7701)
-  --port <N>              Shorthand for --server http://127.0.0.1:<N>;
+  --port-rest <N>         Shorthand for --server http://127.0.0.1:<N>;
                           for `serve`, sets the REST API listen port.
                           Conflicts with --server.
+  --port-otel <N>         (serve only) OTLP gRPC ingest listen port on
+                          127.0.0.1. Ignored by client commands.
 ```
 
 ### `tael serve`
