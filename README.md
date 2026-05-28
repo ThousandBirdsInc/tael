@@ -218,6 +218,9 @@ Commands:
 Global Options:
   --format <json|table>   Output format (default: json)
   --server <URL>          Server address (default: http://127.0.0.1:7701)
+  --port <N>              Shorthand for --server http://127.0.0.1:<N>;
+                          for `serve`, sets the REST API listen port.
+                          Conflicts with --server.
 ```
 
 ### `tael serve`

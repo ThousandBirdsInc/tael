@@ -36,7 +36,7 @@ Do not invoke for: questions about the tael codebase itself (read code normally)
 
 - `tael` must be on `PATH`. If the command is missing, tell the user to `cargo install tael-cli` (one binary, server included) or build from this repo with `cargo build --release`.
 - The server runs from the same binary: `tael serve` starts OTLP ingest (gRPC :4317) and the REST API (:7701). If `server status` fails, the user likely hasn't started it.
-- Default server URL is `http://127.0.0.1:7701`. If the user's server is elsewhere, pass `--server <url>` on every call.
+- Default server URL is `http://127.0.0.1:7701`. If the user's server is elsewhere, pass `--server <url>` on every call (or `--port <N>` when it's still on localhost, just a different port).
 - Default output is JSON. **Always pass `--format json` explicitly** so you get a stable shape, even though it's the default — it makes your intent clear and protects against config changes.
 
 ## Investigation playbook

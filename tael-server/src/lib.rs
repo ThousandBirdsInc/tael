@@ -236,6 +236,8 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         }
     });
 
+    print_startup_banner(&config);
+
     // Both listeners drain on SIGTERM/Ctrl-C; await both so in-flight requests
     // finish before we flush and exit (`docs/tael-server-scaling-ha.md` §5.4).
     let (grpc_res, rest_res) = tokio::join!(grpc_handle, rest_handle);
@@ -250,6 +252,48 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     tracing::info!("tael server stopped");
 
     Ok(())
+}
+
+/// Friendly stdout banner shown on startup so a user running `tael serve`
+/// (with or without `--port`) immediately sees where to connect a CLI and
+/// where to point an OTLP exporter. Goes through `println!` so it's visible
+/// regardless of `RUST_LOG`.
+fn print_startup_banner(config: &ServerConfig) {
+    let rest = &config.rest_api_addr;
+    let otlp = &config.otlp_grpc_addr;
+    let connect_flag = cli_connect_flag(rest);
+
+    println!("tael server starting");
+    println!("  REST API     http://{rest}");
+    println!("  OTLP gRPC    {otlp}");
+    println!("  data dir     {}", config.data_dir);
+    println!("  storage      {:?}", config.storage);
+    println!();
+    println!("Connect a CLI from this machine:");
+    println!("  tael{connect_flag} services");
+    println!("  tael{connect_flag} live");
+    println!();
+    println!("Point a service at this server (OTLP):");
+    println!("  export OTEL_EXPORTER_OTLP_ENDPOINT=http://{otlp}");
+    println!("  export OTEL_EXPORTER_OTLP_PROTOCOL=grpc");
+    println!("  export OTEL_SERVICE_NAME=<your-service>");
+    println!();
+}
+
+/// Pick the CLI flag (if any) needed to reach this REST listener. Empty when
+/// REST is on the CLI default `127.0.0.1:7701`; `--port N` when only the port
+/// differs; full `--server …` otherwise.
+fn cli_connect_flag(rest_addr: &str) -> String {
+    let (host, port) = match rest_addr.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => return String::new(),
+    };
+    let local = matches!(host, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]");
+    match (local, port) {
+        (true, "7701") => String::new(),
+        (true, p) => format!(" --port {p}"),
+        (false, _) => format!(" --server http://{rest_addr}"),
+    }
 }
 
 /// Resolve when the process is asked to stop: Ctrl-C, or SIGTERM on Unix
