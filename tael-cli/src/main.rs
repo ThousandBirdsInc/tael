@@ -19,6 +19,12 @@ struct Cli {
     /// Server address
     #[arg(long, global = true, default_value = "http://127.0.0.1:7701")]
     server: String,
+
+    /// Local port shorthand. For client commands, equivalent to
+    /// `--server http://127.0.0.1:<port>`. For `serve`, sets the REST API
+    /// listen port to `127.0.0.1:<port>`. Conflicts with `--server`.
+    #[arg(long, global = true, conflicts_with = "server")]
+    port: Option<u16>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -285,6 +291,8 @@ async fn main() -> Result<()> {
         }
         if let Some(a) = rest_api_addr {
             config.rest_api_addr = a;
+        } else if let Some(p) = cli.port {
+            config.rest_api_addr = format!("127.0.0.1:{p}");
         }
         if let Some(d) = data_dir {
             config.data_dir = d;
@@ -295,7 +303,11 @@ async fn main() -> Result<()> {
         return tael_server::run(config).await;
     }
 
-    let client = client::TaelClient::new(&cli.server);
+    let server_url = match cli.port {
+        Some(p) => format!("http://127.0.0.1:{p}"),
+        None => cli.server.clone(),
+    };
+    let client = client::TaelClient::new(&server_url);
 
     match cli.command {
         // Handled above; the early return means this arm is never reached.
@@ -405,7 +417,7 @@ async fn main() -> Result<()> {
             status,
             interval,
         } => {
-            tui::run(&cli.server, service, status, interval).await?;
+            tui::run(&server_url, service, status, interval).await?;
         }
         Commands::Summarize { last, service } => {
             commands::summarize::run(&client, &cli.format, last, service).await?;
