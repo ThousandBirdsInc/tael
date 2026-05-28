@@ -283,7 +283,7 @@ and what the downsampling compactor (below) operates on.
 2. Payloads are hashed and written to the blob store (skip if the hash already
    exists). Metrics have none.
 3. The record is appended to the **WAL** (`walrus-rust`, already a dependency;
-   `wal_files/` already exists in-repo) and fsync'd. A one-byte signal tag in
+   defaulting to `~/.tael/wal_files`) and fsync'd. A one-byte signal tag in
    each WAL record distinguishes span/log/metric so replay routes correctly.
 4. Once durable, the write is **ack'd** to the OTLP/remote-write client and
    inserted into the in-memory buffer / LSM hot tier for its signal.

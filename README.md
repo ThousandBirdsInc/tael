@@ -234,7 +234,8 @@ Runs the server in the same binary. Flags fall back to the matching env var
 |------|-------------|---------|
 | `--otlp-grpc-addr` | OTLP gRPC listen address | `127.0.0.1:4317` |
 | `--rest-api-addr` | REST API listen address | `127.0.0.1:7701` |
-| `--data-dir` | Telemetry data directory | `./data` |
+| `--data-dir` | Telemetry data directory | `~/.tael/data` |
+| `--wal-dir` | Write-ahead log directory | `~/.tael/wal_files` |
 | `--storage` | Storage backend: `tael-backend` (default) or `duckdb` | `tael-backend` |
 
 ### `tael query traces`
@@ -372,7 +373,8 @@ The server (`tael serve`) is configured via flags or environment variables
 |----------|---------|-------------|
 | `TAEL_OTLP_GRPC_ADDR` | `127.0.0.1:4317` | OTLP gRPC listen address |
 | `TAEL_REST_API_ADDR` | `127.0.0.1:7701` | REST API listen address |
-| `TAEL_DATA_DIR` | `./data` | Telemetry data directory |
+| `TAEL_DATA_DIR` | `~/.tael/data` | Telemetry data directory |
+| `TAEL_WAL_DIR` | `~/.tael/wal_files` | Write-ahead log directory |
 | `TAEL_STORAGE` | `tael-backend` | Storage backend (`tael-backend` or `duckdb`) |
 | `TAEL_COLD_DIR` | `<data_dir>/cold` | Override the Parquet cold-tier location (e.g. an object-store mount) |
 | `TAEL_HOT_TIER_HOURS` | `24` | Hot-tier window before data rolls to the cold tier |

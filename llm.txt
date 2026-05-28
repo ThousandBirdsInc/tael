@@ -21,6 +21,10 @@ Global flags (must appear before or after the subcommand, not nested):
 - `--format json|table` — output format, default `json`. Prefer `json`
   for machine parsing; `table` is for humans.
 
+`tael serve` stores telemetry under `~/.tael/data` by default and its WAL under
+`~/.tael/wal_files`; override with `--data-dir`/`TAEL_DATA_DIR` and
+`--wal-dir`/`TAEL_WAL_DIR`.
+
 ### Querying data
 
 ```

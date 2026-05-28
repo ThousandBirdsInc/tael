@@ -201,7 +201,7 @@ log bodies; GC-safe ref accounting deferred to Phase 7.
 - New module tree `storage/backend/` with `TaelBackend` struct (does not yet
   implement `Store` fully — `unimplemented!()` reads behind a feature flag).
 - `backend/wal.rs`: append serialized records to a WAL via `walrus-rust`
-  (already a dependency; `wal_files/` already exists), fsync, then ack. Each
+  (already a dependency; defaults to `~/.tael/wal_files`), fsync, then ack. Each
   record carries a **signal tag byte** (span | log | metric) + a format version
   byte, so one WAL covers all three signals and replay routes each record to the
   right buffer. Implement crash replay on startup.

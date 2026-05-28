@@ -96,6 +96,8 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
 
+    configure_walrus_data_dir(&config.wal_dir);
+
     let blobs = Arc::new(BlobStore::new(&config.data_dir)?);
 
     // Cluster coordination (chitchat): automatic leader election + epoch fencing
@@ -185,6 +187,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         otlp_grpc = %config.otlp_grpc_addr,
         rest_api = %config.rest_api_addr,
         data_dir = %config.data_dir,
+        wal_dir = %config.wal_dir,
         storage = ?config.storage,
         "starting tael server"
     );
@@ -262,6 +265,14 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
+fn configure_walrus_data_dir(wal_dir: &str) {
+    // walrus-rust currently exposes its storage root through process env only.
+    // Tael owns the server process and sets this once before opening the WAL.
+    unsafe {
+        std::env::set_var("WALRUS_DATA_DIR", wal_dir);
+    }
+}
+
 /// Friendly stdout banner shown on startup so a user running `tael serve`
 /// (with or without `--port`) immediately sees where to connect a CLI and
 /// where to point an OTLP exporter. Goes through `println!` so it's visible
@@ -275,6 +286,7 @@ fn print_startup_banner(config: &ServerConfig) {
     println!("  REST API     http://{rest}");
     println!("  OTLP gRPC    {otlp}");
     println!("  data dir     {}", config.data_dir);
+    println!("  WAL dir      {}", config.wal_dir);
     println!("  storage      {:?}", config.storage);
     println!();
     println!("Connect a CLI from this machine:");

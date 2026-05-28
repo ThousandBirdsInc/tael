@@ -51,6 +51,9 @@ enum Commands {
         /// Data directory (env: TAEL_DATA_DIR)
         #[arg(long)]
         data_dir: Option<String>,
+        /// WAL directory (env: TAEL_WAL_DIR)
+        #[arg(long)]
+        wal_dir: Option<String>,
         /// Storage backend: tael-backend (default) or duckdb (env: TAEL_STORAGE)
         #[arg(long)]
         storage: Option<String>,
@@ -286,6 +289,7 @@ async fn main() -> Result<()> {
         otlp_grpc_addr,
         rest_api_addr,
         data_dir,
+        wal_dir,
         storage,
     } = cli.command
     {
@@ -303,6 +307,9 @@ async fn main() -> Result<()> {
         }
         if let Some(d) = data_dir {
             config.data_dir = d;
+        }
+        if let Some(d) = wal_dir {
+            config.wal_dir = d;
         }
         if let Some(s) = storage {
             config.storage = tael_server::StorageBackend::parse(&s);

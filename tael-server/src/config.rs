@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 /// Selected storage backend. `TaelBackend` (the purpose-built tiered engine)
 /// is the default; pass `--storage duckdb` or set `TAEL_STORAGE=duckdb` to use
 /// the legacy embedded-DuckDB backend instead.
@@ -22,6 +24,7 @@ pub struct ServerConfig {
     pub otlp_grpc_addr: String,
     pub rest_api_addr: String,
     pub data_dir: String,
+    pub wal_dir: String,
     pub storage: StorageBackend,
     /// When non-empty, this process runs as a stateless **query tier**: reads
     /// are served by a `FanoutStore` that scatter-gathers across these shard
@@ -64,7 +67,10 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "127.0.0.1:4317".into()),
             rest_api_addr: std::env::var("TAEL_REST_API_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7701".into()),
-            data_dir: std::env::var("TAEL_DATA_DIR").unwrap_or_else(|_| "./data".into()),
+            data_dir: std::env::var("TAEL_DATA_DIR").unwrap_or_else(|_| default_data_dir()),
+            wal_dir: std::env::var("TAEL_WAL_DIR")
+                .or_else(|_| std::env::var("WALRUS_DATA_DIR"))
+                .unwrap_or_else(|_| default_wal_dir()),
             // Default to the tael-backend engine; `TAEL_STORAGE` can override.
             storage: std::env::var("TAEL_STORAGE")
                 .map(|s| StorageBackend::parse(&s))
@@ -83,6 +89,36 @@ impl ServerConfig {
         }
         config
     }
+}
+
+fn default_data_dir() -> String {
+    default_tael_home().join("data").display().to_string()
+}
+
+fn default_wal_dir() -> String {
+    default_tael_home().join("wal_files").display().to_string()
+}
+
+fn default_tael_home() -> PathBuf {
+    home_dir()
+        .map(|home| home.join(".tael"))
+        .unwrap_or_else(|| PathBuf::from(".tael"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(
+            || match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+                (Some(drive), Some(path)) => {
+                    let mut home = PathBuf::from(drive);
+                    home.push(path);
+                    Some(home)
+                }
+                _ => None,
+            },
+        )
 }
 
 /// Build cluster settings from `TAEL_CLUSTER_*`. Returns `None` (coordination
