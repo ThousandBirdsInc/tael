@@ -23,7 +23,10 @@ pub fn healthy_api_request() -> ExportTraceServiceRequest {
         .offset(12)
         .duration(25)
         .attr(str_attr("db.system", "postgresql"))
-        .attr(str_attr("db.statement", "SELECT * FROM users WHERE active = true"));
+        .attr(str_attr(
+            "db.statement",
+            "SELECT * FROM users WHERE active = true",
+        ));
 
     ExportTraceServiceRequest {
         resource_spans: vec![
@@ -87,10 +90,13 @@ pub fn payment_error() -> ExportTraceServiceRequest {
         .error()
         .attr(str_attr("payment.provider", "stripe"))
         .attr(str_attr("error.type", "PaymentDeclined"))
-        .event("exception", vec![
-            str_attr("exception.type", "PaymentDeclinedException"),
-            str_attr("exception.message", "Card declined: insufficient funds"),
-        ]);
+        .event(
+            "exception",
+            vec![
+                str_attr("exception.type", "PaymentDeclinedException"),
+                str_attr("exception.message", "Card declined: insufficient funds"),
+            ],
+        );
 
     ExportTraceServiceRequest {
         resource_spans: vec![

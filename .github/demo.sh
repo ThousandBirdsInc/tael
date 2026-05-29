@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# tael live demo — record with:  asciinema rec demo.cast -c ./demo.sh
-# (gen_demo.sh renders a cast with cleaner timing; this one runs for real.)
+# tael live demo — record with:  asciinema rec .github/demo.cast -c .github/demo.sh
+# (.github/gen_demo.sh renders a cast with cleaner timing; this one runs for real.)
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 type_cmd() {
     local cmd="$1"

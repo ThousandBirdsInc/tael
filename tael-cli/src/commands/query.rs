@@ -54,9 +54,9 @@ pub async fn traces(
 fn parse_attribute_args(args: &[String]) -> Result<Vec<(String, String)>> {
     args.iter()
         .map(|raw| {
-            let (k, v) = raw.split_once('=').ok_or_else(|| {
-                anyhow::anyhow!("--attribute expects key=value, got {raw:?}")
-            })?;
+            let (k, v) = raw
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--attribute expects key=value, got {raw:?}"))?;
             let k = k.trim();
             if k.is_empty() {
                 anyhow::bail!("--attribute key cannot be empty (got {raw:?})");

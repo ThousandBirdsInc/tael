@@ -1,10 +1,16 @@
 pub mod anomalies;
 pub mod comment;
 pub mod correlate;
+pub mod diagnose;
+pub mod eval;
+pub mod experiment;
 pub mod get;
+pub mod issue;
 pub mod query;
+pub mod reliability;
 pub mod server;
 pub mod services;
+pub mod signal;
 pub mod skill;
 pub mod summarize;
 pub mod watch;

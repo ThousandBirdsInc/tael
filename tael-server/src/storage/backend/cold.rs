@@ -208,7 +208,9 @@ impl ColdTier {
             metrics,
             |m| m.timestamp,
             |group| {
-                group.sort_by(|a, b| (a.name.as_str(), a.timestamp).cmp(&(b.name.as_str(), b.timestamp)));
+                group.sort_by(|a, b| {
+                    (a.name.as_str(), a.timestamp).cmp(&(b.name.as_str(), b.timestamp))
+                });
                 metrics_to_batch(group)
             },
         )
@@ -305,11 +307,16 @@ fn write_partitioned<T>(
     let mut by_partition: BTreeMap<(String, String), Vec<&T>> = BTreeMap::new();
     for r in records {
         let dt = ts_of(r);
-        let key = (dt.format("%Y-%m-%d").to_string(), dt.format("%H").to_string());
+        let key = (
+            dt.format("%Y-%m-%d").to_string(),
+            dt.format("%H").to_string(),
+        );
         by_partition.entry(key).or_default().push(r);
     }
     for ((date, hour), mut group) in by_partition {
-        let dir = root.join(format!("date={date}")).join(format!("hour={hour}"));
+        let dir = root
+            .join(format!("date={date}"))
+            .join(format!("hour={hour}"));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{stem}-{}.parquet", ulid::Ulid::new()));
         let batch = to_batch(&mut group)?;
@@ -399,7 +406,11 @@ fn spans_to_batch(spans: &[&Span]) -> Result<RecordBatch> {
         .collect();
     let llm: Vec<Option<String>> = spans
         .iter()
-        .map(|s| s.llm.as_ref().map(|l| serde_json::to_string(l).unwrap_or_default()))
+        .map(|s| {
+            s.llm
+                .as_ref()
+                .map(|l| serde_json::to_string(l).unwrap_or_default())
+        })
         .collect();
 
     let columns: Vec<ArrayRef> = vec![
@@ -497,18 +508,50 @@ fn log_schema() -> Arc<Schema> {
 fn logs_to_batch(logs: &[&LogRecord]) -> Result<RecordBatch> {
     let ns = |dt: DateTime<Utc>| dt.timestamp_nanos_opt().unwrap_or(0);
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from(logs.iter().map(|l| ns(l.timestamp)).collect::<Vec<_>>())),
-        Arc::new(Int64Array::from(logs.iter().map(|l| ns(l.observed_timestamp)).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.trace_id.as_deref()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.span_id.as_deref()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.severity.to_string()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.severity_text.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.body.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.service.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(
-            logs.iter().map(|l| serde_json::to_string(&l.attributes).unwrap_or_else(|_| "{}".into())).collect::<Vec<_>>(),
+        Arc::new(Int64Array::from(
+            logs.iter().map(|l| ns(l.timestamp)).collect::<Vec<_>>(),
         )),
-        Arc::new(StringArray::from(logs.iter().map(|l| l.body_sha256.as_deref()).collect::<Vec<_>>())),
+        Arc::new(Int64Array::from(
+            logs.iter()
+                .map(|l| ns(l.observed_timestamp))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| l.trace_id.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| l.span_id.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| l.severity.to_string())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| l.severity_text.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter().map(|l| l.body.as_str()).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter().map(|l| l.service.as_str()).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| serde_json::to_string(&l.attributes).unwrap_or_else(|_| "{}".into()))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            logs.iter()
+                .map(|l| l.body_sha256.as_deref())
+                .collect::<Vec<_>>(),
+        )),
     ];
     Ok(RecordBatch::try_new(log_schema(), columns)?)
 }
@@ -516,7 +559,11 @@ fn logs_to_batch(logs: &[&LogRecord]) -> Result<RecordBatch> {
 fn batch_to_logs(batch: &RecordBatch) -> Result<Vec<LogRecord>> {
     macro_rules! col {
         ($i:expr, $ty:ty) => {
-            batch.column($i).as_any().downcast_ref::<$ty>().context("bad log column")?
+            batch
+                .column($i)
+                .as_any()
+                .downcast_ref::<$ty>()
+                .context("bad log column")?
         };
     }
     let ts = col!(0, Int64Array);
@@ -529,7 +576,13 @@ fn batch_to_logs(batch: &RecordBatch) -> Result<Vec<LogRecord>> {
     let service = col!(7, StringArray);
     let attrs = col!(8, StringArray);
     let body_sha = col!(9, StringArray);
-    let opt = |a: &StringArray, i: usize| if a.is_null(i) { None } else { Some(a.value(i).to_string()) };
+    let opt = |a: &StringArray, i: usize| {
+        if a.is_null(i) {
+            None
+        } else {
+            Some(a.value(i).to_string())
+        }
+    };
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -566,15 +619,37 @@ fn metric_schema() -> Arc<Schema> {
 fn metrics_to_batch(metrics: &[&MetricPoint]) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(
-            metrics.iter().map(|m| m.timestamp.timestamp_nanos_opt().unwrap_or(0)).collect::<Vec<_>>(),
+            metrics
+                .iter()
+                .map(|m| m.timestamp.timestamp_nanos_opt().unwrap_or(0))
+                .collect::<Vec<_>>(),
         )),
-        Arc::new(StringArray::from(metrics.iter().map(|m| m.service.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(metrics.iter().map(|m| m.name.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(metrics.iter().map(|m| m.metric_type.to_string()).collect::<Vec<_>>())),
-        Arc::new(Float64Array::from(metrics.iter().map(|m| m.value).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(metrics.iter().map(|m| m.unit.as_str()).collect::<Vec<_>>())),
         Arc::new(StringArray::from(
-            metrics.iter().map(|m| serde_json::to_string(&m.attributes).unwrap_or_else(|_| "{}".into())).collect::<Vec<_>>(),
+            metrics
+                .iter()
+                .map(|m| m.service.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics
+                .iter()
+                .map(|m| m.metric_type.to_string())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            metrics.iter().map(|m| m.value).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics.iter().map(|m| m.unit.as_str()).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics
+                .iter()
+                .map(|m| serde_json::to_string(&m.attributes).unwrap_or_else(|_| "{}".into()))
+                .collect::<Vec<_>>(),
         )),
     ];
     Ok(RecordBatch::try_new(metric_schema(), columns)?)
@@ -597,14 +672,32 @@ fn rollup_schema() -> Arc<Schema> {
 fn rollups_to_batch(rollups: &[&RollupPoint]) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(
-            rollups.iter().map(|r| r.bucket_start.timestamp_nanos_opt().unwrap_or(0)).collect::<Vec<_>>(),
+            rollups
+                .iter()
+                .map(|r| r.bucket_start.timestamp_nanos_opt().unwrap_or(0))
+                .collect::<Vec<_>>(),
         )),
-        Arc::new(StringArray::from(rollups.iter().map(|r| r.service.as_str()).collect::<Vec<_>>())),
-        Arc::new(StringArray::from(rollups.iter().map(|r| r.name.as_str()).collect::<Vec<_>>())),
-        Arc::new(Float64Array::from(rollups.iter().map(|r| r.min).collect::<Vec<_>>())),
-        Arc::new(Float64Array::from(rollups.iter().map(|r| r.max).collect::<Vec<_>>())),
-        Arc::new(Float64Array::from(rollups.iter().map(|r| r.sum).collect::<Vec<_>>())),
-        Arc::new(Int64Array::from(rollups.iter().map(|r| r.count).collect::<Vec<_>>())),
+        Arc::new(StringArray::from(
+            rollups
+                .iter()
+                .map(|r| r.service.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rollups.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rollups.iter().map(|r| r.min).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rollups.iter().map(|r| r.max).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rollups.iter().map(|r| r.sum).collect::<Vec<_>>(),
+        )),
+        Arc::new(Int64Array::from(
+            rollups.iter().map(|r| r.count).collect::<Vec<_>>(),
+        )),
     ];
     Ok(RecordBatch::try_new(rollup_schema(), columns)?)
 }
@@ -612,7 +705,11 @@ fn rollups_to_batch(rollups: &[&RollupPoint]) -> Result<RecordBatch> {
 fn batch_to_rollups(batch: &RecordBatch) -> Result<Vec<RollupPoint>> {
     macro_rules! col {
         ($i:expr, $ty:ty) => {
-            batch.column($i).as_any().downcast_ref::<$ty>().context("bad rollup column")?
+            batch
+                .column($i)
+                .as_any()
+                .downcast_ref::<$ty>()
+                .context("bad rollup column")?
         };
     }
     let bucket = col!(0, Int64Array);
@@ -640,7 +737,11 @@ fn batch_to_rollups(batch: &RecordBatch) -> Result<Vec<RollupPoint>> {
 fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
     macro_rules! col {
         ($i:expr, $ty:ty) => {
-            batch.column($i).as_any().downcast_ref::<$ty>().context("bad metric column")?
+            batch
+                .column($i)
+                .as_any()
+                .downcast_ref::<$ty>()
+                .context("bad metric column")?
         };
     }
     let ts = col!(0, Int64Array);

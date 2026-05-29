@@ -1,0 +1,5 @@
+{"case_id":"australia_capital","question":"What is the capital of Australia?","must_include":["Canberra"],"must_exclude":["Sydney is the capital"],"min_searches":1,"category":"factual"}
+{"case_id":"australia_largest_city","question":"What is the largest city in Australia by population?","must_include":["Sydney"],"must_exclude":["Canberra is the largest"],"min_searches":1,"category":"contrastive"}
+{"case_id":"einstein_nobel","question":"In what year did Albert Einstein win the Nobel Prize for his theory of relativity?","must_include_any":["1921","photoelectric"],"must_exclude":["relativity"],"min_searches":1,"category":"false_premise"}
+{"case_id":"franklin_president","question":"When did Benjamin Franklin serve as President of the United States?","must_include_any":["never","not president","did not serve"],"min_searches":1,"category":"false_premise"}
+{"case_id":"olympics_2016_host_capital","question":"What is the capital of the country that hosted the 2016 Summer Olympics?","must_include_any":["Brasilia"],"must_exclude":["Rio de Janeiro is the capital"],"min_searches":2,"category":"multi_hop"}

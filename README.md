@@ -137,6 +137,28 @@ absolute over baseline, or p95 latency regresses ≥1.5× (severity bumps at
 and returns the spans, any logs tagged with that `trace_id`, and metrics
 from the touched services within the trace's time range.
 
+### Trace-Native Evals and Reliability Loop
+Tael evals are designed around the full execution trace, not a narrow result
+row. Eval runs, scores, comments, large artifacts, and live progress reuse the
+same spans, metrics, comments, blobs, SQL, and TUI that production debugging
+uses.
+
+The roadmap extends this into a floor-raising loop for agent reliability:
+
+```text
+production trace -> failure classification -> issue/signal -> golden case -> fix -> compare -> monitor
+```
+
+Commands include `tael issue` for recurring failure patterns, `tael signal` for
+long-running behavior monitoring, `tael eval case add --from-trace` for
+promoting production failures into golden regression cases, `tael eval suite
+inspect` for suite hygiene, and `tael experiment compare` for validating model,
+prompt, tool, retrieval, or guardrail changes against production outcomes.
+
+The initial implementation is intentionally comment-backed: issues, signal
+definitions, eval case provenance, and self diagnostics are structured trace
+comments, so they stay attached to the trace that motivated them.
+
 ### Claude Code Skill
 `tael` ships with a [Claude Code skill](./SKILL.md) so Claude Code picks up telemetry-querying instructions automatically when you're debugging inside a project that uses tael. Install it once:
 
@@ -212,6 +234,11 @@ Commands:
   anomalies       Surface services that regressed vs a baseline window
   correlate       Pull spans + logs + metrics for a trace ID
   watch           Poll the summary endpoint and print deltas per tick
+  eval            Collect, score, report, and compare trace-native evals
+  issue           Classify production failures into recurring issues
+  signal          Define and inspect long-running reliability signals
+  experiment      Compare production experiment variants
+  diagnose        Record and list untrusted agent self diagnostics
   skill install   Install the tael skill into Claude Code
   server status   Check server health
 
@@ -408,6 +435,7 @@ See [DESIGN.md](DESIGN.md) for the full design document and milestone plan.
 - [x] **M1**: OTLP trace ingestion, embedded storage, CLI queries, trace comments, TUI
 - [x] **M2**: Metrics + logs ingestion, PromQL subset
 - [x] **M3**: `tael summarize`, `tael anomalies`, `tael correlate`, `tael watch`
+- [x] **M3.5**: comment-backed floor-raising reliability loop: issues, signals, trace-to-golden-case promotion, suite hygiene, production experiment comparison, and self-diagnostic conventions — see [`docs/tael-evals-design.md`](docs/tael-evals-design.md)
 - [x] **tael-backend**: purpose-built tiered storage engine (WAL + LSM hot tier + Parquet cold tier + content-addressed blobs + full-text search), now the default — see [`docs/tael-backend-design.md`](docs/tael-backend-design.md)
 - [ ] **M4**: object-store cold tier + horizontal scale / HA ([`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md)), MCP server, auth
 

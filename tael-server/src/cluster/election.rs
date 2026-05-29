@@ -49,12 +49,10 @@ impl EpochFencer {
             if epoch == cur {
                 return true;
             }
-            match self.highest.compare_exchange(
-                cur,
-                epoch,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .highest
+                .compare_exchange(cur, epoch, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return true,
                 Err(actual) => cur = actual,
             }
@@ -103,7 +101,10 @@ mod tests {
     fn fencer_accepts_equal_and_higher_rejects_lower() {
         let f = EpochFencer::new();
         assert!(f.check_and_advance(5), "first record sets the gate");
-        assert!(f.check_and_advance(5), "same epoch (same leader) is accepted");
+        assert!(
+            f.check_and_advance(5),
+            "same epoch (same leader) is accepted"
+        );
         assert!(f.check_and_advance(7), "newer epoch advances the gate");
         assert_eq!(f.highest(), 7);
         assert!(

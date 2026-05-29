@@ -7,8 +7,8 @@ use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::Trac
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let addr = std::env::var("TAEL_OTLP_GRPC_ADDR")
-        .unwrap_or_else(|_| "http://127.0.0.1:4317".into());
+    let addr =
+        std::env::var("TAEL_OTLP_GRPC_ADDR").unwrap_or_else(|_| "http://127.0.0.1:4317".into());
 
     println!("connecting to tael server at {addr}");
     let mut client = TraceServiceClient::connect(addr).await?;
@@ -17,7 +17,10 @@ async fn main() -> Result<()> {
         ("healthy API request", scenarios::healthy_api_request()),
         ("slow database query", scenarios::slow_db_query()),
         ("error in payment service", scenarios::payment_error()),
-        ("fan-out to downstream services", scenarios::fanout_request()),
+        (
+            "fan-out to downstream services",
+            scenarios::fanout_request(),
+        ),
         ("burst of fast requests", scenarios::fast_burst()),
         ("LLM chat request (gen_ai.*)", scenarios::llm_chat_request()),
     ];
@@ -26,7 +29,12 @@ async fn main() -> Result<()> {
         let span_count: usize = request
             .resource_spans
             .iter()
-            .map(|rs| rs.scope_spans.iter().map(|ss| ss.spans.len()).sum::<usize>())
+            .map(|rs| {
+                rs.scope_spans
+                    .iter()
+                    .map(|ss| ss.spans.len())
+                    .sum::<usize>()
+            })
             .sum();
 
         client.export(request).await?;

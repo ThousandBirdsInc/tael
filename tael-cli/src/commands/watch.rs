@@ -39,16 +39,12 @@ fn build_delta(prev: Option<&Value>, current: &Value) -> Value {
 
     let delta_i64 = |field: &str, group: &str| -> i64 {
         let cur = current[group][field].as_i64().unwrap_or(0);
-        let base = prev
-            .and_then(|p| p[group][field].as_i64())
-            .unwrap_or(cur);
+        let base = prev.and_then(|p| p[group][field].as_i64()).unwrap_or(cur);
         cur - base
     };
     let delta_f64 = |field: &str, group: &str| -> f64 {
         let cur = current[group][field].as_f64().unwrap_or(0.0);
-        let base = prev
-            .and_then(|p| p[group][field].as_f64())
-            .unwrap_or(cur);
+        let base = prev.and_then(|p| p[group][field].as_f64()).unwrap_or(cur);
         cur - base
     };
 

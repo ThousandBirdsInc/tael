@@ -61,11 +61,7 @@ pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoRespon
         }
         Err(e) => {
             tracing::error!(error = %e, "prom remote-write failed");
-            (
-                StatusCode::BAD_REQUEST,
-                format!("remote-write error: {e}"),
-            )
-                .into_response()
+            (StatusCode::BAD_REQUEST, format!("remote-write error: {e}")).into_response()
         }
     }
 }
@@ -76,8 +72,7 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
         .decompress_vec(body)
         .context("snappy decompress failed")?;
 
-    let req = WriteRequest::decode(decompressed.as_slice())
-        .context("protobuf decode failed")?;
+    let req = WriteRequest::decode(decompressed.as_slice()).context("protobuf decode failed")?;
 
     let mut points: Vec<MetricPoint> = Vec::new();
 

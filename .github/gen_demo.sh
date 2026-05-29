@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Generate demo.cast with realistic timing from actual command output.
+# Generate .github/demo.cast with realistic timing from actual command output.
 # Captures live output from the binaries, then renders an asciinema v3 cast.
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
 TAEL="./target/debug/tael"
 TEST="./target/debug/tael-test"
-CAST="demo.cast"
+CAST="$SCRIPT_DIR/demo.cast"
 
 cargo build --quiet 2>/dev/null
 
@@ -201,4 +205,4 @@ with open(cast_file, 'w') as f:
 print(f"Wrote {cast_file} ({len(events)} events, {t:.0f}s)")
 PYEOF
 
-echo "Done! Play with: asciinema play demo.cast"
+echo "Done! Play with: asciinema play .github/demo.cast"

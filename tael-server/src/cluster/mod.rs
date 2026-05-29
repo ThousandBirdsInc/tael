@@ -28,8 +28,8 @@ use anyhow::{Context, Result};
 use chitchat::transport::UdpTransport;
 use chitchat::{ChitchatConfig, ChitchatHandle, ChitchatId, FailureDetectorConfig};
 
-use election::elect_leader;
 pub use election::EpochFencer;
+use election::elect_leader;
 
 const EPOCH_KEY: &str = "epoch";
 const ROLE_KEY: &str = "role";
@@ -142,8 +142,7 @@ impl ClusterCoordinator {
             loop {
                 tick.tick().await;
                 let mut cc = chitchat.lock().await;
-                let live_ids: Vec<String> =
-                    cc.live_nodes().map(|id| id.node_id.clone()).collect();
+                let live_ids: Vec<String> = cc.live_nodes().map(|id| id.node_id.clone()).collect();
                 // The highest epoch any live member has advertised — a freshly
                 // promoted leader must bump past all of them.
                 let mut max_epoch = 0u64;
@@ -156,7 +155,9 @@ impl ClusterCoordinator {
                         max_epoch = max_epoch.max(epoch);
                     }
                 }
-                let am_leader = elect_leader(&live_ids).map(|l| *l == node_id).unwrap_or(false);
+                let am_leader = elect_leader(&live_ids)
+                    .map(|l| *l == node_id)
+                    .unwrap_or(false);
                 let was_leader = is_leader.swap(am_leader, Ordering::AcqRel);
                 if am_leader && !was_leader {
                     let new_epoch = max_epoch + 1;

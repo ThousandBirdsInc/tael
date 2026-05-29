@@ -90,7 +90,6 @@ impl TaelBackend {
         Ok(backend)
     }
 
-
     /// The shared payload search index — handed to the ingest path so prompt/
     /// completion text is indexed at write time (the text isn't retained on the
     /// span itself, only its blob hashes).
@@ -109,7 +108,10 @@ impl TaelBackend {
         // Write to cold first, then the hot eviction is already done; if we
         // crash between, the spans remain in the DuckDB projection and the WAL.
         self.cold.write_spans(&evicted)?;
-        tracing::info!(spans = evicted.len(), "tael-backend: compacted spans to cold tier");
+        tracing::info!(
+            spans = evicted.len(),
+            "tael-backend: compacted spans to cold tier"
+        );
         Ok(evicted.len())
     }
 
@@ -130,7 +132,11 @@ impl TaelBackend {
         }
         let n = logs.len() + metrics.len();
         if n > 0 {
-            tracing::info!(logs = logs.len(), metrics = metrics.len(), "tael-backend: compacted logs/metrics to cold tier");
+            tracing::info!(
+                logs = logs.len(),
+                metrics = metrics.len(),
+                "tael-backend: compacted logs/metrics to cold tier"
+            );
         }
         Ok(n)
     }
@@ -169,7 +175,10 @@ impl TaelBackend {
         let cutoff_date = keep.format("%Y-%m-%d").to_string();
         let dropped = self.cold.drop_partitions_before(&cutoff_date)?;
         if dropped > 0 {
-            tracing::info!(partitions = dropped, "tael-backend: dropped expired cold partitions");
+            tracing::info!(
+                partitions = dropped,
+                "tael-backend: dropped expired cold partitions"
+            );
         }
         Ok(dropped)
     }
@@ -502,8 +511,18 @@ mod tests {
             TraceQuery::default(),
         ];
         for q in &queries {
-            let mut hot: Vec<String> = b.query_traces(q).unwrap().into_iter().map(|s| s.span_id).collect();
-            let mut duck: Vec<String> = oracle.query_traces(q).unwrap().into_iter().map(|s| s.span_id).collect();
+            let mut hot: Vec<String> = b
+                .query_traces(q)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.span_id)
+                .collect();
+            let mut duck: Vec<String> = oracle
+                .query_traces(q)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.span_id)
+                .collect();
             hot.sort();
             duck.sort();
             assert_eq!(hot, duck, "hot tier and DuckDB disagree for {q:?}");
@@ -722,7 +741,8 @@ mod tests {
         .unwrap();
         // Index payload text the way ingestion would.
         let idx = b.search_index();
-        idx.index_span("t1", "s1", "summarize the rate limit policy").unwrap();
+        idx.index_span("t1", "s1", "summarize the rate limit policy")
+            .unwrap();
         idx.index_span("t2", "s2", "translate to French").unwrap();
         idx.commit().unwrap();
 

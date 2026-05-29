@@ -243,7 +243,10 @@ impl TaelClient {
         }
         let resp = self
             .http
-            .post(format!("{}/api/v1/traces/{}/comments", self.base_url, trace_id))
+            .post(format!(
+                "{}/api/v1/traces/{}/comments",
+                self.base_url, trace_id
+            ))
             .json(&payload)
             .send()
             .await?
@@ -256,7 +259,10 @@ impl TaelClient {
     pub async fn get_comments(&self, trace_id: &str) -> Result<Value> {
         let resp = self
             .http
-            .get(format!("{}/api/v1/traces/{}/comments", self.base_url, trace_id))
+            .get(format!(
+                "{}/api/v1/traces/{}/comments",
+                self.base_url, trace_id
+            ))
             .send()
             .await?
             .error_for_status()?
@@ -318,6 +324,115 @@ impl TaelClient {
             .http
             .get(format!("{}/api/v1/correlate", self.base_url))
             .query(&[("trace", trace)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn eval_runs(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/runs", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn eval_status(&self, run_id: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/runs/{}", self.base_url, run_id))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn eval_cases(&self, run_id: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/v1/evals/runs/{}/cases",
+                self.base_url, run_id
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn eval_scores(&self, run_id: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/v1/evals/runs/{}/scores",
+                self.base_url, run_id
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn eval_compare(&self, run_id: &str, baseline: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/v1/evals/runs/{}/compare",
+                self.base_url, run_id
+            ))
+            .query(&[("baseline", baseline)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn add_eval_score(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/evals/scores", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn put_blob(&self, content: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/blobs", self.base_url))
+            .body(content.to_string())
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn add_eval_runner_span(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/evals/runner-spans", self.base_url))
+            .json(payload)
             .send()
             .await?
             .error_for_status()?

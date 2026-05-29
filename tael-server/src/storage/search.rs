@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, Value};
+use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, TantivyDocument, doc};
 
 pub struct SearchIndex {
@@ -93,8 +93,12 @@ mod tests {
     fn indexes_and_searches_payload_text() {
         let dir = tempfile::tempdir().unwrap();
         let idx = SearchIndex::open(dir.path().to_str().unwrap()).unwrap();
-        idx.index_span("t1", "s1", "You are a helpful assistant. Summarize the rate limit policy.")
-            .unwrap();
+        idx.index_span(
+            "t1",
+            "s1",
+            "You are a helpful assistant. Summarize the rate limit policy.",
+        )
+        .unwrap();
         idx.index_span("t2", "s2", "Translate this paragraph to French.")
             .unwrap();
         idx.commit().unwrap();

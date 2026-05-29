@@ -32,12 +32,15 @@ pub fn install(project: bool, force: bool) -> Result<()> {
         );
     }
 
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     fs::write(&target, SKILL_MD)
         .with_context(|| format!("failed to write {}", target.display()))?;
 
-    let action = if existed_before { "Updated" } else { "Installed" };
+    let action = if existed_before {
+        "Updated"
+    } else {
+        "Installed"
+    };
     let scope = if project { "project" } else { "personal" };
     println!("{action} tael skill ({scope}) at {}", target.display());
 

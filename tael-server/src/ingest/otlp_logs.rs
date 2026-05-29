@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use opentelemetry_proto::tonic::collector::logs::v1::{
-    ExportLogsServiceRequest, ExportLogsServiceResponse,
-    logs_service_server::LogsService,
+    ExportLogsServiceRequest, ExportLogsServiceResponse, logs_service_server::LogsService,
 };
 use tonic::{Request, Response, Status};
 

@@ -27,18 +27,12 @@ pub async fn add(
     Ok(())
 }
 
-pub async fn list(
-    client: &TaelClient,
-    format: &OutputFormat,
-    trace_id: &str,
-) -> Result<()> {
+pub async fn list(client: &TaelClient, format: &OutputFormat, trace_id: &str) -> Result<()> {
     let result = client.get_comments(trace_id).await?;
     match format {
         OutputFormat::Json => output::print_json(&result),
         OutputFormat::Table => {
-            let comments = result
-                .get("comments")
-                .and_then(|c| c.as_array());
+            let comments = result.get("comments").and_then(|c| c.as_array());
             match comments {
                 Some(arr) if !arr.is_empty() => {
                     for c in arr {

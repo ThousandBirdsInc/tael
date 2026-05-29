@@ -1,0 +1,13 @@
+[project]
+name = "tael-evals-agent-demo"
+version = "0.1.0"
+description = "Small local-wiki agent demo that exports eval traces to Tael via OpenTelemetry."
+requires-python = ">=3.11"
+dependencies = [
+  "opentelemetry-api>=1.25,<2",
+  "opentelemetry-sdk>=1.25,<2",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25,<2",
+]
+
+[tool.uv]
+package = false

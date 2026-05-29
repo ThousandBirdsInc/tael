@@ -27,8 +27,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::time::Duration;
 
-use super::backend::WalSink;
 use super::Store;
+use super::backend::WalSink;
 use super::models::{
     AnomalyReport, CorrelateReport, LogQuery, LogRecord, MetricPoint, MetricQuery, ServiceInfo,
     Span, SummaryReport, TraceComment, TraceQuery,
@@ -172,7 +172,10 @@ impl Store for RemoteStore {
         }
         let resp = self
             .http
-            .post(format!("{}/api/v1/traces/{trace_id}/comments", self.base_url))
+            .post(format!(
+                "{}/api/v1/traces/{trace_id}/comments",
+                self.base_url
+            ))
             .json(&payload)
             .send()
             .with_context(|| format!("POST comment to {}", self.base_url))?
@@ -271,7 +274,9 @@ impl Store for RemoteStore {
         match resp.status() {
             StatusCode::NOT_FOUND => Ok(None),
             s if s.is_success() => {
-                let body = resp.json::<Value>().context("decoding correlate response")?;
+                let body = resp
+                    .json::<Value>()
+                    .context("decoding correlate response")?;
                 Ok(Some(
                     serde_json::from_value(body).context("deserializing CorrelateReport")?,
                 ))
@@ -452,7 +457,11 @@ mod tests {
         assert!(services.iter().any(|s| s.name == "api"));
 
         // Writes are rejected: ingest must go to the owning shard via OTLP.
-        assert!(remote.insert_spans(&[test_span("t3", "s4", "api")]).is_err());
+        assert!(
+            remote
+                .insert_spans(&[test_span("t3", "s4", "api")])
+                .is_err()
+        );
     }
 
     /// Serve an existing store over a fresh REST server thread (the store is
@@ -525,6 +534,9 @@ mod tests {
 
         // And it serves them over its own REST API (full path works).
         let via_http = RemoteStore::new(format!("http://{standby_addr}")).unwrap();
-        assert_eq!(via_http.query_traces(&TraceQuery::default()).unwrap().len(), 3);
+        assert_eq!(
+            via_http.query_traces(&TraceQuery::default()).unwrap().len(),
+            3
+        );
     }
 }

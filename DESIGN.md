@@ -13,6 +13,7 @@ There is no observability platform designed for machine consumption as a first-c
 3. **Return structured output** (JSON, tables) that agents can parse and reason over without scraping HTML or interpreting screenshots.
 4. **Support natural-language and structured queries** so agents can ask "what's slow?" or run precise PromQL/trace filters.
 5. **Optimize for agent workflows**: correlation, root-cause suggestions, anomaly detection, and watch/subscribe patterns.
+6. **Close the agent reliability loop**: turn production traces into classified failures, high-signal golden cases, production signals, and experiment comparisons.
 
 ## Non-Goals
 
@@ -279,8 +280,18 @@ This lets agents like Claude Code call observability tools without shelling out.
 - [x] `tael anomalies` — baseline-vs-current regression detection
 - [x] `tael correlate` — cross-signal correlation by trace ID
 - [x] `tael watch` — polling summary deltas
+- [x] `tael eval` — trace-native eval collection, scoring, reporting, and live progress ([design](docs/tael-evals-design.md))
 - [ ] `tael diff` — baseline comparison
 - [ ] `tael topology` — service dependency graph
+
+### M3.5: Floor-Raising Reliability Loop
+- [x] `tael issue` — classify production stumbles into recurring failure patterns, backed by structured trace comments
+- [x] `tael signal` — define and trend long-running agent behaviors such as ignored tool errors, bad refusals, context loss, and user frustration
+- [x] `tael eval case add --from-trace` — promote a production trace into a golden regression case provenance record
+- [x] `tael eval suite inspect` — identify missing provenance, missing expected behavior, duplicate failure modes, and critical-path coverage
+- [x] `tael experiment compare` — compare production variants by error rate, latency, and optional issue/signal rate
+- [x] self-diagnostic comment convention — allow agents to report suspected missing context, capability gaps, broken tools, or task failure without treating those reports as trusted facts
+- [ ] Dedicated issue/signal tables and distributed query support if comment-backed conventions become limiting
 
 ### M4: Scale + Polish
 - [ ] ClickHouse storage backend

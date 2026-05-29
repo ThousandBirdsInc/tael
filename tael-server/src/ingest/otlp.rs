@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-    trace_service_server::TraceService,
+    ExportTraceServiceRequest, ExportTraceServiceResponse, trace_service_server::TraceService,
 };
 use tonic::{Request, Response, Status};
 
@@ -247,9 +246,7 @@ fn timestamp_to_datetime(nanos: u64) -> DateTime<Utc> {
 }
 
 /// Map the OpenTelemetry proto span kind to our [`SpanKind`].
-fn map_span_kind(
-    kind: opentelemetry_proto::tonic::trace::v1::span::SpanKind,
-) -> SpanKind {
+fn map_span_kind(kind: opentelemetry_proto::tonic::trace::v1::span::SpanKind) -> SpanKind {
     use opentelemetry_proto::tonic::trace::v1::span::SpanKind as K;
     match kind {
         K::Server => SpanKind::Server,

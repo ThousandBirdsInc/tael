@@ -109,10 +109,33 @@ tael comment list <trace_id>
 
 ```
 tael live [--service <name>] [--status <s>] [--interval <secs>]
+tael live --evals
+tael live --eval-run <run_id>
 ```
 
 Interactive ratatui feed of incoming spans. Primarily a human tool — not
 useful from an agent. Skip unless explicitly asked.
+
+### Evals
+
+Eval support reuses existing telemetry: spans carry `tael.eval.*`
+attributes, scores are `tael_eval_score` metric points, and notes are trace
+comments.
+
+```
+tael eval run <cases.jsonl> --suite <name> --cmd '<command with {case_id}>'
+tael eval score <run_id> <scores.jsonl>
+tael eval runs
+tael eval status <run_id>
+tael eval cases <run_id>
+tael eval scores <run_id>
+tael eval report <run_id>
+tael eval compare <run_id> <baseline_run_id>
+```
+
+Score JSONL lines require `case_id`, `metric`, and `value`; `run_id` is filled
+from the command argument when omitted. Optional fields include `suite_id`,
+`trace_id`, `span_id`, `scorer`, `label`, `rationale_sha256`, and `source`.
 
 ### Server
 
@@ -132,6 +155,10 @@ With `--format json` (default), responses have these top-level shapes:
 - `tael query metrics` (filter mode) → `{"metrics": [...], "count": N}`
 - `tael query metrics --query` → `{"query", "series": [...], "count": N}`
 - `tael comment list` → `{"comments": [...], "count": N}`
+- `tael eval runs` → `{"runs": [...], "count": N}`
+- `tael eval status` → `{"run": {...}}`
+- `tael eval cases` → `{"run_id", "cases": [...], "count": N}`
+- `tael eval scores` → `{"run_id", "scores": [...], "count": N}`
 
 Errors are returned as `{"error": "..."}` with a non-2xx HTTP status.
 

@@ -76,11 +76,7 @@ impl FanoutStore {
 
     /// Run `f` against every shard, collecting successes. Logs and tolerates
     /// per-shard failures; errors only if *all* shards fail.
-    fn fan_out<T>(
-        &self,
-        op: &str,
-        f: impl Fn(&Arc<dyn Store>) -> Result<T>,
-    ) -> Result<Vec<T>> {
+    fn fan_out<T>(&self, op: &str, f: impl Fn(&Arc<dyn Store>) -> Result<T>) -> Result<Vec<T>> {
         let mut results = Vec::with_capacity(self.shards.len());
         let mut last_err = None;
         for (i, shard) in self.shards.iter().enumerate() {
@@ -106,9 +102,12 @@ impl Store for FanoutStore {
     fn insert_spans(&self, spans: &[Span]) -> Result<()> {
         // Route each span to its trace's owning shard. A trace's spans thus all
         // land together, keeping get_trace/correlate single-shard.
-        route_and_insert(&self.shards, spans, |s| &s.trace_id, |store, batch| {
-            store.insert_spans(batch)
-        })
+        route_and_insert(
+            &self.shards,
+            spans,
+            |s| &s.trace_id,
+            |store, batch| store.insert_spans(batch),
+        )
     }
 
     fn query_traces(&self, query: &TraceQuery) -> Result<Vec<Span>> {
@@ -196,9 +195,12 @@ impl Store for FanoutStore {
     fn insert_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
         // Metrics carry no trace; shard by name (design §3) so a series stays on
         // one shard and unique-name counts merge by simple sum.
-        route_and_insert(&self.shards, metrics, |m| &m.name, |store, batch| {
-            store.insert_metrics(batch)
-        })
+        route_and_insert(
+            &self.shards,
+            metrics,
+            |m| &m.name,
+            |store, batch| store.insert_metrics(batch),
+        )
     }
 
     fn query_metrics(&self, query: &MetricQuery) -> Result<Vec<MetricPoint>> {
@@ -215,7 +217,8 @@ impl Store for FanoutStore {
 
     // ── Cross-signal analytics ──────────────────────────────────────
     fn query_summary(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
-        let per_shard = self.fan_out("query_summary", |s| s.query_summary(last_seconds, service))?;
+        let per_shard =
+            self.fan_out("query_summary", |s| s.query_summary(last_seconds, service))?;
         Ok(merge_summaries(per_shard, last_seconds, service))
     }
 
@@ -632,7 +635,8 @@ mod tests {
 
     fn fanout(n: usize) -> (FanoutStore, Vec<Arc<MockStore>>) {
         let mocks: Vec<Arc<MockStore>> = (0..n).map(|_| Arc::new(MockStore::default())).collect();
-        let shards: Vec<Arc<dyn Store>> = mocks.iter().map(|m| m.clone() as Arc<dyn Store>).collect();
+        let shards: Vec<Arc<dyn Store>> =
+            mocks.iter().map(|m| m.clone() as Arc<dyn Store>).collect();
         (FanoutStore::new(shards).unwrap(), mocks)
     }
 
@@ -671,7 +675,11 @@ mod tests {
                 .filter(|(_, m)| m.spans.lock().unwrap().iter().any(|s| s.trace_id == tid))
                 .map(|(i, _)| i)
                 .collect();
-            assert_eq!(owners.len(), 1, "trace {tid} split across shards: {owners:?}");
+            assert_eq!(
+                owners.len(),
+                1,
+                "trace {tid} split across shards: {owners:?}"
+            );
             let owned = mocks[owners[0]].spans.lock().unwrap();
             assert_eq!(owned.iter().filter(|s| s.trace_id == tid).count(), 2);
         }
@@ -724,7 +732,10 @@ mod tests {
         let api = svcs.iter().find(|s| s.name == "api").unwrap();
         assert_eq!(api.span_count, 3, "counts must sum across shards");
         assert_eq!(api.trace_count, 3);
-        assert!((api.error_rate - 1.0 / 3.0).abs() < 1e-9, "error_rate recomputed from sums");
+        assert!(
+            (api.error_rate - 1.0 / 3.0).abs() < 1e-9,
+            "error_rate recomputed from sums"
+        );
         assert!((api.avg_duration_ms - 10.0).abs() < 1e-9);
     }
 

@@ -86,6 +86,12 @@ enum Commands {
         /// Poll interval in seconds
         #[arg(long, default_value = "2")]
         interval: u64,
+        /// Open the eval progress view
+        #[arg(long)]
+        evals: bool,
+        /// Open a specific eval run in the eval progress view
+        #[arg(long)]
+        eval_run: Option<String>,
     },
     /// Aggregated health summary over a time window
     Summarize {
@@ -125,6 +131,31 @@ enum Commands {
         /// Poll interval in seconds
         #[arg(long, default_value = "10")]
         interval: u64,
+    },
+    /// Collect, score, report, and compare trace-native evals
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+    /// Classify production failures into recurring issues
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
+    /// Define and inspect long-running reliability signals
+    Signal {
+        #[command(subcommand)]
+        action: SignalAction,
+    },
+    /// Compare production experiment variants
+    Experiment {
+        #[command(subcommand)]
+        action: ExperimentAction,
+    },
+    /// Record and list untrusted agent self diagnostics
+    Diagnose {
+        #[command(subcommand)]
+        action: DiagnoseAction,
     },
     /// Server management
     Server {
@@ -251,6 +282,255 @@ enum CommentAction {
     List {
         /// The trace ID to list comments for
         trace_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalAction {
+    /// Run a command once per JSONL case with TAEL_EVAL_* env vars
+    Run {
+        /// JSONL case file. Each line should include `case_id` or `id`.
+        cases: String,
+        /// Eval suite/dataset identifier
+        #[arg(long)]
+        suite: String,
+        /// Shell command template. Supports {case_id}, {case_index}, {run_id}, {suite_id}.
+        #[arg(long)]
+        cmd: String,
+        /// Source version for the evaluated code
+        #[arg(long)]
+        code_version: Option<String>,
+        /// Explicit run ID. Defaults to run_YYYYMMDD_HHMMSS.
+        #[arg(long)]
+        run_id: Option<String>,
+        /// OTLP endpoint exported to child processes
+        #[arg(long, default_value = "http://127.0.0.1:4317")]
+        otlp_endpoint: String,
+    },
+    /// Ingest JSONL score records as tael_eval_score metric points
+    Score {
+        /// Eval run ID
+        run_id: String,
+        /// JSONL scores file
+        scores: String,
+    },
+    /// List recent eval runs
+    Runs,
+    /// Show one eval run summary
+    Status {
+        /// Eval run ID
+        run_id: String,
+    },
+    /// List cases in a run
+    Cases {
+        /// Eval run ID
+        run_id: String,
+    },
+    /// List raw scores in a run
+    Scores {
+        /// Eval run ID
+        run_id: String,
+    },
+    /// Render an eval run report
+    Report {
+        /// Eval run ID
+        run_id: String,
+    },
+    /// Compare a run against a baseline run
+    Compare {
+        /// Current eval run ID
+        run_id: String,
+        /// Baseline eval run ID
+        baseline_run_id: String,
+    },
+    /// Manage golden cases promoted from traces
+    Case {
+        #[command(subcommand)]
+        action: EvalCaseAction,
+    },
+    /// Inspect eval suite quality and hygiene
+    Suite {
+        #[command(subcommand)]
+        action: EvalSuiteAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalCaseAction {
+    /// Promote a production trace into a golden eval case
+    Add {
+        /// Source production trace
+        #[arg(long)]
+        from_trace: String,
+        /// Suite/dataset name
+        #[arg(long)]
+        suite: String,
+        /// Stable case identifier
+        #[arg(long)]
+        case_id: String,
+        /// Representative failure mode
+        #[arg(long)]
+        failure_mode: Option<String>,
+        /// Source issue this case protects
+        #[arg(long)]
+        source_issue_id: Option<String>,
+        /// Mark this case as protecting a critical path
+        #[arg(long)]
+        critical_path: bool,
+        /// Durable expected behavior for the case
+        #[arg(long)]
+        expected_behavior: Option<String>,
+        /// Comment author
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// Link an existing eval case to an issue
+    Link {
+        /// Stable case identifier
+        #[arg(long)]
+        case_id: String,
+        /// Issue identifier
+        #[arg(long)]
+        issue_id: String,
+        /// Trace to annotate. If omitted, tael finds the eval case source trace.
+        #[arg(long)]
+        trace_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalSuiteAction {
+    /// Inspect suite hygiene: provenance, expected behavior, duplicates, cost risks
+    Inspect {
+        /// Suite/dataset name
+        suite: String,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum IssueAction {
+    /// Create a recurring issue from a trace
+    Create {
+        /// Source trace
+        #[arg(long)]
+        from_trace: String,
+        /// Failure mode, e.g. tool_error or context_loss
+        #[arg(long)]
+        failure_mode: String,
+        /// Impact: low, medium, high, critical
+        #[arg(long)]
+        impact: String,
+        /// Short issue summary
+        #[arg(long)]
+        summary: String,
+        /// Last successful step in the trace
+        #[arg(long)]
+        last_successful_step: Option<String>,
+        /// First real failure in the trace
+        #[arg(long)]
+        first_failure: Option<String>,
+        /// Comment author
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// List known issues
+    List {
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+    /// List comments and cases linked to an issue
+    Examples {
+        /// Issue identifier
+        issue_id: String,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignalAction {
+    /// Create a long-running reliability signal definition
+    Create {
+        /// Source trace for the signal definition
+        #[arg(long)]
+        from_trace: String,
+        /// Signal name
+        #[arg(long)]
+        name: String,
+        /// Query or classifier description used to identify the signal
+        #[arg(long)]
+        query: Option<String>,
+        /// Failure mode this signal tracks
+        #[arg(long)]
+        failure_mode: Option<String>,
+        /// Short summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Comment author
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// Show signal trend from structured comments
+    Trend {
+        /// Signal name or failure mode
+        name: String,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExperimentAction {
+    /// Compare variants using trace attributes tael.experiment.*
+    Compare {
+        /// Experiment identifier
+        experiment_id: String,
+        /// Optional signal/failure mode/category to count by variant
+        #[arg(long)]
+        signal: Option<String>,
+        /// Time window (e.g. 1h, 24h, 7d)
+        #[arg(long)]
+        last: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiagnoseAction {
+    /// Record an untrusted self diagnostic on a trace
+    Report {
+        /// Trace ID
+        #[arg(long)]
+        trace_id: String,
+        /// Optional span ID
+        #[arg(long)]
+        span_id: Option<String>,
+        /// Category, e.g. missing_context, capability_gap, broken_tool
+        #[arg(long)]
+        category: String,
+        /// Severity: low, medium, high, critical
+        #[arg(long)]
+        severity: String,
+        /// Confidence: low, medium, high
+        #[arg(long, default_value = "low")]
+        confidence: String,
+        /// Short diagnostic summary
+        #[arg(long)]
+        summary: String,
+        /// Comment author
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// List self diagnostics
+    List {
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
     },
 }
 
@@ -430,8 +710,10 @@ async fn main() -> Result<()> {
             service,
             status,
             interval,
+            evals,
+            eval_run,
         } => {
-            tui::run(&server_url, service, status, interval).await?;
+            tui::run(&server_url, service, status, interval, evals, eval_run).await?;
         }
         Commands::Summarize { last, service } => {
             commands::summarize::run(&client, &cli.format, last, service).await?;
@@ -453,6 +735,182 @@ async fn main() -> Result<()> {
         } => {
             commands::watch::run(&client, &cli.format, last, service, interval).await?;
         }
+        Commands::Eval { action } => match action {
+            EvalAction::Run {
+                cases,
+                suite,
+                cmd,
+                code_version,
+                run_id,
+                otlp_endpoint,
+            } => {
+                commands::eval::run(
+                    &client,
+                    &otlp_endpoint,
+                    &cases,
+                    &suite,
+                    &cmd,
+                    code_version,
+                    run_id,
+                )
+                .await?;
+            }
+            EvalAction::Score { run_id, scores } => {
+                commands::eval::score(&client, &cli.format, &run_id, &scores).await?;
+            }
+            EvalAction::Runs => {
+                commands::eval::runs(&client, &cli.format).await?;
+            }
+            EvalAction::Status { run_id } => {
+                commands::eval::status(&client, &cli.format, &run_id).await?;
+            }
+            EvalAction::Cases { run_id } => {
+                commands::eval::cases(&client, &cli.format, &run_id).await?;
+            }
+            EvalAction::Scores { run_id } => {
+                commands::eval::scores(&client, &cli.format, &run_id).await?;
+            }
+            EvalAction::Report { run_id } => {
+                commands::eval::report(&client, &cli.format, &run_id).await?;
+            }
+            EvalAction::Compare {
+                run_id,
+                baseline_run_id,
+            } => {
+                commands::eval::compare(&client, &cli.format, &run_id, &baseline_run_id).await?;
+            }
+            EvalAction::Case { action } => match action {
+                EvalCaseAction::Add {
+                    from_trace,
+                    suite,
+                    case_id,
+                    failure_mode,
+                    source_issue_id,
+                    critical_path,
+                    expected_behavior,
+                    author,
+                } => {
+                    commands::eval::case_add(
+                        &client,
+                        &cli.format,
+                        &from_trace,
+                        &suite,
+                        &case_id,
+                        failure_mode,
+                        source_issue_id,
+                        critical_path,
+                        expected_behavior,
+                        author,
+                    )
+                    .await?;
+                }
+                EvalCaseAction::Link {
+                    case_id,
+                    issue_id,
+                    trace_id,
+                } => {
+                    commands::eval::case_link(&client, &cli.format, &case_id, &issue_id, trace_id)
+                        .await?;
+                }
+            },
+            EvalAction::Suite { action } => match action {
+                EvalSuiteAction::Inspect { suite, limit } => {
+                    commands::eval::suite_inspect(&client, &cli.format, &suite, limit).await?;
+                }
+            },
+        },
+        Commands::Issue { action } => match action {
+            IssueAction::Create {
+                from_trace,
+                failure_mode,
+                impact,
+                summary,
+                last_successful_step,
+                first_failure,
+                author,
+            } => {
+                commands::issue::create(
+                    &client,
+                    &cli.format,
+                    &from_trace,
+                    &failure_mode,
+                    &impact,
+                    &summary,
+                    last_successful_step,
+                    first_failure,
+                    author,
+                )
+                .await?;
+            }
+            IssueAction::List { limit } => {
+                commands::issue::list(&client, &cli.format, limit).await?;
+            }
+            IssueAction::Examples { issue_id, limit } => {
+                commands::issue::examples(&client, &cli.format, &issue_id, limit).await?;
+            }
+        },
+        Commands::Signal { action } => match action {
+            SignalAction::Create {
+                from_trace,
+                name,
+                query,
+                failure_mode,
+                summary,
+                author,
+            } => {
+                commands::signal::create(
+                    &client,
+                    &cli.format,
+                    &from_trace,
+                    &name,
+                    query,
+                    failure_mode,
+                    summary,
+                    author,
+                )
+                .await?;
+            }
+            SignalAction::Trend { name, limit } => {
+                commands::signal::trend(&client, &cli.format, &name, limit).await?;
+            }
+        },
+        Commands::Experiment { action } => match action {
+            ExperimentAction::Compare {
+                experiment_id,
+                signal,
+                last,
+            } => {
+                commands::experiment::compare(&client, &cli.format, &experiment_id, signal, last)
+                    .await?;
+            }
+        },
+        Commands::Diagnose { action } => match action {
+            DiagnoseAction::Report {
+                trace_id,
+                span_id,
+                category,
+                severity,
+                confidence,
+                summary,
+                author,
+            } => {
+                commands::diagnose::report(
+                    &client,
+                    &cli.format,
+                    &trace_id,
+                    span_id,
+                    &category,
+                    &severity,
+                    &confidence,
+                    &summary,
+                    author,
+                )
+                .await?;
+            }
+            DiagnoseAction::List { limit } => {
+                commands::diagnose::list(&client, &cli.format, limit).await?;
+            }
+        },
         Commands::Server { action } => match action {
             ServerAction::Status => {
                 commands::server::status(&client, &cli.format).await?;

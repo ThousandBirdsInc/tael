@@ -3,9 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span, Status,
-    span::Event,
-    status::StatusCode,
+    ResourceSpans, ScopeSpans, Span, Status, span::Event, status::StatusCode,
 };
 use rand::Rng;
 

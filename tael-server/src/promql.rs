@@ -333,11 +333,7 @@ pub struct Series {
 /// Evaluate an instant query. `lookback_seconds` is the time window used
 /// when fetching bare selectors (defaults to 5 minutes). `rate(...[dur])`
 /// always uses its own bracket duration.
-pub fn evaluate(
-    store: &dyn Store,
-    expr: &Expr,
-    lookback_seconds: i64,
-) -> Result<Vec<Series>> {
+pub fn evaluate(store: &dyn Store, expr: &Expr, lookback_seconds: i64) -> Result<Vec<Series>> {
     match expr {
         Expr::Selector(sel) => eval_selector_instant(store, sel, lookback_seconds),
         Expr::Rate {
@@ -416,11 +412,7 @@ fn eval_selector_instant(
     Ok(by_key.into_values().map(point_to_series).collect())
 }
 
-fn eval_rate(
-    store: &dyn Store,
-    sel: &Selector,
-    range_seconds: i64,
-) -> Result<Vec<Series>> {
+fn eval_rate(store: &dyn Store, sel: &Selector, range_seconds: i64) -> Result<Vec<Series>> {
     let points = fetch_points(store, sel, range_seconds)?;
     // Group all samples per series.
     let mut grouped: HashMap<String, Vec<MetricPoint>> = HashMap::new();

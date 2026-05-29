@@ -12,13 +12,17 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Table, TableState, Wrap,
+    },
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::TaelClient;
 
+#[derive(Clone)]
 struct Comment {
     author: String,
     body: String,
@@ -36,6 +40,7 @@ struct App {
     spans: Vec<SpanRow>,
     services: Vec<ServiceRow>,
     table_state: TableState,
+    services_state: TableState,
     tab: Tab,
     should_quit: bool,
     last_error: Option<String>,
@@ -65,6 +70,11 @@ struct App {
     attr_picker: Option<AttrPicker>,
     // Fullscreen span viewer
     span_viewer: Option<SpanViewer>,
+    eval_run_filter: Option<String>,
+    eval_run: Option<EvalRunRow>,
+    eval_cases: Vec<EvalCaseRow>,
+    eval_state: TableState,
+    eval_failures_only: bool,
 }
 
 struct SpanViewer {
@@ -81,6 +91,7 @@ struct AttrPicker {
 enum Tab {
     Traces,
     Services,
+    Evals,
     Timeline,
     Detail,
 }
@@ -131,9 +142,36 @@ struct ServiceRow {
     error_rate: f64,
 }
 
+#[derive(Clone)]
+struct EvalRunRow {
+    run_id: String,
+    suite_id: String,
+    status: String,
+    case_count: Option<u64>,
+    observed_cases: u64,
+    scored_cases: u64,
+    passed_cases: u64,
+    failed_cases: u64,
+    cost_usd: f64,
+    avg_scores: Value,
+}
+
+#[derive(Clone)]
+struct EvalCaseRow {
+    case_id: String,
+    status: String,
+    trace_id: Option<String>,
+    duration_ms: Option<f64>,
+    cost_usd: f64,
+    scores: Value,
+    comments: Vec<Comment>,
+}
+
 // Assign a stable color per service name
 fn service_color(service: &str) -> Color {
-    let hash: u32 = service.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash: u32 = service
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     let colors = [
         Color::Cyan,
         Color::Blue,
@@ -155,9 +193,16 @@ impl App {
         service: Option<String>,
         status: Option<String>,
         interval: u64,
+        evals: bool,
+        eval_run: Option<String>,
     ) -> Self {
         let client = TaelClient::new(server);
         let sse_rx = client.subscribe_live(service.clone(), status.clone());
+        let initial_tab = if evals || eval_run.is_some() {
+            Tab::Evals
+        } else {
+            Tab::Traces
+        };
         Self {
             client,
             service_filter: service,
@@ -166,7 +211,8 @@ impl App {
             spans: Vec::new(),
             services: Vec::new(),
             table_state: TableState::default(),
-            tab: Tab::Traces,
+            services_state: TableState::default(),
+            tab: initial_tab,
             should_quit: false,
             last_error: None,
             paused: false,
@@ -188,6 +234,11 @@ impl App {
             pinned_columns: Vec::new(),
             attr_picker: None,
             span_viewer: None,
+            eval_run_filter: eval_run,
+            eval_run: None,
+            eval_cases: Vec::new(),
+            eval_state: TableState::default(),
+            eval_failures_only: false,
         }
     }
 
@@ -280,6 +331,26 @@ impl App {
                     || (!t.has_error && "ok".contains(&q))
             })
             .collect()
+    }
+
+    fn filtered_eval_cases(&self) -> Vec<&EvalCaseRow> {
+        let mut cases: Vec<&EvalCaseRow> = self
+            .eval_cases
+            .iter()
+            .filter(|c| !self.eval_failures_only || c.status == "fail")
+            .collect();
+        if !self.filter_text.is_empty() {
+            let q = self.filter_text.to_lowercase();
+            cases.retain(|c| {
+                c.case_id.to_lowercase().contains(&q)
+                    || c.status.to_lowercase().contains(&q)
+                    || c.trace_id
+                        .as_deref()
+                        .map(|t| t.to_lowercase().contains(&q))
+                        .unwrap_or(false)
+            });
+        }
+        cases
     }
 
     fn ingest_sse(&mut self, json: &str) {
@@ -375,8 +446,6 @@ impl App {
         self.live_traces_sorted = traces;
     }
 
-
-
     async fn poll_initial(&mut self) {
         match self
             .client
@@ -403,6 +472,7 @@ impl App {
         }
 
         self.poll_services().await;
+        self.poll_evals().await;
     }
 
     async fn poll_services(&mut self) {
@@ -412,6 +482,52 @@ impl App {
             }
             Err(e) => {
                 self.last_error = Some(format!("services: {e}"));
+            }
+        }
+    }
+
+    async fn poll_evals(&mut self) {
+        let run_id = match self.eval_run_filter.clone() {
+            Some(run_id) => Some(run_id),
+            None => match self.client.eval_runs().await {
+                Ok(val) => val
+                    .get("runs")
+                    .and_then(|v| v.as_array())
+                    .and_then(|runs| runs.first())
+                    .and_then(|run| run.get("run_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                Err(e) => {
+                    self.last_error = Some(format!("eval runs: {e}"));
+                    None
+                }
+            },
+        };
+
+        let Some(run_id) = run_id else {
+            self.eval_run = None;
+            self.eval_cases.clear();
+            return;
+        };
+
+        match self.client.eval_status(&run_id).await {
+            Ok(val) => {
+                self.eval_run = val.get("run").map(parse_eval_run);
+            }
+            Err(e) => {
+                self.last_error = Some(format!("eval status: {e}"));
+                return;
+            }
+        }
+        match self.client.eval_cases(&run_id).await {
+            Ok(val) => {
+                self.eval_cases = parse_eval_cases(&val);
+                if self.eval_state.selected().is_none() && !self.eval_cases.is_empty() {
+                    self.eval_state.select(Some(0));
+                }
+            }
+            Err(e) => {
+                self.last_error = Some(format!("eval cases: {e}"));
             }
         }
     }
@@ -613,23 +729,42 @@ impl App {
             }
             KeyCode::Char('2') => {
                 self.tab = Tab::Services;
-                self.table_state.select(None);
+                if self.services_state.selected().is_none() && !self.services.is_empty() {
+                    self.services_state.select(Some(0));
+                }
             }
             KeyCode::Char('3') => {
+                self.tab = Tab::Evals;
+                self.eval_state.select(None);
+            }
+            KeyCode::Char('4') => {
                 self.tab = Tab::Timeline;
                 self.timeline_state.select(None);
             }
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char('/') => {
-                if self.tab == Tab::Traces || self.tab == Tab::Timeline {
+                if self.tab == Tab::Traces || self.tab == Tab::Timeline || self.tab == Tab::Evals {
                     self.filter_input = Some(self.filter_text.clone());
+                }
+            }
+            KeyCode::Char('f') => {
+                if self.tab == Tab::Evals {
+                    self.eval_failures_only = !self.eval_failures_only;
+                    self.eval_state.select(None);
+                }
+            }
+            KeyCode::Char('r') => {
+                if self.tab == Tab::Evals {
+                    return Some("refresh_evals");
                 }
             }
             KeyCode::Char('\\') => {
                 // Clear filter
                 self.filter_text.clear();
                 self.table_state.select(None);
+                self.services_state.select(None);
                 self.timeline_state.select(None);
+                self.eval_state.select(None);
             }
             KeyCode::Char('a') => {
                 if self.tab == Tab::Traces && self.table_state.selected().is_some() {
@@ -667,6 +802,18 @@ impl App {
                         let i = self.timeline_state.selected().map(|i| i + 1).unwrap_or(0);
                         self.timeline_state.select(Some(i.min(len - 1)));
                     }
+                } else if self.tab == Tab::Evals {
+                    let len = self.filtered_eval_cases().len();
+                    if len > 0 {
+                        let i = self.eval_state.selected().map(|i| i + 1).unwrap_or(0);
+                        self.eval_state.select(Some(i.min(len - 1)));
+                    }
+                } else if self.tab == Tab::Services {
+                    let len = self.services.len();
+                    if len > 0 {
+                        let i = self.services_state.selected().map(|i| i + 1).unwrap_or(0);
+                        self.services_state.select(Some(i.min(len - 1)));
+                    }
                 } else if self.tab == Tab::Traces {
                     let len = self.filtered_spans().len();
                     if len > 0 {
@@ -690,6 +837,20 @@ impl App {
                         .map(|i| i.saturating_sub(1))
                         .unwrap_or(0);
                     self.timeline_state.select(Some(i));
+                } else if self.tab == Tab::Evals {
+                    let i = self
+                        .eval_state
+                        .selected()
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(0);
+                    self.eval_state.select(Some(i));
+                } else if self.tab == Tab::Services {
+                    let i = self
+                        .services_state
+                        .selected()
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(0);
+                    self.services_state.select(Some(i));
                 } else if self.tab == Tab::Traces {
                     let i = self
                         .table_state
@@ -705,6 +866,18 @@ impl App {
                 }
                 if self.tab == Tab::Timeline && self.timeline_state.selected().is_some() {
                     return Some("load_trace");
+                }
+                if self.tab == Tab::Evals && self.eval_state.selected().is_some() {
+                    return Some("load_trace");
+                }
+                if self.tab == Tab::Services && !self.services.is_empty() {
+                    let selected = self.services_state.selected().unwrap_or(0);
+                    if let Some(service) = self.services.get(selected) {
+                        self.filter_text = service.name.clone();
+                        self.table_state.select(None);
+                        self.timeline_state.select(None);
+                        self.tab = Tab::Traces;
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -787,6 +960,42 @@ fn parse_comments(val: &Value) -> Vec<Comment> {
         .unwrap_or_default()
 }
 
+fn parse_eval_run(val: &Value) -> EvalRunRow {
+    EvalRunRow {
+        run_id: val["run_id"].as_str().unwrap_or("-").to_string(),
+        suite_id: val["suite_id"].as_str().unwrap_or("-").to_string(),
+        status: val["status"].as_str().unwrap_or("-").to_string(),
+        case_count: val["case_count"].as_u64(),
+        observed_cases: val["observed_cases"].as_u64().unwrap_or(0),
+        scored_cases: val["scored_cases"].as_u64().unwrap_or(0),
+        passed_cases: val["passed_cases"].as_u64().unwrap_or(0),
+        failed_cases: val["failed_cases"].as_u64().unwrap_or(0),
+        cost_usd: val["cost_usd"].as_f64().unwrap_or(0.0),
+        avg_scores: val["avg_scores"].clone(),
+    }
+}
+
+fn parse_eval_cases(val: &Value) -> Vec<EvalCaseRow> {
+    val.get("cases")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|c| EvalCaseRow {
+                    case_id: c["case_id"].as_str().unwrap_or("-").to_string(),
+                    status: c["status"].as_str().unwrap_or("-").to_string(),
+                    trace_id: c["trace_id"].as_str().map(|s| s.to_string()),
+                    duration_ms: c["duration_ms"].as_f64(),
+                    cost_usd: c["cost_usd"].as_f64().unwrap_or(0.0),
+                    scores: c["scores"].clone(),
+                    comments: parse_comments(&serde_json::json!({
+                        "comments": c["comments"].clone()
+                    })),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_waterfall(spans: &[SpanRow]) -> Vec<WaterfallRow> {
     if spans.is_empty() {
         return Vec::new();
@@ -822,8 +1031,10 @@ fn build_waterfall(spans: &[SpanRow]) -> Vec<WaterfallRow> {
             // Reverse so we process in original order (stack is LIFO)
             for &idx in child_indices.iter().rev() {
                 let span = &spans[idx];
-                let offset_pct = ((span.start_time_ms - trace_start) / trace_duration).clamp(0.0, 1.0);
-                let width_pct = (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
+                let offset_pct =
+                    ((span.start_time_ms - trace_start) / trace_duration).clamp(0.0, 1.0);
+                let width_pct =
+                    (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
 
                 rows.push(WaterfallRow {
                     span_idx: idx,
@@ -841,7 +1052,8 @@ fn build_waterfall(spans: &[SpanRow]) -> Vec<WaterfallRow> {
     for (i, span) in spans.iter().enumerate() {
         if !visited.contains(&i) {
             let offset_pct = ((span.start_time_ms - trace_start) / trace_duration).clamp(0.0, 1.0);
-            let width_pct = (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
+            let width_pct =
+                (span.duration_ms / trace_duration).clamp(0.005, (1.0 - offset_pct).max(0.005));
             rows.push(WaterfallRow {
                 span_idx: i,
                 depth: 0,
@@ -872,7 +1084,13 @@ fn duration_color(ms: f64) -> Color {
     }
 }
 
-fn render_waterfall_bar(offset_pct: f64, width_pct: f64, bar_width: u16, color: Color, status: &str) -> Line<'static> {
+fn render_waterfall_bar(
+    offset_pct: f64,
+    width_pct: f64,
+    bar_width: u16,
+    color: Color,
+    status: &str,
+) -> Line<'static> {
     let total = bar_width as usize;
     if total == 0 {
         return Line::raw("");
@@ -907,11 +1125,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Traces => {
             let has_selection = app.table_state.selected().is_some();
             if has_selection {
-                let splits = Layout::vertical([
-                    Constraint::Min(8),
-                    Constraint::Length(10),
-                ])
-                .split(chunks[1]);
+                let splits =
+                    Layout::vertical([Constraint::Min(8), Constraint::Length(10)]).split(chunks[1]);
                 draw_traces(frame, splits[0], app);
                 draw_selected_span_properties(frame, splits[1], app);
             } else {
@@ -922,14 +1137,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
             }
         }
         Tab::Services => draw_services(frame, chunks[1], app),
+        Tab::Evals => draw_evals(frame, chunks[1], app),
         Tab::Timeline => {
             let has_selection = app.timeline_state.selected().is_some();
             if has_selection {
-                let splits = Layout::vertical([
-                    Constraint::Min(8),
-                    Constraint::Length(10),
-                ])
-                .split(chunks[1]);
+                let splits =
+                    Layout::vertical([Constraint::Min(8), Constraint::Length(10)]).split(chunks[1]);
                 draw_timeline(frame, splits[0], app);
                 draw_selected_timeline_properties(frame, splits[1], app);
             } else {
@@ -950,21 +1163,39 @@ fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let tabs: Vec<Span> = vec![
         if app.tab == Tab::Traces {
-            Span::styled(" 1:Traces ", Style::default().fg(Color::Black).bg(Color::Cyan))
+            Span::styled(
+                " 1:Traces ",
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )
         } else {
             Span::styled(" 1:Traces ", Style::default().fg(Color::DarkGray))
         },
         Span::raw("  "),
         if app.tab == Tab::Services {
-            Span::styled(" 2:Services ", Style::default().fg(Color::Black).bg(Color::Cyan))
+            Span::styled(
+                " 2:Services ",
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )
         } else {
             Span::styled(" 2:Services ", Style::default().fg(Color::DarkGray))
         },
         Span::raw("  "),
-        if app.tab == Tab::Timeline {
-            Span::styled(" 3:Timeline ", Style::default().fg(Color::Black).bg(Color::Cyan))
+        if app.tab == Tab::Evals {
+            Span::styled(
+                " 3:Evals ",
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )
         } else {
-            Span::styled(" 3:Timeline ", Style::default().fg(Color::DarkGray))
+            Span::styled(" 3:Evals ", Style::default().fg(Color::DarkGray))
+        },
+        Span::raw("  "),
+        if app.tab == Tab::Timeline {
+            Span::styled(
+                " 4:Timeline ",
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )
+        } else {
+            Span::styled(" 4:Timeline ", Style::default().fg(Color::DarkGray))
         },
         Span::raw("  "),
         if app.tab == Tab::Detail {
@@ -974,7 +1205,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         },
     ];
 
-    let mut title_parts = vec![Span::styled(" tael ", Style::default().fg(Color::Cyan).bold())];
+    let mut title_parts = vec![Span::styled(
+        " tael ",
+        Style::default().fg(Color::Cyan).bold(),
+    )];
 
     if let Some(ref svc) = app.service_filter {
         title_parts.push(Span::styled(
@@ -996,11 +1230,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     }
     if let Some(ref input) = app.filter_input {
         title_parts.push(Span::styled(" /", Style::default().fg(Color::Green).bold()));
-        title_parts.push(Span::styled(input.clone(), Style::default().fg(Color::White)));
+        title_parts.push(Span::styled(
+            input.clone(),
+            Style::default().fg(Color::White),
+        ));
         title_parts.push(Span::styled("█", Style::default().fg(Color::Green)));
     }
     if app.paused {
-        title_parts.push(Span::styled(" PAUSED", Style::default().fg(Color::Red).bold()));
+        title_parts.push(Span::styled(
+            " PAUSED",
+            Style::default().fg(Color::Red).bold(),
+        ));
     }
 
     let header = Paragraph::new(vec![Line::from(title_parts), Line::from(tabs)])
@@ -1061,8 +1301,7 @@ fn draw_traces(frame: &mut Frame, area: Rect, app: &mut App) {
                 Cell::from(s.operation.clone()),
                 Cell::from(format!("{:.0}ms", s.duration_ms))
                     .style(Style::default().fg(duration_color(s.duration_ms))),
-                Cell::from(s.status.clone())
-                    .style(Style::default().fg(status_color(&s.status))),
+                Cell::from(s.status.clone()).style(Style::default().fg(status_color(&s.status))),
                 Cell::from(short_trace.to_string()).style(Style::default().fg(Color::DarkGray)),
             ];
             for col in &pinned {
@@ -1072,7 +1311,9 @@ fn draw_traces(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     Style::default().fg(Color::Yellow)
                 };
-                cells.push(Cell::from(if val.is_empty() { "-".to_string() } else { val }).style(style));
+                cells.push(
+                    Cell::from(if val.is_empty() { "-".to_string() } else { val }).style(style),
+                );
             }
             Row::new(cells)
         })
@@ -1114,7 +1355,9 @@ fn draw_attr_picker(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Center a popup over the area
     let popup_width = 40u16.min(area.width.saturating_sub(4));
-    let popup_height = (picker.keys.len() as u16 + 3).min(area.height.saturating_sub(2)).max(5);
+    let popup_height = (picker.keys.len() as u16 + 3)
+        .min(area.height.saturating_sub(2))
+        .max(5);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -1122,13 +1365,12 @@ fn draw_attr_picker(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Clear, popup_area);
 
     if picker.keys.is_empty() {
-        let msg = Paragraph::new(" No attributes found.")
-            .block(
-                Block::default()
-                    .title(" Pin Column (a/esc:close) ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow)),
-            );
+        let msg = Paragraph::new(" No attributes found.").block(
+            Block::default()
+                .title(" Pin Column (a/esc:close) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
         frame.render_widget(msg, popup_area);
         return;
     }
@@ -1152,17 +1394,14 @@ fn draw_attr_picker(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [Constraint::Length(4), Constraint::Min(10)],
-    )
-    .block(
-        Block::default()
-            .title(" Pin Column (enter:toggle, a/esc:close) ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow)),
-    )
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let table = Table::new(rows, [Constraint::Length(4), Constraint::Min(10)])
+        .block(
+            Block::default()
+                .title(" Pin Column (enter:toggle, a/esc:close) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     frame.render_stateful_widget(table, popup_area, &mut picker.state);
 }
@@ -1195,13 +1434,19 @@ fn draw_selected_span_properties(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         Line::from(vec![
             Span::styled(" service: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&span.service, Style::default().fg(service_color(&span.service))),
+            Span::styled(
+                &span.service,
+                Style::default().fg(service_color(&span.service)),
+            ),
             Span::raw("    "),
             Span::styled("operation: ", Style::default().fg(Color::DarkGray)),
             Span::raw(&span.operation),
             Span::raw("    "),
             Span::styled("status: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&span.status, Style::default().fg(status_color(&span.status))),
+            Span::styled(
+                &span.status,
+                Style::default().fg(status_color(&span.status)),
+            ),
             Span::raw("    "),
             Span::styled("duration: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -1216,8 +1461,10 @@ fn draw_selected_span_properties(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(obj) = span.attributes.as_object() {
         if !obj.is_empty() {
-            let mut attr_spans: Vec<Span> =
-                vec![Span::styled(" attrs: ", Style::default().fg(Color::DarkGray))];
+            let mut attr_spans: Vec<Span> = vec![Span::styled(
+                " attrs: ",
+                Style::default().fg(Color::DarkGray),
+            )];
             for (i, (k, v)) in obj.iter().enumerate() {
                 if i > 0 {
                     attr_spans.push(Span::raw("  "));
@@ -1368,15 +1615,174 @@ fn draw_services(frame: &mut Frame, area: Rect, app: &mut App) {
         Block::default()
             .title(format!(" Services ({}) ", app.services.len()))
             .borders(Borders::ALL),
+    )
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    frame.render_stateful_widget(table, area, &mut app.services_state);
+}
+
+fn draw_evals(frame: &mut Frame, area: Rect, app: &mut App) {
+    if app.eval_run.is_none() {
+        let msg = Paragraph::new(" No eval runs found.")
+            .block(Block::default().title(" Evals ").borders(Borders::ALL));
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let chunks = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Min(8),
+        Constraint::Length(7),
+    ])
+    .split(area);
+
+    let run = app.eval_run.as_ref().unwrap();
+    let total = run
+        .case_count
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let correctness = run
+        .avg_scores
+        .get("correctness")
+        .and_then(|v| v.as_f64())
+        .map(|v| format!("{v:.3}"))
+        .unwrap_or_else(|| "-".to_string());
+    let summary = vec![
+        Line::from(vec![
+            Span::styled("Run ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&run.suite_id, Style::default().fg(Color::Cyan).bold()),
+            Span::raw(" / "),
+            Span::styled(&run.run_id, Style::default().fg(Color::White).bold()),
+        ]),
+        Line::from(format!(
+            "status: {}   cases: {}/{}   scored: {}   pass: {}   fail: {}",
+            run.status,
+            run.observed_cases,
+            total,
+            run.scored_cases,
+            run.passed_cases,
+            run.failed_cases
+        )),
+        Line::from(format!(
+            "avg correctness: {}   cost: ${:.4}   f:failures={}   r:refresh",
+            correctness,
+            run.cost_usd,
+            if app.eval_failures_only { "on" } else { "off" }
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary).block(Block::default().title(" Eval Run ").borders(Borders::ALL)),
+        chunks[0],
     );
 
-    frame.render_widget(table, area);
+    let cases = app.filtered_eval_cases();
+    let rows: Vec<Row> = cases
+        .iter()
+        .map(|case| {
+            let status_style = match case.status.as_str() {
+                "pass" => Style::default().fg(Color::Green),
+                "fail" => Style::default().fg(Color::Red),
+                "running" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            let score = case
+                .scores
+                .as_object()
+                .and_then(|scores| {
+                    scores
+                        .get("correctness")
+                        .or_else(|| scores.get("pass"))
+                        .or_else(|| scores.iter().next().map(|(_, v)| v))
+                })
+                .and_then(|v| v.as_f64())
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "-".to_string());
+            let trace = case.trace_id.as_deref().unwrap_or("-");
+            let trace = if trace.len() > 12 {
+                format!("{}...", &trace[..12])
+            } else {
+                trace.to_string()
+            };
+            Row::new(vec![
+                Cell::from(case.status.to_uppercase()).style(status_style),
+                Cell::from(case.case_id.clone()),
+                Cell::from(score),
+                Cell::from(format!("{:.4}", case.cost_usd)),
+                Cell::from(
+                    case.duration_ms
+                        .map(|ms| format!("{ms:.0}ms"))
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                Cell::from(trace).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Min(18),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(15),
+        ],
+    )
+    .header(Row::new(vec![
+        Cell::from("Status").style(Style::default().bold()),
+        Cell::from("Case").style(Style::default().bold()),
+        Cell::from("Score").style(Style::default().bold()),
+        Cell::from("Cost").style(Style::default().bold()),
+        Cell::from("Duration").style(Style::default().bold()),
+        Cell::from("Trace").style(Style::default().bold()),
+    ]))
+    .block(
+        Block::default()
+            .title(format!(" Cases ({}) ", cases.len()))
+            .borders(Borders::ALL),
+    )
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(table, chunks[1], &mut app.eval_state);
+
+    let selected = app
+        .eval_state
+        .selected()
+        .and_then(|i| app.filtered_eval_cases().into_iter().nth(i));
+    let detail = match selected {
+        Some(case) => {
+            let mut lines = vec![
+                Line::from(format!(
+                    "{}  status={}  trace={}",
+                    case.case_id,
+                    case.status,
+                    case.trace_id.as_deref().unwrap_or("-")
+                )),
+                Line::from("Enter: open trace   f:failures only   r:refresh   /:filter"),
+            ];
+            if let Some(comment) = case.comments.last() {
+                lines.push(Line::from(format!("{}: {}", comment.author, comment.body)));
+            }
+            lines
+        }
+        None => vec![Line::from("No case selected.")],
+    };
+    frame.render_widget(
+        Paragraph::new(detail).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title(" Selected Case ")
+                .borders(Borders::ALL),
+        ),
+        chunks[2],
+    );
 }
 
 fn draw_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.live_traces_sorted.is_empty() {
-        let msg = Paragraph::new(" Waiting for traces...")
-            .block(Block::default().title(" Live Timeline ").borders(Borders::ALL));
+        let msg = Paragraph::new(" Waiting for traces...").block(
+            Block::default()
+                .title(" Live Timeline ")
+                .borders(Borders::ALL),
+        );
         frame.render_widget(msg, area);
         return;
     }
@@ -1463,8 +1869,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
                 format!("{:<width$}", label, width = label_width as usize)
             };
 
-            let offset_pct =
-                ((trace.start_time_ms - window_start) / window_ms).clamp(0.0, 1.0);
+            let offset_pct = ((trace.start_time_ms - window_start) / window_ms).clamp(0.0, 1.0);
             let width_pct =
                 (trace.duration_ms / window_ms).clamp(0.005, (1.0 - offset_pct).max(0.005));
 
@@ -1474,8 +1879,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
                 service_color(&trace.service)
             };
             let status_str = if trace.has_error { "error" } else { "ok" };
-            let bar =
-                render_waterfall_bar(offset_pct, width_pct, bar_width, color, status_str);
+            let bar = render_waterfall_bar(offset_pct, width_pct, bar_width, color, status_str);
 
             let dur = format!("{:>7.0}ms", trace.duration_ms);
             let spans_label = format!("{:>4}", trace.span_count);
@@ -1561,8 +1965,7 @@ fn draw_trace_detail(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_waterfall(frame: &mut Frame, area: Rect, app: &mut App) {
-    let block = Block::default()
-        .borders(Borders::ALL);
+    let block = Block::default().borders(Borders::ALL);
     let inner = block.inner(area);
 
     // Calculate bar width: total width minus label columns
@@ -1570,26 +1973,46 @@ fn draw_waterfall(frame: &mut Frame, area: Rect, app: &mut App) {
     let duration_width: u16 = 10;
     let bar_width = inner.width.saturating_sub(label_width + duration_width + 3);
 
-    let trace_id = app.trace_spans.first().map(|s| &s.trace_id).cloned().unwrap_or_default();
-    let short_trace = if trace_id.len() > 16 { &trace_id[..16] } else { &trace_id };
+    let trace_id = app
+        .trace_spans
+        .first()
+        .map(|s| &s.trace_id)
+        .cloned()
+        .unwrap_or_default();
+    let short_trace = if trace_id.len() > 16 {
+        &trace_id[..16]
+    } else {
+        &trace_id
+    };
 
     // Find trace total duration for the title
-    let total_duration: f64 = app.trace_spans.iter()
+    let total_duration: f64 = app
+        .trace_spans
+        .iter()
         .map(|s| s.duration_ms)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    let title = format!(" Trace {short_trace}… │ {:.0}ms │ {} spans ",
-        total_duration, app.trace_spans.len());
+    let title = format!(
+        " Trace {short_trace}… │ {:.0}ms │ {} spans ",
+        total_duration,
+        app.trace_spans.len()
+    );
     let block = block.title(title);
 
     // Build header with time axis
     let header_row = {
         // Show 0ms on left, total on right
-        let root_duration = app.trace_spans.iter()
+        let root_duration = app
+            .trace_spans
+            .iter()
             .filter(|s| s.parent_span_id.is_none())
             .map(|s| s.duration_ms)
             .fold(0.0f64, f64::max);
-        let total = if root_duration > 0.0 { root_duration } else { total_duration };
+        let total = if root_duration > 0.0 {
+            root_duration
+        } else {
+            total_duration
+        };
 
         let mid = format!("{:.0}ms", total / 2.0);
         let end = format!("{:.0}ms", total);
@@ -1646,7 +2069,8 @@ fn draw_waterfall(frame: &mut Frame, area: Rect, app: &mut App) {
                 service_color(&span.service)
             };
 
-            let bar = render_waterfall_bar(wr.offset_pct, wr.width_pct, bar_width, color, &span.status);
+            let bar =
+                render_waterfall_bar(wr.offset_pct, wr.width_pct, bar_width, color, &span.status);
 
             let dur = format!("{:>7.0}ms", span.duration_ms);
 
@@ -1683,39 +2107,49 @@ fn draw_span_detail(frame: &mut Frame, area: Rect, app: &App) {
     let span = match app.selected_waterfall_span() {
         Some(s) => s,
         None => {
-            let msg = Paragraph::new(" Select a span in the waterfall above.")
-                .block(Block::default().title(" Span Detail ").borders(Borders::ALL));
+            let msg = Paragraph::new(" Select a span in the waterfall above.").block(
+                Block::default()
+                    .title(" Span Detail ")
+                    .borders(Borders::ALL),
+            );
             frame.render_widget(msg, area);
             return;
         }
     };
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(" span_id: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&span.span_id),
-            Span::raw("  "),
-            Span::styled("service: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&span.service, Style::default().fg(service_color(&span.service))),
-            Span::raw("  "),
-            Span::styled("op: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&span.operation),
-            Span::raw("  "),
-            Span::styled("status: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&span.status, Style::default().fg(status_color(&span.status))),
-            Span::raw("  "),
-            Span::styled("duration: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{:.1}ms", span.duration_ms),
-                Style::default().fg(duration_color(span.duration_ms)),
-            ),
-        ]),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" span_id: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(&span.span_id),
+        Span::raw("  "),
+        Span::styled("service: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            &span.service,
+            Style::default().fg(service_color(&span.service)),
+        ),
+        Span::raw("  "),
+        Span::styled("op: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(&span.operation),
+        Span::raw("  "),
+        Span::styled("status: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            &span.status,
+            Style::default().fg(status_color(&span.status)),
+        ),
+        Span::raw("  "),
+        Span::styled("duration: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.1}ms", span.duration_ms),
+            Style::default().fg(duration_color(span.duration_ms)),
+        ),
+    ])];
 
     // Attributes on one line if small, multi-line if large
     if let Some(obj) = span.attributes.as_object() {
         if !obj.is_empty() {
-            let mut attr_spans: Vec<Span> = vec![Span::styled(" attrs: ", Style::default().fg(Color::DarkGray))];
+            let mut attr_spans: Vec<Span> = vec![Span::styled(
+                " attrs: ",
+                Style::default().fg(Color::DarkGray),
+            )];
             for (i, (k, v)) in obj.iter().enumerate() {
                 if i > 0 {
                     attr_spans.push(Span::raw("  "));
@@ -1724,7 +2158,10 @@ fn draw_span_detail(frame: &mut Frame, area: Rect, app: &App) {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                attr_spans.push(Span::styled(format!("{k}="), Style::default().fg(Color::Yellow)));
+                attr_spans.push(Span::styled(
+                    format!("{k}="),
+                    Style::default().fg(Color::Yellow),
+                ));
                 attr_spans.push(Span::raw(val));
             }
             lines.push(Line::from(attr_spans));
@@ -1735,9 +2172,10 @@ fn draw_span_detail(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(events) = span.events.as_array() {
         for evt in events {
             let name = evt["name"].as_str().unwrap_or("-");
-            let mut evt_spans: Vec<Span> = vec![
-                Span::styled(format!(" event({name}): "), Style::default().fg(Color::Magenta)),
-            ];
+            let mut evt_spans: Vec<Span> = vec![Span::styled(
+                format!(" event({name}): "),
+                Style::default().fg(Color::Magenta),
+            )];
             if let Some(attrs) = evt["attributes"].as_object() {
                 for (i, (k, v)) in attrs.iter().enumerate() {
                     if i > 0 {
@@ -1747,7 +2185,10 @@ fn draw_span_detail(frame: &mut Frame, area: Rect, app: &App) {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    evt_spans.push(Span::styled(format!("{k}="), Style::default().fg(Color::Yellow)));
+                    evt_spans.push(Span::styled(
+                        format!("{k}="),
+                        Style::default().fg(Color::Yellow),
+                    ));
                     evt_spans.push(Span::raw(val));
                 }
             }
@@ -1882,7 +2323,9 @@ fn draw_span_viewer(frame: &mut Frame, area: Rect, viewer: &SpanViewer) {
             lines.push(Line::from(""));
             lines.push(Line::styled(
                 "── Attributes ──",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
             let mut keys: Vec<&String> = obj.keys().collect();
             keys.sort();
@@ -1890,7 +2333,9 @@ fn draw_span_viewer(frame: &mut Frame, area: Rect, viewer: &SpanViewer) {
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![Span::styled(
                     format!("{k}:"),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 )]));
                 let val = render_value(&obj[k]);
                 for vline in val.split('\n') {
@@ -2045,6 +2490,29 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw("")
             },
         ])
+    } else if app.tab == Tab::Services {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::raw(":quit  "),
+            Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
+            Span::raw(":tab  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":nav  "),
+            Span::styled("enter", Style::default().fg(Color::Cyan)),
+            Span::raw(":filter traces  "),
+            Span::styled("space", Style::default().fg(Color::Cyan)),
+            Span::raw(":pause  "),
+            if !app.filter_text.is_empty() {
+                Span::styled("\\", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
+            if !app.filter_text.is_empty() {
+                Span::raw(":clear  ")
+            } else {
+                Span::raw("")
+            },
+        ])
     } else {
         Line::from(vec![
             Span::styled(" q", Style::default().fg(Color::Cyan)),
@@ -2100,12 +2568,14 @@ pub async fn run(
     service: Option<String>,
     status: Option<String>,
     interval: u64,
+    evals: bool,
+    eval_run: Option<String>,
 ) -> Result<()> {
     enable_raw_mode()?;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(server, service, status, interval);
+    let mut app = App::new(server, service, status, interval, evals, eval_run);
     app.poll_initial().await;
 
     let result = run_loop(&mut terminal, &mut app).await;
@@ -2130,6 +2600,7 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             }
             _ = services_timer.tick() => {
                 app.poll_services().await;
+                app.poll_evals().await;
             }
             ready = tokio::task::spawn_blocking(|| {
                 event::poll(Duration::from_millis(50)).unwrap_or(false)
@@ -2144,6 +2615,10 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                         app.timeline_state.selected().and_then(|i| {
                                             app.filtered_live_traces().get(i).map(|(_, t)| t.trace_id.clone())
                                         })
+                                    } else if current_tab == Tab::Evals {
+                                        app.eval_state.selected().and_then(|i| {
+                                            app.filtered_eval_cases().get(i).and_then(|c| c.trace_id.clone())
+                                        })
                                     } else {
                                         app.table_state.selected().and_then(|i| {
                                             app.filtered_spans().get(i).map(|s| s.trace_id.clone())
@@ -2157,6 +2632,9 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                 }
                                 Some("submit_comment") => {
                                     app.submit_comment().await;
+                                }
+                                Some("refresh_evals") => {
+                                    app.poll_evals().await;
                                 }
                                 _ => {}
                             }

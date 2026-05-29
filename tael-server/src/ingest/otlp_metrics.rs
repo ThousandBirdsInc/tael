@@ -41,12 +41,13 @@ impl MetricsService for OtlpMetricsService {
                 .and_then(|r| {
                     r.attributes.iter().find_map(|attr| {
                         if attr.key == "service.name" {
-                            attr.value.as_ref().and_then(|v| v.value.as_ref()).and_then(
-                                |val| match val {
+                            attr.value
+                                .as_ref()
+                                .and_then(|v| v.value.as_ref())
+                                .and_then(|val| match val {
                                     AnyVal::StringValue(s) => Some(s.clone()),
                                     _ => None,
-                                },
-                            )
+                                })
                         } else {
                             None
                         }
@@ -65,26 +66,18 @@ impl MetricsService for OtlpMetricsService {
                     match data {
                         MetricData::Gauge(g) => {
                             for dp in &g.data_points {
-                                if let Some(p) = number_point(
-                                    dp,
-                                    &service_name,
-                                    &name,
-                                    &unit,
-                                    MetricType::Gauge,
-                                ) {
+                                if let Some(p) =
+                                    number_point(dp, &service_name, &name, &unit, MetricType::Gauge)
+                                {
                                     points.push(p);
                                 }
                             }
                         }
                         MetricData::Sum(s) => {
                             for dp in &s.data_points {
-                                if let Some(p) = number_point(
-                                    dp,
-                                    &service_name,
-                                    &name,
-                                    &unit,
-                                    MetricType::Sum,
-                                ) {
+                                if let Some(p) =
+                                    number_point(dp, &service_name, &name, &unit, MetricType::Sum)
+                                {
                                     points.push(p);
                                 }
                             }
@@ -169,9 +162,7 @@ fn number_point(
     })
 }
 
-fn kv_to_map(
-    kvs: &[opentelemetry_proto::tonic::common::v1::KeyValue],
-) -> HashMap<String, String> {
+fn kv_to_map(kvs: &[opentelemetry_proto::tonic::common::v1::KeyValue]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for attr in kvs {
         if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {

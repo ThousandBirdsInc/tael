@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 
 use super::Store;
 use super::models::{
@@ -173,11 +173,7 @@ impl DuckDbStore {
         for span in spans {
             let attrs = serde_json::to_string(&span.attributes)?;
             let events = serde_json::to_string(&span.events)?;
-            let llm = span
-                .llm
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
+            let llm = span.llm.as_ref().map(serde_json::to_string).transpose()?;
             stmt.execute(params![
                 span.trace_id,
                 span.span_id,
@@ -229,7 +225,9 @@ impl DuckDbStore {
             param_values.push(Box::new(status.clone()));
         }
         if let Some(secs) = query.last_seconds {
-            sql.push_str(&format!(" AND start_time >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"));
+            sql.push_str(&format!(
+                " AND start_time >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"
+            ));
         }
         for (k, v) in &query.attributes {
             sql.push_str(" AND json_extract_string(attributes, ?) = ?");
@@ -375,7 +373,9 @@ impl DuckDbStore {
             let attrs = serde_json::to_string(&log.attributes)?;
             stmt.execute(params![
                 log.timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
-                log.observed_timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                log.observed_timestamp
+                    .format("%Y-%m-%d %H:%M:%S%.6f")
+                    .to_string(),
                 log.trace_id,
                 log.span_id,
                 log.severity.to_string(),
@@ -426,8 +426,7 @@ impl DuckDbStore {
         let limit = query.limit.unwrap_or(100);
         sql.push_str(&format!(" LIMIT {limit}"));
 
-        let params_ref: Vec<&dyn duckdb::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_ref.as_slice(), |row| {
             let ts_str: String = row.get(0)?;
@@ -513,8 +512,7 @@ impl DuckDbStore {
         let limit = query.limit.unwrap_or(500);
         sql.push_str(&format!(" LIMIT {limit}"));
 
-        let params_ref: Vec<&dyn duckdb::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_ref.as_slice(), |row| {
             let ts_str: String = row.get(0)?;
@@ -539,11 +537,7 @@ impl DuckDbStore {
         Ok(metrics)
     }
 
-    pub fn query_summary(
-        &self,
-        last_seconds: i64,
-        service: Option<&str>,
-    ) -> Result<SummaryReport> {
+    pub fn query_summary(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
         let conn = self.conn.lock().unwrap();
 
         let span_time_clause = format!(
@@ -553,7 +547,11 @@ impl DuckDbStore {
             "timestamp >= current_timestamp::TIMESTAMP - INTERVAL '{last_seconds} seconds'"
         );
 
-        let svc_clause = if service.is_some() { " AND service = ?" } else { "" };
+        let svc_clause = if service.is_some() {
+            " AND service = ?"
+        } else {
+            ""
+        };
         let svc_owned = service.map(|s| s.to_string());
         let build_params = || -> Vec<&dyn duckdb::ToSql> {
             match &svc_owned {
@@ -698,7 +696,11 @@ impl DuckDbStore {
     ) -> Result<AnomalyReport> {
         let conn = self.conn.lock().unwrap();
         let svc_owned = service.map(|s| s.to_string());
-        let svc_clause = if service.is_some() { " AND service = ?" } else { "" };
+        let svc_clause = if service.is_some() {
+            " AND service = ?"
+        } else {
+            ""
+        };
 
         // Per-service stats for a window whose end = now and start = now - window.
         let stats_sql = |window: i64| -> String {
@@ -854,8 +856,7 @@ impl DuckDbStore {
             .filter(|s| matches!(s.status, SpanStatus::Error))
             .count() as i64;
 
-        let mut services: Vec<String> =
-            spans.iter().map(|s| s.service.clone()).collect();
+        let mut services: Vec<String> = spans.iter().map(|s| s.service.clone()).collect();
         services.sort();
         services.dedup();
 
@@ -953,7 +954,11 @@ impl DuckDbStore {
         let mut rows = stmt.query([])?;
         let column_names: Vec<String> = match rows.as_ref() {
             Some(s) => (0..s.column_count())
-                .map(|i| s.column_name(i).cloned().unwrap_or_else(|_| "?".to_string()))
+                .map(|i| {
+                    s.column_name(i)
+                        .cloned()
+                        .unwrap_or_else(|_| "?".to_string())
+                })
                 .collect(),
             None => Vec::new(),
         };
@@ -987,8 +992,12 @@ fn duck_value_to_json(v: duckdb::types::Value) -> serde_json::Value {
         V::USmallInt(n) => J::from(n),
         V::UInt(n) => J::from(n),
         V::UBigInt(n) => J::from(n),
-        V::Float(f) => serde_json::Number::from_f64(f as f64).map(J::Number).unwrap_or(J::Null),
-        V::Double(f) => serde_json::Number::from_f64(f).map(J::Number).unwrap_or(J::Null),
+        V::Float(f) => serde_json::Number::from_f64(f as f64)
+            .map(J::Number)
+            .unwrap_or(J::Null),
+        V::Double(f) => serde_json::Number::from_f64(f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
         V::Text(s) => J::String(s),
         other => J::String(format!("{other:?}")),
     }
@@ -1179,11 +1188,8 @@ mod tests {
     #[test]
     fn query_sql_reads_and_rejects_mutations() {
         let s = store();
-        s.insert_spans(&[
-            span("a", &[("env", "prod")]),
-            span("b", &[("env", "prod")]),
-        ])
-        .unwrap();
+        s.insert_spans(&[span("a", &[("env", "prod")]), span("b", &[("env", "prod")])])
+            .unwrap();
 
         let rows = s
             .query_sql("SELECT service, COUNT(*) AS n FROM spans GROUP BY service")
