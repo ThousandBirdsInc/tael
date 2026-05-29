@@ -21,7 +21,7 @@ name = "tael"
 path = "src/main.rs"
 
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.5.4" }
+tael-server = { path = "../tael-server", version = "0.5.5" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
