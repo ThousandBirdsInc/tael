@@ -23,6 +23,7 @@ impl StorageBackend {
 pub struct ServerConfig {
     pub otlp_grpc_addr: String,
     pub rest_api_addr: String,
+    pub rest_api_socket: Option<String>,
     pub data_dir: String,
     pub wal_dir: String,
     pub storage: StorageBackend,
@@ -67,6 +68,9 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "127.0.0.1:4317".into()),
             rest_api_addr: std::env::var("TAEL_REST_API_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7701".into()),
+            rest_api_socket: std::env::var("TAEL_REST_API_SOCKET")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             data_dir: std::env::var("TAEL_DATA_DIR").unwrap_or_else(|_| default_data_dir()),
             wal_dir: std::env::var("TAEL_WAL_DIR")
                 .or_else(|_| std::env::var("WALRUS_DATA_DIR"))

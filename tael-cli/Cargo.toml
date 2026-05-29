@@ -22,6 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 tael-server = { path = "../tael-server", version = "0.5.5" }
+tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.5", package = "tael-gui" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

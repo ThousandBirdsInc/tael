@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tael-server", "tael-cli", "tael-test"]
+members = ["tael-server", "tael-cli", "tael-test", "tael-gui/src-tauri"]
 
 [workspace.package]
 version = "0.5.5"

@@ -29,6 +29,7 @@ Trigger this skill proactively on:
 4. Are there error spans in the relevant window? `tael --format json query traces --service <name> --status error --last 15m`.
 5. For each suspicious trace, pull spans + logs + metrics in one shot: `tael --format json correlate --trace <trace_id>`.
 6. **Only then** start reading code, armed with a specific trace ID, the failing span's operation, and the error message from the logs.
+7. If the failure is recurring or should become a regression case, use the reliability loop commands in this skill (`issue`, `signal`, `eval case`, `experiment`, `diagnose`) so the finding stays attached to the originating trace.
 
 Do not invoke for: questions about the tael codebase itself (read code normally), or telemetry stored outside tael (other APMs, Datadog, Honeycomb, etc.).
 
@@ -180,6 +181,141 @@ tael comment add <trace_id> "root cause: N+1 query in user loader" --author clau
 ```
 
 Don't annotate every trace — only when you've done real investigation that would otherwise have to be redone.
+
+## Reliability loop: issues, signals, golden cases, experiments
+
+Use these commands after you have a concrete trace ID and a defensible failure story. They are comment-backed: each command writes or reads structured JSON in `trace_comments`, so provenance stays tied to the trace. Do not create issues or cases from speculation.
+
+### Classify a recurring issue
+When a trace represents a user-visible or recurring failure:
+
+```bash
+tael --format json issue create \
+  --from-trace <trace_id> \
+  --failure-mode <short_mode> \
+  --impact low|medium|high|critical \
+  --summary "<one sentence>" \
+  --last-successful-step "<optional>" \
+  --first-failure "<optional>"
+```
+
+Then inspect the inventory:
+```bash
+tael --format json issue list
+tael --format json issue examples <issue_id>
+```
+
+Use stable, reusable `failure_mode` names such as `tool_error`, `context_loss`, `retrieval_miss`, `policy_violation`, `timeout`, or the domain's existing taxonomy. `issue create` returns the created comment; the generated `issue_id` is inside the JSON body.
+
+### Promote a production trace into a golden eval case
+When the failure should be protected by regression testing:
+
+```bash
+tael --format json eval case add \
+  --from-trace <trace_id> \
+  --suite <suite_id> \
+  --case-id <stable_case_id> \
+  --failure-mode <short_mode> \
+  --source-issue-id <issue_id> \
+  --critical-path \
+  --expected-behavior "<durable expected behavior>"
+```
+
+If you created the case first and later identify the issue:
+
+```bash
+tael --format json eval case link --case-id <stable_case_id> --issue-id <issue_id>
+```
+
+Audit case quality before trusting a suite:
+```bash
+tael --format json eval suite inspect <suite_id>
+```
+
+Read `missing_expected_behavior`, `provenance_free`, and `duplicate_failure_modes` first. A case without source-trace provenance or durable expected behavior is weak evidence.
+
+### Define and trend long-running signals
+Use signals for patterns that should be watched across many traces:
+
+```bash
+tael --format json signal create \
+  --from-trace <trace_id> \
+  --name <signal_name> \
+  --failure-mode <short_mode> \
+  --summary "<what this signal means>" \
+  --query "<optional human-readable classifier/query>"
+
+tael --format json signal trend <signal_name>
+```
+
+`signal trend` counts matching signal definitions, failure reviews, and self diagnostics by day. It is useful for directionality, not precise incident metrics.
+
+### Compare production experiment variants
+If spans carry `tael.experiment.id` and `tael.experiment.variant`, compare variants directly:
+
+```bash
+tael --format json experiment compare <experiment_id> --last 24h
+tael --format json experiment compare <experiment_id> --signal <failure_mode_or_signal> --last 24h
+```
+
+This reports trace count, span count, error count/rate, average span duration, and optional signal count/rate per variant. Treat it as an operational comparison over observed traces, not a randomized-experiment statistics package.
+
+### Record untrusted agent self diagnostics
+
+Use this sparingly when the agent itself caused or noticed a limitation in a trace:
+
+```bash
+tael --format json diagnose report \
+  --trace-id <trace_id> \
+  --span-id <optional_span_id> \
+  --category missing_context|capability_gap|broken_tool|<other> \
+  --severity low|medium|high|critical \
+  --confidence low|medium|high \
+  --summary "<one sentence>"
+
+tael --format json diagnose list
+```
+
+Diagnostics are untrusted hints. Label confidence conservatively and avoid presenting them as verified root cause without corroborating telemetry.
+
+## Trace-native evals
+
+Eval runs reuse tael telemetry. Runner spans carry eval attributes, scores are stored as `tael_eval_score` metrics, large rationales can be blob-backed, and progress is visible in the same TUI as production traces.
+
+### Run cases
+
+```bash
+tael eval run <cases.jsonl> \
+  --suite <suite_id> \
+  --cmd '<command using {case_id} {case_index} {run_id} {suite_id}>' \
+  --code-version <version> \
+  --run-id <optional_run_id>
+```
+
+Each JSONL case should include `case_id` or `id`. The child command receives `TAEL_EVAL_SUITE_ID`, `TAEL_EVAL_RUN_ID`, `TAEL_EVAL_CASE_ID`, `TAEL_EVAL_CASE_INDEX`, `TAEL_EVAL_CASE_COUNT`, `TAEL_EVAL_TRACE_ID`, `TAEL_EVAL_SPAN_ID`, optional `TAEL_EVAL_CODE_VERSION`, and `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### Score and inspect runs
+
+```bash
+tael --format json eval score <run_id> <scores.jsonl>
+tael --format json eval runs
+tael --format json eval status <run_id>
+tael --format json eval cases <run_id>
+tael --format json eval scores <run_id>
+tael --format json eval report <run_id>
+tael --format json eval compare <run_id> <baseline_run_id>
+```
+
+Score JSONL lines should include `case_id`, `metric`, and `value`; optional fields include `suite_id`, `trace_id`, `span_id`, `scorer`, `label`, `rationale`, `rationale_sha256`, and `source`. If a line contains `rationale` and no `rationale_sha256`, the CLI uploads the rationale as a blob and stores its SHA-256.
+
+For human live progress, use:
+
+```bash
+tael live --evals
+tael live --eval-run <run_id>
+```
+
+As an agent, prefer the JSON eval commands over the TUI unless the user explicitly asks for an interactive view.
 
 ### SQL escape hatch (advanced)
 
@@ -334,6 +470,18 @@ summarize        → {"window_seconds", "traces", "top_services", "top_error_ope
 anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}
 correlate        → {"trace_id", "span_count", "services", "start_time", "end_time", "duration_ms", "error_count", "logs": [...], "metrics": [...]}
 watch            → {"timestamp", "window_seconds", "traces", "logs", "metrics"}   (one JSON object per tick)
+eval runs        → {"runs": [...], "count": N}
+eval status      → {"run": {...}}
+eval cases       → {"run_id", "cases": [...], "count": N}
+eval scores      → {"run_id", "scores": [...], "count": N} or {"scores": [...], "count": N} after ingest
+eval report      → {"run": {...}, "cases": [...]}
+eval compare     → {"current_run_id", "baseline_run_id", "cases": [...]}
+eval suite inspect → {"suite", "case_count", "critical_path_count", "provenance_free", "missing_expected_behavior", "duplicate_failure_modes", "cases"}
+issue list       → {"issues": [...], "count": N}
+issue examples   → {"issue_id", "examples": [...], "count": N}
+signal trend     → {"signal", "definitions", "matches", "buckets", "count": N}
+experiment compare → {"experiment_id", "variants": [...], "count": N}
+diagnose list    → {"diagnostics": [...], "count": N}
 <error>          → {"error": "..."}   (with non-2xx HTTP status)
 ```
 

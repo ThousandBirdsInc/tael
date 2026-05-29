@@ -17,9 +17,9 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 1
 fi
 
-# Dry run and publish tael-server first. tael-cli's packaged verification
-# resolves tael-server from crates.io, so the new server version must be
-# indexed before the CLI dry-run can use new server APIs.
+# Dry run and publish libraries first. tael-cli's packaged verification resolves
+# tael-server and tael-gui from crates.io, so the new library versions must be
+# indexed before the CLI dry-run can use new APIs.
 echo "==> Running dry-run for tael-server..."
 cargo publish -p tael-server --dry-run
 
@@ -38,6 +38,24 @@ echo "==> Waiting for crates.io to index tael-server..."
 sleep 15
 
 echo ""
+echo "==> Running dry-run for tael-gui..."
+cargo publish -p tael-gui --dry-run
+
+echo ""
+read -p "tael-gui dry run passed. Publish tael-gui to crates.io? [y/N] " confirm
+if [[ "$confirm" != [yY] ]]; then
+  echo "Aborted."
+  exit 0
+fi
+
+echo ""
+echo "==> Publishing tael-gui..."
+cargo publish -p tael-gui
+
+echo "==> Waiting for crates.io to index tael-gui..."
+sleep 15
+
+echo ""
 echo "==> Running dry-run for tael-cli..."
 cargo publish -p tael-cli --dry-run
 
@@ -53,4 +71,4 @@ echo "==> Publishing tael-cli..."
 cargo publish -p tael-cli
 
 echo ""
-echo "Done. Published tael-server and tael-cli v$(cargo metadata --no-deps --format-version 1 | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
+echo "Done. Published tael-server, tael-gui, and tael-cli v$(cargo metadata --no-deps --format-version 1 | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"

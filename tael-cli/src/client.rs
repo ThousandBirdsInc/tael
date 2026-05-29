@@ -12,10 +12,28 @@ pub struct TaelClient {
 
 impl TaelClient {
     pub fn new(base_url: &str) -> Self {
+        if let Some(socket_path) = base_url.strip_prefix("unix://") {
+            return Self::new_unix_socket(socket_path)
+                .expect("failed to build Unix-socket HTTP client");
+        }
+
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: Client::new(),
         }
+    }
+
+    #[cfg(unix)]
+    pub fn new_unix_socket(socket_path: &str) -> Result<Self> {
+        Ok(Self {
+            base_url: "http://tael".to_string(),
+            http: Client::builder().unix_socket(socket_path).build()?,
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn new_unix_socket(_socket_path: &str) -> Result<Self> {
+        anyhow::bail!("Unix sockets are only supported on Unix platforms");
     }
 
     pub fn subscribe_live(

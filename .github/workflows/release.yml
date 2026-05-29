@@ -64,8 +64,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Build only the CLI crate (it pulls in tael-server). Native target on
-      # each runner, so the bundled DuckDB C++ compiles with the host toolchain.
+      - name: Install Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # Build only the CLI crate (it pulls in tael-server and tael-gui). Native
+      # target on each runner, so bundled native dependencies compile with the
+      # host toolchain.
       - name: Build
         run: cargo build --release --locked -p tael-cli --target ${{ matrix.target }}
 

@@ -25,7 +25,8 @@
 
 **tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (and Prometheus remote-write), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
 
-No dashboards. No browsers. Just a single `tael` binary — server and client in one — and structured data.
+One `tael` binary — server, CLI, TUI, and desktop GUI in one — with structured
+data as the default interface.
 
 <p align="center">
   <a href="https://asciinema.org/a/fJALiYb0pILGb18H">
@@ -43,10 +44,11 @@ Windows is not supported — a dependency in the WAL uses unix-only file I/O.
 cargo binstall tael-cli
 ```
 
-`cargo install tael-cli` also works, but compiles the bundled DuckDB engine from
-source (a large C++ build), so it can take several minutes. `cargo binstall`
-fetches a prebuilt binary from the GitHub Release instead and finishes in
-seconds. Install it once with `cargo install cargo-binstall` (or grab it from
+`cargo install tael-cli` also works, but compiles the bundled DuckDB engine and
+desktop GUI from source, so it can take several minutes and requires the native
+Tauri/WebKit build dependencies for your platform. `cargo binstall` fetches a
+prebuilt binary from the GitHub Release instead and finishes in seconds. Install
+it once with `cargo install cargo-binstall` (or grab it from
 [its releases](https://github.com/cargo-bins/cargo-binstall#installation)).
 
 ```bash
@@ -77,6 +79,9 @@ tael get trace <trace-id> --format json
 
 # Interactive TUI
 tael live
+
+# Desktop GUI
+tael gui
 ```
 
 ## Features
@@ -99,6 +104,11 @@ tael get trace <trace-id>
 
 # Service health overview
 tael services
+
+# Cross-signal queries
+tael query logs --severity error --last 1h
+tael query metrics --query 'sum by (service) (http_requests)'
+tael query sql "SELECT service, COUNT(*) AS errors FROM spans WHERE status = 'error' GROUP BY service"
 ```
 
 ### Trace Comments
@@ -162,6 +172,41 @@ prompt, tool, retrieval, or guardrail changes against production outcomes.
 The initial implementation is intentionally comment-backed: issues, signal
 definitions, eval case provenance, and self diagnostics are structured trace
 comments, so they stay attached to the trace that motivated them.
+
+```bash
+# Classify a representative production failure
+tael issue create --from-trace <trace-id> \
+  --failure-mode tool_error --impact high \
+  --summary "search tool timed out before answer synthesis"
+tael issue list --format table
+tael issue examples <issue-id>
+
+# Promote the failure into a regression case and inspect suite hygiene
+tael eval case add --from-trace <trace-id> --suite support-agent \
+  --case-id search-timeout-001 --failure-mode tool_error \
+  --source-issue-id <issue-id> --critical-path \
+  --expected-behavior "Retries or degrades gracefully without hallucinating"
+tael eval case link --case-id search-timeout-001 --issue-id <issue-id>
+tael eval suite inspect support-agent --format table
+
+# Run and score trace-native evals
+tael eval run cases.jsonl --suite support-agent \
+  --cmd './run_case.sh {case_id}' --code-version "$(git rev-parse --short HEAD)"
+tael eval score <run-id> scores.jsonl
+tael eval report <run-id> --format table
+tael eval compare <run-id> <baseline-run-id> --format table
+
+# Track long-running reliability signals and experiment variants
+tael signal create --from-trace <trace-id> --name context_loss \
+  --failure-mode context_loss --summary "agent lost required source context"
+tael signal trend context_loss --format table
+tael experiment compare checkout-prompt-v2 --signal context_loss --last 24h
+
+# Record untrusted agent self diagnostics for later review
+tael diagnose report --trace-id <trace-id> --category missing_context \
+  --severity medium --confidence low --summary "could not find policy source"
+tael diagnose list --format table
+```
 
 ### Claude Code Skill
 `tael` ships with a [Claude Code skill](./SKILL.md) so Claude Code picks up telemetry-querying instructions automatically when you're debugging inside a project that uses tael. Install it once:
@@ -280,6 +325,54 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | `--max-duration` | Maximum span duration | `--max-duration 1s` |
 | `--last` | Time window | `--last 1h` |
 | `--limit` | Max results (default 100) | `--limit 50` |
+| `--attribute` | Exact span-attribute match, repeatable and ANDed | `--attribute http.status_code=500` |
+| `--text` | Full-text search over LLM prompt/completion payloads in `tael-backend` storage | `--text "rate limit"` |
+
+### `tael query logs`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--service` | Filter by service name | `--service api` |
+| `--severity` | Filter by severity (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) | `--severity error` |
+| `--body-contains` | Substring search over log body text | `--body-contains timeout` |
+| `--trace-id` | Exact trace ID match | `--trace-id a1b2c3...` |
+| `--last` | Time window | `--last 1h` |
+| `--limit` | Max results (default 100) | `--limit 50` |
+
+### `tael query metrics`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--service` | Filter by service name; ignored when `--query` is set | `--service api` |
+| `--name` | Filter by metric name; ignored when `--query` is set | `--name http_requests` |
+| `--type` | Filter by metric type (`gauge`, `sum`, `histogram`, `summary`) | `--type gauge` |
+| `--query` | PromQL subset expression | `--query 'rate(http_requests[5m])'` |
+| `--last` | Time window or PromQL selector lookback | `--last 5m` |
+| `--limit` | Max results in filter mode (default 500) | `--limit 1000` |
+
+PromQL support is intentionally small: bare selectors, `{label="value"}`,
+`rate(metric[5m])`, and `sum|avg|min|max|count` with optional `by (...)`.
+Binary operators, regex matchers, `histogram_quantile`, subqueries, offset, and
+range queries are not supported.
+
+### `tael query sql`
+
+Runs read-only SQL over `spans`, `logs`, `metrics`, and `trace_comments`.
+Only `SELECT`/`WITH` statements are accepted.
+
+```bash
+tael query sql "SELECT service, COUNT(*) AS n FROM spans GROUP BY service ORDER BY n DESC"
+```
+
+### `tael live`
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--service` | Filter live trace feed by service | `--service api` |
+| `--status` | Filter live trace feed by status | `--status error` |
+| `--interval` | Poll interval in seconds (default 2) | `--interval 1` |
+| `--evals` | Open the eval progress view | `--evals` |
+| `--eval-run` | Open a specific eval run in the eval progress view | `--eval-run run_20260528_120000` |
 
 ### `tael summarize`
 
@@ -309,6 +402,45 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | `--last` | Summary window (default 1m) | `--last 30s` |
 | `--service` | Filter to a single service | `--service api` |
 | `--interval` | Poll interval in seconds (default 10) | `--interval 5` |
+
+### `tael eval`
+
+| Command | Description |
+|---------|-------------|
+| `eval run <cases.jsonl> --suite <suite> --cmd <cmd>` | Run a shell command once per JSONL case with `TAEL_EVAL_*` env vars and runner spans |
+| `eval score <run-id> <scores.jsonl>` | Ingest JSONL score records as `tael_eval_score` metric points |
+| `eval runs` | List recent eval runs |
+| `eval status <run-id>` | Show one eval run summary |
+| `eval cases <run-id>` | List cases in a run |
+| `eval scores <run-id>` | List raw scores in a run |
+| `eval report <run-id>` | Render status and cases together |
+| `eval compare <run-id> <baseline-run-id>` | Compare score metrics against a baseline run |
+| `eval case add --from-trace <trace> --suite <suite> --case-id <id>` | Promote a production trace into a golden case comment |
+| `eval case link --case-id <id> --issue-id <issue>` | Link an eval case to a recurring issue |
+| `eval suite inspect <suite>` | Inspect case provenance, expected behavior coverage, critical-path count, and duplicate failure modes |
+
+`eval run` templates support `{case_id}`, `{case_index}`, `{run_id}`, and
+`{suite_id}`. Child commands receive `TAEL_EVAL_SUITE_ID`,
+`TAEL_EVAL_RUN_ID`, `TAEL_EVAL_CASE_ID`, `TAEL_EVAL_CASE_INDEX`,
+`TAEL_EVAL_CASE_COUNT`, `TAEL_EVAL_TRACE_ID`, `TAEL_EVAL_SPAN_ID`, and
+`OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### Reliability Loop Commands
+
+| Command | Description |
+|---------|-------------|
+| `issue create --from-trace <trace> --failure-mode <mode> --impact <level> --summary <text>` | Create a structured recurring-issue comment from a representative trace |
+| `issue list` | List known recurring issues |
+| `issue examples <issue-id>` | List comments and cases linked to an issue |
+| `signal create --from-trace <trace> --name <name>` | Define a long-running signal from a trace |
+| `signal trend <name>` | Count matching signal, failure-review, and self-diagnostic comments by day |
+| `experiment compare <experiment-id>` | Compare variants tagged with `tael.experiment.id` and `tael.experiment.variant` span attributes |
+| `diagnose report --trace-id <trace> --category <category> --severity <level> --summary <text>` | Record an untrusted agent self diagnostic as a trace comment |
+| `diagnose list` | List self diagnostics |
+
+The reliability-loop commands are deliberately comment-backed. They scan
+structured JSON trace comments rather than requiring a separate issues or eval
+database, which keeps provenance attached to the original trace.
 
 ## Architecture
 
@@ -354,13 +486,19 @@ the horizontal-scale / HA path.
 
 ## Project Structure
 
-The `tael` binary is published as `tael-cli`, which embeds `tael-server` as a
-library — so `cargo install tael-cli` is the whole stack.
+The `tael` binary is published as `tael-cli`, which embeds `tael-server` and the
+desktop GUI as libraries — so `cargo install tael-cli` is the whole stack.
+
+Use `tael_server::run(config)` for a user-facing server process. In-process
+integrations that must preserve one-shot JSON output or TUI control of the
+terminal should use `tael_server::run_embedded(config)` or
+`run_with_options(config, ServerRunOptions::quiet())`; quiet mode skips Tael's
+startup banner and default tracing subscriber setup.
 
 ```
 ├── tael-server/     # Library: OTLP ingestion, tiered storage, REST/gRPC API
 │   └── src/
-│       ├── lib.rs        # tael_server::run(ServerConfig)
+│       ├── lib.rs        # tael_server::run / run_embedded
 │       ├── config.rs
 │       ├── ingest/       # OTLP traces/logs/metrics + Prometheus remote-write
 │       ├── storage/      # Store trait, models, query layer
@@ -376,6 +514,9 @@ library — so `cargo install tael-cli` is the whole stack.
 │       ├── tui.rs       # Interactive TUI (ratatui)
 │       ├── output.rs    # JSON + table formatters
 │       └── commands/    # Subcommand handlers
+├── tael-gui/        # Tauri desktop GUI launched by `tael gui`
+│   ├── src/         # TypeScript frontend
+│   └── src-tauri/   # Rust Tauri shell and packaged frontend assets
 ├── tael-test/       # Sample OTLP emitter for testing
 ├── docs/            # Storage-engine design, impl plan, scaling/HA
 ├── DESIGN.md        # Full design document
@@ -390,6 +531,7 @@ library — so `cargo install tael-cli` is the whole stack.
 | Storage | tael-backend | Tiered engine: WAL (walrus) + LSM hot tier (fjall) + Parquet cold tier (arrow/parquet) + content-addressed blobs + Tantivy search |
 | Storage (fallback) | DuckDB | Embedded columnar DB, `--storage duckdb` |
 | CLI | clap | Standard Rust CLI framework |
+| GUI | Tauri | Desktop app embedded in the installed `tael` binary |
 | API | axum | Async REST on tokio |
 | gRPC | tonic | OTLP ingestion |
 | TUI | ratatui | Terminal UI with waterfall visualization |

@@ -3,7 +3,7 @@ mod commands;
 mod output;
 mod tui;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -25,6 +25,11 @@ struct Cli {
     /// listen port to `127.0.0.1:<port>`. Conflicts with `--server`.
     #[arg(long, global = true, conflicts_with = "server")]
     port_rest: Option<u16>,
+
+    /// REST API Unix socket path. For client commands, connects over this
+    /// socket. For `serve`, listens on this socket instead of a TCP REST port.
+    #[arg(long, global = true, conflicts_with_all = ["server", "port_rest"])]
+    unix_socket: Option<String>,
 
     /// OTLP gRPC ingest port (only used by `serve`). Sets the OTLP gRPC
     /// listen address to `127.0.0.1:<port>`. Ignored by client commands.
@@ -48,6 +53,9 @@ enum Commands {
         /// REST API listen address (env: TAEL_REST_API_ADDR)
         #[arg(long)]
         rest_api_addr: Option<String>,
+        /// REST API Unix socket path (env: TAEL_REST_API_SOCKET)
+        #[arg(long)]
+        rest_api_socket: Option<String>,
         /// Data directory (env: TAEL_DATA_DIR)
         #[arg(long)]
         data_dir: Option<String>,
@@ -58,6 +66,8 @@ enum Commands {
         #[arg(long)]
         storage: Option<String>,
     },
+    /// Launch the desktop GUI
+    Gui,
     /// Query telemetry data
     Query {
         #[command(subcommand)]
@@ -568,11 +578,16 @@ async fn main() -> Result<()> {
     if let Commands::Serve {
         otlp_grpc_addr,
         rest_api_addr,
+        rest_api_socket,
         data_dir,
         wal_dir,
         storage,
     } = cli.command
     {
+        if cli.unix_socket.is_some() && rest_api_socket.is_some() {
+            bail!("use either --unix-socket or --rest-api-socket, not both");
+        }
+
         // Start from env defaults, then override with any explicit flags.
         let mut config = tael_server::ServerConfig::from_env();
         if let Some(a) = otlp_grpc_addr {
@@ -580,10 +595,14 @@ async fn main() -> Result<()> {
         } else if let Some(p) = cli.port_otel {
             config.otlp_grpc_addr = format!("127.0.0.1:{p}");
         }
-        if let Some(a) = rest_api_addr {
+        if let Some(socket) = rest_api_socket.or(cli.unix_socket.clone()) {
+            config.rest_api_socket = Some(socket);
+        } else if let Some(a) = rest_api_addr {
             config.rest_api_addr = a;
+            config.rest_api_socket = None;
         } else if let Some(p) = cli.port_rest {
             config.rest_api_addr = format!("127.0.0.1:{p}");
+            config.rest_api_socket = None;
         }
         if let Some(d) = data_dir {
             config.data_dir = d;
@@ -599,13 +618,24 @@ async fn main() -> Result<()> {
 
     let server_url = match cli.port_rest {
         Some(p) => format!("http://127.0.0.1:{p}"),
-        None => cli.server.clone(),
+        None => match &cli.unix_socket {
+            Some(socket) => format!("unix://{socket}"),
+            None => cli.server.clone(),
+        },
     };
+
+    if let Commands::Gui = cli.command {
+        tael_gui::run_with_server(server_url);
+        return Ok(());
+    }
+
     let client = client::TaelClient::new(&server_url);
 
     match cli.command {
         // Handled above; the early return means this arm is never reached.
         Commands::Serve { .. } => unreachable!(),
+        // Handled above; the early return means this arm is never reached.
+        Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {
             QuerySignal::Traces {
                 service,

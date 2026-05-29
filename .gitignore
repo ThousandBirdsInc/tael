@@ -2,5 +2,6 @@
 /data
 /wal_files
 wal_files/
+node_modules/
 *.duckdb
 *.duckdb.wal
