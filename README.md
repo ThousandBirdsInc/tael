@@ -27,11 +27,7 @@
 
 No dashboards. No browsers. Just a single `tael` binary — server and client in one — and structured data.
 
-[Watch the asciinema demo](.github/demo.cast), or play it locally:
-
-```bash
-asciinema play .github/demo.cast
-```
+[![asciicast](https://asciinema.org/a/fJALiYb0pILGb18H.svg)](https://asciinema.org/a/fJALiYb0pILGb18H)
 
 ## Installation
 
