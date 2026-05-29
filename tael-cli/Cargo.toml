@@ -20,9 +20,18 @@ bin-dir = "tael-cli-v{ version }-{ target }/{ bin }{ binary-ext }"
 name = "tael"
 path = "src/main.rs"
 
+[features]
+# `gui` (default-on) pulls in the Tauri desktop app behind the `tael gui`
+# command. It hard-links webkit/GTK, which is dead weight in a headless
+# container, so the Docker image and server-only installs build with
+# `--no-default-features` to drop it. `cargo install` / `cargo binstall`
+# keep the GUI by default.
+default = ["gui"]
+gui = ["dep:tael-gui"]
+
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.5.5" }
-tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.5", package = "tael-gui" }
+tael-server = { path = "../tael-server", version = "0.5.6" }
+tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.6", package = "tael-gui", optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
