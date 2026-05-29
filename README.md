@@ -27,7 +27,11 @@
 
 No dashboards. No browsers. Just a single `tael` binary — server and client in one — and structured data.
 
-[![asciicast](https://asciinema.org/a/fJALiYb0pILGb18H.svg)](https://asciinema.org/a/fJALiYb0pILGb18H)
+<p align="center">
+  <a href="https://asciinema.org/a/fJALiYb0pILGb18H">
+    <img src="https://asciinema.org/a/fJALiYb0pILGb18H.svg" alt="tael asciinema demo" width="720" />
+  </a>
+</p>
 
 ## Installation
 
