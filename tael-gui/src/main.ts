@@ -1325,13 +1325,19 @@ window.addEventListener('keydown', event => {
 window.addEventListener('resize', queueRender)
 
 async function boot() {
+  render()
   try {
     const initialServer = await invoke<string>('initial_server')
     if (initialServer.trim()) state.server = initialServer.trim()
   } catch (error) {
     console.warn('failed to load initial server', error)
   }
-  await installLiveListeners()
+  try {
+    await installLiveListeners()
+  } catch (error) {
+    state.error = `failed to install live listeners: ${String(error)}`
+    queueRender()
+  }
   connect()
 }
 
