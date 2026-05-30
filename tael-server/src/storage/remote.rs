@@ -379,7 +379,6 @@ impl WalSink for RemoteWalSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::DuckDbStore;
     use crate::storage::models::{SpanKind, SpanStatus};
     use chrono::Utc;
     use std::collections::HashMap;
@@ -405,7 +404,7 @@ mod tests {
         }
     }
 
-    /// Boot a real REST server (DuckDB-backed) on an ephemeral port in its own
+    /// Boot a real REST server on an ephemeral port in its own
     /// runtime thread, seeded with `spans`, and return its address. Running the
     /// server off-thread lets the blocking `RemoteStore` calls in the test
     /// thread proceed without nesting/deadlocking a runtime.
@@ -418,7 +417,13 @@ mod tests {
             let _dir = dir;
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                let store: Arc<dyn Store> = Arc::new(DuckDbStore::new(&path).unwrap());
+                let store: Arc<dyn Store> = Arc::new(
+                    crate::storage::TaelBackend::with_wal_key(
+                        &path,
+                        &format!("tael-test-remote-{}", uuid::Uuid::new_v4()),
+                    )
+                    .unwrap(),
+                );
                 store.insert_spans(&spans).unwrap();
                 let blobs = Arc::new(crate::storage::BlobStore::new(&path).unwrap());
                 let bus = Arc::new(crate::span_bus::SpanBus::new().unwrap());

@@ -5,25 +5,29 @@
 //! **Phase 3:** durable WAL write path + crash-gap replay.
 //! **Phase 4 (this file):** an `fjall` LSM hot tier serves the core per-signal
 //! reads (`query_traces`, `get_trace`, `list_services`, `query_logs`,
-//! `query_metrics`). Writes fan out to the WAL, the hot tier, and an inner
-//! `DuckDbStore` projection that still backs the heavier analytics
-//! (`query_summary`/`anomalies`/`correlate`, PromQL) until DataFusion (Phase 6)
-//! serves those from hot+cold. The double-write is the explicit transitional
-//! state; `--storage=tael-backend` is always a complete backend.
+//! `query_metrics`). The legacy DuckDB projection is available behind the
+//! `duckdb` Cargo feature, but the default backend is self-contained so the
+//! default CLI install does not compile or link DuckDB.
 
 mod cold;
 mod hot;
 mod wal;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
+#[cfg(feature = "duckdb")]
 use super::DuckDbStore;
 use super::Store;
 use super::models::{
-    AnomalyReport, CorrelateReport, LogQuery, LogRecord, MetricPoint, MetricQuery, ServiceInfo,
-    Span, SummaryReport, TraceComment, TraceQuery,
+    Anomaly, AnomalyReport, CorrelateReport, ErrorOperation, LogQuery, LogRecord, LogSeverity,
+    LogSummary, MetricPoint, MetricQuery, MetricSummary, ServiceInfo, ServiceSummary, Span,
+    SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
 };
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use super::SearchIndex;
 use cold::ColdTier;
@@ -36,8 +40,10 @@ pub struct TaelBackend {
     hot: HotTier,
     /// Parquet cold tier — aged spans rolled out of the hot tier.
     cold: ColdTier,
-    /// Projection backing analytics not yet ported to the hot tier.
+    /// Optional legacy projection used only when the `duckdb` feature is enabled.
+    #[cfg(feature = "duckdb")]
     inner: DuckDbStore,
+    comments: CommentStore,
     /// Full-text index over LLM payloads (shared with the ingest path).
     search: Arc<SearchIndex>,
     wal: WalLog,
@@ -69,7 +75,9 @@ impl TaelBackend {
     ) -> Result<Self> {
         let hot = HotTier::open(data_dir)?;
         let cold = ColdTier::open(data_dir)?;
+        #[cfg(feature = "duckdb")]
         let inner = DuckDbStore::new(data_dir)?;
+        let comments = CommentStore::open(data_dir)?;
         let search = Arc::new(SearchIndex::open(data_dir)?);
         let mut wal = if sinks.is_empty() {
             WalLog::new_for_key(wal_key)?
@@ -82,7 +90,9 @@ impl TaelBackend {
         let backend = Self {
             hot,
             cold,
+            #[cfg(feature = "duckdb")]
             inner,
+            comments,
             search,
             wal,
         };
@@ -183,19 +193,40 @@ impl TaelBackend {
         Ok(dropped)
     }
 
-    /// Apply a batch to every projection (hot tier + DuckDB). Used by both the
-    /// live write path and WAL replay.
+    /// Apply a batch to every projection. Used by both the live write path and
+    /// WAL replay.
     fn apply_spans(&self, spans: &[Span]) -> Result<()> {
         self.hot.insert_spans(spans)?;
-        self.inner.insert_spans(spans)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.insert_spans(spans)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            Ok(())
+        }
     }
     fn apply_logs(&self, logs: &[LogRecord]) -> Result<()> {
         self.hot.insert_logs(logs)?;
-        self.inner.insert_logs(logs)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.insert_logs(logs)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            Ok(())
+        }
     }
     fn apply_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
         self.hot.insert_metrics(metrics)?;
-        self.inner.insert_metrics(metrics)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.insert_metrics(metrics)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            Ok(())
+        }
     }
 
     /// Re-apply any WAL records left unconsumed by a crash, then advance past
@@ -365,7 +396,7 @@ impl Store for TaelBackend {
         Ok(results)
     }
 
-    // ── Comments & heavier analytics: projection (for now) ──────────
+    // ── Comments & cross-signal analytics ───────────────────────────
     fn add_comment(
         &self,
         trace_id: &str,
@@ -373,13 +404,34 @@ impl Store for TaelBackend {
         author: &str,
         body: &str,
     ) -> Result<TraceComment> {
-        self.inner.add_comment(trace_id, span_id, author, body)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.add_comment(trace_id, span_id, author, body)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.comments.add(trace_id, span_id, author, body)
+        }
     }
     fn get_comments(&self, trace_id: &str) -> Result<Vec<TraceComment>> {
-        self.inner.get_comments(trace_id)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.get_comments(trace_id)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.comments.get(trace_id)
+        }
     }
     fn query_summary(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
-        self.inner.query_summary(last_seconds, service)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.query_summary(last_seconds, service)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.summary_native(last_seconds, service)
+        }
     }
     fn query_anomalies(
         &self,
@@ -387,15 +439,37 @@ impl Store for TaelBackend {
         baseline_seconds: i64,
         service: Option<&str>,
     ) -> Result<AnomalyReport> {
-        self.inner
-            .query_anomalies(current_seconds, baseline_seconds, service)
+        #[cfg(feature = "duckdb")]
+        {
+            self
+                .inner
+                .query_anomalies(current_seconds, baseline_seconds, service)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.anomalies_native(current_seconds, baseline_seconds, service)
+        }
     }
     fn query_correlate(&self, trace_id: &str) -> Result<Option<CorrelateReport>> {
-        self.inner.query_correlate(trace_id)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.query_correlate(trace_id)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.correlate_native(trace_id)
+        }
     }
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
-        // SQL runs over the DuckDB projection, which retains all signals.
-        self.inner.query_sql(sql)
+        #[cfg(feature = "duckdb")]
+        {
+            self.inner.query_sql(sql)
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            let _ = sql;
+            bail!("SQL queries require a build with the `duckdb` feature")
+        }
     }
 
     fn flush(&self) -> Result<()> {
@@ -419,6 +493,353 @@ impl Store for TaelBackend {
         }
         self.wal.mark_applied()?;
         Ok(())
+    }
+}
+
+impl TaelBackend {
+    fn summary_native(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
+        let spans = self.query_traces(&TraceQuery {
+            service: service.map(str::to_string),
+            last_seconds: Some(last_seconds),
+            limit: Some(u32::MAX),
+            ..Default::default()
+        })?;
+        let logs = self.query_logs(&LogQuery {
+            service: service.map(str::to_string),
+            last_seconds: Some(last_seconds),
+            limit: Some(u32::MAX),
+            ..Default::default()
+        })?;
+        let metrics = self.query_metrics(&MetricQuery {
+            service: service.map(str::to_string),
+            last_seconds: Some(last_seconds),
+            limit: Some(u32::MAX),
+            ..Default::default()
+        })?;
+        Ok(SummaryReport {
+            window_seconds: last_seconds,
+            service_filter: service.map(str::to_string),
+            traces: trace_summary(&spans),
+            top_services: service_summaries(&spans),
+            top_error_operations: error_operations(&spans),
+            logs: log_summary(&logs),
+            metrics: metric_summary(&metrics),
+        })
+    }
+
+    fn anomalies_native(
+        &self,
+        current_seconds: i64,
+        baseline_seconds: i64,
+        service: Option<&str>,
+    ) -> Result<AnomalyReport> {
+        let current = self.query_traces(&TraceQuery {
+            service: service.map(str::to_string),
+            last_seconds: Some(current_seconds),
+            limit: Some(u32::MAX),
+            ..Default::default()
+        })?;
+        let baseline = self.query_traces(&TraceQuery {
+            service: service.map(str::to_string),
+            last_seconds: Some(baseline_seconds),
+            limit: Some(u32::MAX),
+            ..Default::default()
+        })?;
+        Ok(AnomalyReport {
+            current_seconds,
+            baseline_seconds,
+            service_filter: service.map(str::to_string),
+            anomalies: anomalies(&current, &baseline),
+        })
+    }
+
+    fn correlate_native(&self, trace_id: &str) -> Result<Option<CorrelateReport>> {
+        let spans = self.get_trace(trace_id)?;
+        if spans.is_empty() {
+            return Ok(None);
+        }
+        let start = spans
+            .iter()
+            .map(|s| s.start_time)
+            .min()
+            .unwrap_or_else(chrono::Utc::now);
+        let end = spans
+            .iter()
+            .map(|s| s.end_time)
+            .max()
+            .unwrap_or_else(chrono::Utc::now);
+        let services = spans
+            .iter()
+            .map(|s| s.service.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let logs = self.query_logs(&LogQuery {
+            trace_id: Some(trace_id.to_string()),
+            limit: Some(500),
+            ..Default::default()
+        })?;
+        let service = spans.first().map(|s| s.service.clone());
+        let metrics = self.query_metrics(&MetricQuery {
+            service,
+            limit: Some(500),
+            ..Default::default()
+        })?;
+        Ok(Some(CorrelateReport {
+            trace_id: trace_id.to_string(),
+            span_count: spans.len(),
+            services,
+            start_time: start.to_rfc3339(),
+            end_time: end.to_rfc3339(),
+            duration_ms: (end - start).num_microseconds().unwrap_or(0) as f64 / 1000.0,
+            error_count: spans
+                .iter()
+                .filter(|s| matches!(s.status, SpanStatus::Error))
+                .count() as i64,
+            logs,
+            metrics,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct CommentStore {
+    path: PathBuf,
+    comments: Mutex<HashMap<String, Vec<TraceComment>>>,
+}
+
+impl CommentStore {
+    fn open(data_dir: &str) -> Result<Self> {
+        let path = Path::new(data_dir).join("trace_comments.jsonl");
+        let mut comments: HashMap<String, Vec<TraceComment>> = HashMap::new();
+        if path.exists() {
+            let file = std::fs::File::open(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            for line in std::io::BufReader::new(file).lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let comment: TraceComment = serde_json::from_str(&line)
+                    .with_context(|| format!("decoding {}", path.display()))?;
+                comments
+                    .entry(comment.trace_id.clone())
+                    .or_default()
+                    .push(comment);
+            }
+        }
+        Ok(Self {
+            path,
+            comments: Mutex::new(comments),
+        })
+    }
+
+    fn add(
+        &self,
+        trace_id: &str,
+        span_id: Option<&str>,
+        author: &str,
+        body: &str,
+    ) -> Result<TraceComment> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let comment = TraceComment {
+            id: uuid::Uuid::new_v4().to_string(),
+            trace_id: trace_id.to_string(),
+            span_id: span_id.map(str::to_string),
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("opening {}", self.path.display()))?;
+        writeln!(file, "{}", serde_json::to_string(&comment)?)?;
+        self.comments
+            .lock()
+            .expect("comment store lock poisoned")
+            .entry(trace_id.to_string())
+            .or_default()
+            .push(comment.clone());
+        Ok(comment)
+    }
+
+    fn get(&self, trace_id: &str) -> Result<Vec<TraceComment>> {
+        Ok(self
+            .comments
+            .lock()
+            .expect("comment store lock poisoned")
+            .get(trace_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+fn trace_summary(spans: &[Span]) -> TraceSummary {
+    let mut durations: Vec<f64> = spans.iter().map(|s| s.duration_ms).collect();
+    durations.sort_by(|a, b| a.total_cmp(b));
+    let trace_count = spans.iter().map(|s| &s.trace_id).collect::<HashSet<_>>().len() as i64;
+    let error_count = spans
+        .iter()
+        .filter(|s| matches!(s.status, SpanStatus::Error))
+        .count() as i64;
+    TraceSummary {
+        span_count: spans.len() as i64,
+        trace_count,
+        error_count,
+        error_rate: ratio(error_count, spans.len() as i64),
+        avg_ms: if durations.is_empty() {
+            0.0
+        } else {
+            durations.iter().sum::<f64>() / durations.len() as f64
+        },
+        max_ms: durations.last().copied().unwrap_or(0.0),
+        p50_ms: percentile(&durations, 0.50),
+        p95_ms: percentile(&durations, 0.95),
+        p99_ms: percentile(&durations, 0.99),
+    }
+}
+
+fn service_summaries(spans: &[Span]) -> Vec<ServiceSummary> {
+    let mut by_service: HashMap<String, Vec<Span>> = HashMap::new();
+    for span in spans {
+        by_service
+            .entry(span.service.clone())
+            .or_default()
+            .push(span.clone());
+    }
+    let mut rows: Vec<ServiceSummary> = by_service
+        .into_iter()
+        .map(|(service, spans)| {
+            let summary = trace_summary(&spans);
+            ServiceSummary {
+                service,
+                span_count: summary.span_count,
+                error_rate: summary.error_rate,
+                p95_ms: summary.p95_ms,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.span_count.cmp(&a.span_count));
+    rows.truncate(10);
+    rows
+}
+
+fn error_operations(spans: &[Span]) -> Vec<ErrorOperation> {
+    let mut counts: HashMap<(String, String), i64> = HashMap::new();
+    for span in spans
+        .iter()
+        .filter(|s| matches!(s.status, SpanStatus::Error))
+    {
+        *counts
+            .entry((span.service.clone(), span.operation.clone()))
+            .or_default() += 1;
+    }
+    let mut rows: Vec<ErrorOperation> = counts
+        .into_iter()
+        .map(|((service, operation), error_count)| ErrorOperation {
+            service,
+            operation,
+            error_count,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.error_count.cmp(&a.error_count));
+    rows.truncate(10);
+    rows
+}
+
+fn log_summary(logs: &[LogRecord]) -> LogSummary {
+    let mut summary = LogSummary {
+        total: logs.len() as i64,
+        ..Default::default()
+    };
+    for log in logs {
+        match log.severity {
+            LogSeverity::Error | LogSeverity::Fatal => summary.error += 1,
+            LogSeverity::Warn => summary.warn += 1,
+            LogSeverity::Info => summary.info += 1,
+            LogSeverity::Debug => summary.debug += 1,
+            _ => {}
+        }
+    }
+    summary
+}
+
+fn metric_summary(metrics: &[MetricPoint]) -> MetricSummary {
+    MetricSummary {
+        point_count: metrics.len() as i64,
+        unique_names: metrics.iter().map(|m| &m.name).collect::<HashSet<_>>().len() as i64,
+    }
+}
+
+fn anomalies(current: &[Span], baseline: &[Span]) -> Vec<Anomaly> {
+    let cur = service_summaries(current);
+    let base = service_summaries(baseline);
+    let base_map: HashMap<String, ServiceSummary> =
+        base.into_iter().map(|s| (s.service.clone(), s)).collect();
+    let mut rows = Vec::new();
+    for c in cur {
+        let Some(b) = base_map.get(&c.service) else {
+            continue;
+        };
+        if c.error_rate > b.error_rate + 0.05 {
+            rows.push(Anomaly {
+                service: c.service.clone(),
+                kind: "error_rate".to_string(),
+                severity: if c.error_rate > b.error_rate + 0.20 {
+                    "high".to_string()
+                } else {
+                    "medium".to_string()
+                },
+                current: c.error_rate,
+                baseline: b.error_rate,
+                delta: c.error_rate - b.error_rate,
+                description: format!(
+                    "{} error rate increased from {:.1}% to {:.1}%",
+                    c.service,
+                    b.error_rate * 100.0,
+                    c.error_rate * 100.0
+                ),
+            });
+        }
+        if c.p95_ms > b.p95_ms * 1.5 && c.p95_ms - b.p95_ms > 25.0 {
+            rows.push(Anomaly {
+                service: c.service.clone(),
+                kind: "p95_latency".to_string(),
+                severity: if c.p95_ms > b.p95_ms * 2.0 {
+                    "high".to_string()
+                } else {
+                    "medium".to_string()
+                },
+                current: c.p95_ms,
+                baseline: b.p95_ms,
+                delta: c.p95_ms - b.p95_ms,
+                description: format!(
+                    "{} p95 latency increased from {:.1}ms to {:.1}ms",
+                    c.service, b.p95_ms, c.p95_ms
+                ),
+            });
+        }
+    }
+    rows
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted[idx]
+}
+
+fn ratio(numerator: i64, denominator: i64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
     }
 }
 
@@ -481,6 +902,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "duckdb")]
     fn query_traces_filters_match_duckdb() {
         let (b, _d, _g) = backend();
         let spans = vec![

@@ -27,8 +27,10 @@ pub use storage::models::{
     LogRecord, LogSeverity, MetricPoint, MetricType, Span, SpanEvent, SpanKind, SpanStatus,
     TraceQuery,
 };
+#[cfg(feature = "duckdb")]
+pub use storage::DuckDbStore;
 pub use storage::{
-    BlobStore, DuckDbStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
+    BlobStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
 };
 
 use log_bus::LogBus;
@@ -205,7 +207,14 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
         Arc::new(FanoutStore::new(shards)?)
     } else {
         match config.storage {
+            #[cfg(feature = "duckdb")]
             StorageBackend::Duckdb => Arc::new(DuckDbStore::new(&config.data_dir)?),
+            #[cfg(not(feature = "duckdb"))]
+            StorageBackend::Duckdb => {
+                bail!(
+                    "DuckDB storage is not included in this build; reinstall with `--features duckdb` to use --storage duckdb"
+                )
+            }
             StorageBackend::TaelBackend => {
                 // WAL replication: when standbys are configured, this node is a
                 // leader that ships every appended record to them before acking

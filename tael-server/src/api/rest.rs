@@ -1424,7 +1424,7 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::DuckDbStore;
+    use crate::storage::TaelBackend;
     use crate::storage::models::{
         AnomalyReport, CorrelateReport, LogRecord, MetricPoint, ServiceInfo, Span, SpanStatus,
         SummaryReport, TraceComment,
@@ -1549,7 +1549,11 @@ mod tests {
     #[test]
     fn eval_snapshot_derives_runs_cases_and_scores_from_existing_signals() {
         let dir = tempfile::tempdir().unwrap();
-        let store = DuckDbStore::new(dir.path().to_str().unwrap()).unwrap();
+        let store = TaelBackend::with_wal_key(
+            dir.path().to_str().unwrap(),
+            &format!("tael-test-eval-{}", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
         let now = Utc::now();
         let mut attrs = HashMap::new();
         attrs.insert("tael.eval.suite_id".to_string(), "suite-a".to_string());

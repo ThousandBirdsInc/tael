@@ -16,7 +16,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
-duckdb.workspace = true
+duckdb = { workspace = true, optional = true }
 hex.workspace = true
 opentelemetry-proto.workspace = true
 prost.workspace = true
@@ -43,10 +43,12 @@ form_urlencoded.workspace = true
 chitchat.workspace = true
 
 [features]
+default = []
+duckdb = ["dep:duckdb"]
 # Builds the `storage` bench target (DuckDbStore through the Store trait). Kept
 # behind a feature so the default `cargo bench` stays focused on CPU/blob-store
 # hot paths. Run with: cargo bench --features bench-storage
-bench-storage = []
+bench-storage = ["duckdb"]
 
 [[bench]]
 name = "serialization"

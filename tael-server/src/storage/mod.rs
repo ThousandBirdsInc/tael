@@ -1,5 +1,6 @@
 mod backend;
 mod blobs;
+#[cfg(feature = "duckdb")]
 mod duckdb_store;
 mod fanout;
 pub mod models;
@@ -8,6 +9,7 @@ mod search;
 
 pub use backend::{TaelBackend, WalSink};
 pub use blobs::BlobStore;
+#[cfg(feature = "duckdb")]
 pub use duckdb_store::DuckDbStore;
 pub use fanout::FanoutStore;
 pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};

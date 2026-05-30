@@ -44,9 +44,9 @@ Windows is not supported — a dependency in the WAL uses unix-only file I/O.
 cargo binstall tael-cli
 ```
 
-`cargo install tael-cli` also works, but compiles the bundled DuckDB engine and
-desktop GUI from source, so it can take several minutes and requires the native
-Tauri/WebKit build dependencies for your platform. `cargo binstall` fetches a
+`cargo install tael-cli` also works, but compiles the desktop GUI from source,
+so it can take several minutes and requires the native Tauri/WebKit build
+dependencies for your platform. `cargo binstall` fetches a
 prebuilt binary from the GitHub Release instead and finishes in seconds. Install
 it once with `cargo install cargo-binstall` (or grab it from
 [its releases](https://github.com/cargo-bins/cargo-binstall#installation)).
@@ -54,6 +54,9 @@ it once with `cargo install cargo-binstall` (or grab it from
 ```bash
 # Compiles from source — slower, but no extra tooling
 cargo install tael-cli
+
+# Optional legacy DuckDB storage backend
+cargo install tael-cli --features duckdb
 ```
 
 Or build from source:
@@ -65,8 +68,7 @@ cargo build --release
 ### Docker
 
 A prebuilt, multi-arch (amd64 + arm64) image is published to GHCR on every
-release, so you get the bundled-DuckDB build already compiled — no waiting on
-the source build:
+release, so there is no source build:
 
 ```bash
 docker run --rm \
@@ -345,7 +347,7 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | `--rest-api-addr` | REST API listen address | `127.0.0.1:7701` |
 | `--data-dir` | Telemetry data directory | `~/.tael/data` |
 | `--wal-dir` | Write-ahead log directory | `~/.tael/wal_files` |
-| `--storage` | Storage backend: `tael-backend` (default) or `duckdb` | `tael-backend` |
+| `--storage` | Storage backend. `duckdb` requires installing with `--features duckdb` | `tael-backend` |
 
 ### `tael query traces`
 
@@ -499,7 +501,7 @@ ingest/storage/API side; the other subcommands are the client.
 │  │  tael-backend (default) — Store trait      │ │
 │  │   WAL → LSM hot tier → Parquet cold tier   │ │
 │  │   content-addressed blobs · Tantivy search │ │
-│  │   (or --storage duckdb: embedded fallback) │ │
+│  │   (optional --features duckdb fallback)     │ │
 │  └──────────────────┬───────────────────────┘ │
 │                     ▼                          │
 │  ┌──────────────────────────────────────────┐ │
@@ -562,7 +564,7 @@ startup banner and default tracing subscriber setup.
 |-----------|--------|-----|
 | Language | Rust | Fast, single binary, memory-safe |
 | Storage | tael-backend | Tiered engine: WAL (walrus) + LSM hot tier (fjall) + Parquet cold tier (arrow/parquet) + content-addressed blobs + Tantivy search |
-| Storage (fallback) | DuckDB | Embedded columnar DB, `--storage duckdb` |
+| Storage (fallback) | DuckDB | Optional embedded columnar DB, `--features duckdb` + `--storage duckdb` |
 | CLI | clap | Standard Rust CLI framework |
 | GUI | Tauri | Desktop app embedded in the installed `tael` binary |
 | API | axum | Async REST on tokio |
@@ -581,7 +583,7 @@ The server (`tael serve`) is configured via flags or environment variables
 | `TAEL_REST_API_ADDR` | `127.0.0.1:7701` | REST API listen address |
 | `TAEL_DATA_DIR` | `~/.tael/data` | Telemetry data directory |
 | `TAEL_WAL_DIR` | `~/.tael/wal_files` | Write-ahead log directory |
-| `TAEL_STORAGE` | `tael-backend` | Storage backend (`tael-backend` or `duckdb`) |
+| `TAEL_STORAGE` | `tael-backend` | Storage backend. `duckdb` requires a build with `--features duckdb` |
 | `TAEL_COLD_DIR` | `<data_dir>/cold` | Override the Parquet cold-tier location (e.g. an object-store mount) |
 | `TAEL_HOT_TIER_HOURS` | `24` | Hot-tier window before data rolls to the cold tier |
 | `TAEL_COMPACT_INTERVAL_SECS` | `3600` | Compaction / retention / blob-GC interval |

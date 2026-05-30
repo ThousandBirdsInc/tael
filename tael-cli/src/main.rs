@@ -62,7 +62,7 @@ enum Commands {
         /// WAL directory (env: TAEL_WAL_DIR)
         #[arg(long)]
         wal_dir: Option<String>,
-        /// Storage backend: tael-backend (default) or duckdb (env: TAEL_STORAGE)
+        /// Storage backend: tael-backend (default). duckdb requires installing with --features duckdb.
         #[arg(long)]
         storage: Option<String>,
     },
