@@ -1416,6 +1416,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-url"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
 name = "dbus"
 version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5498,7 +5504,7 @@ dependencies = [
 
 [[package]]
 name = "tael-cli"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5519,7 +5525,7 @@ dependencies = [
 
 [[package]]
 name = "tael-gui"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -5532,7 +5538,7 @@ dependencies = [
 
 [[package]]
 name = "tael-server"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5568,7 +5574,7 @@ dependencies = [
 
 [[package]]
 name = "tael-test"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "hex",
@@ -5803,6 +5809,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cookie",
+ "data-url",
  "dirs",
  "dunce",
  "embed_plist",

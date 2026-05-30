@@ -4,10 +4,83 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tael</title>
-    <script type="module" crossorigin src="./assets/index-D3ACwoI8.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-ry-Jq2Kv.css">
+    <style>
+      html,
+      body,
+      #app {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: #0a0a0a;
+        color: #e8e8e5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .boot-fallback {
+        display: grid;
+        min-height: 100%;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .boot-panel {
+        width: min(520px, 100%);
+        border: 1px solid rgba(232, 232, 229, 0.14);
+        background: #141414;
+        padding: 18px;
+      }
+
+      .boot-title {
+        margin: 0 0 8px;
+        color: #facc15;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .boot-message {
+        margin: 0;
+        color: rgba(232, 232, 229, 0.62);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+    </style>
+    <script>
+      window.__TAEL_BOOT_ERROR__ = function (message) {
+        const render = function () {
+          const app = document.getElementById('app')
+          if (!app) return
+          app.innerHTML =
+            '<div class="boot-fallback"><section class="boot-panel">' +
+            '<p class="boot-title">Tael failed to start</p>' +
+            '<p class="boot-message">' +
+            String(message).replace(/[&<>"']/g, function (char) {
+              return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]
+            }) +
+            '</p></section></div>'
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render, {once: true})
+        else render()
+      }
+      window.addEventListener('error', function (event) {
+        window.__TAEL_BOOT_ERROR__(event.message || 'Unhandled frontend error')
+      })
+      window.addEventListener('unhandledrejection', function (event) {
+        window.__TAEL_BOOT_ERROR__(event.reason || 'Unhandled frontend promise rejection')
+      })
+    </script>
+    <script type="module" src="./assets/index.js"></script>
+    <link rel="stylesheet" href="./assets/index.css">
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-fallback">
+        <section class="boot-panel">
+          <p class="boot-title">Starting Tael</p>
+          <p class="boot-message">Loading the packaged GUI assets.</p>
+        </section>
+      </div>
+    </div>
   </body>
 </html>

@@ -355,6 +355,19 @@ pub fn run() {
 pub fn run_with_server(server: String) {
     tauri::Builder::default()
         .manage(InitialServer(server))
+        .setup(|app| {
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::External(inline_gui_data_url().parse()?),
+            )
+            .title("Tael")
+            .inner_size(1280.0, 820.0)
+            .min_inner_size(980.0, 620.0)
+            .resizable(true)
+            .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             initial_server,
             healthz,
@@ -370,4 +383,56 @@ pub fn run_with_server(server: String) {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tael gui");
+}
+
+fn inline_gui_data_url() -> String {
+    let html = include_str!("../dist/index.html")
+        .replace(
+            r#"<script type="module" src="./assets/index.js"></script>"#,
+            &format!(
+                r#"<script type="module">{}</script>"#,
+                escape_inline_script(include_str!("../dist/assets/index.js"))
+            ),
+        )
+        .replace(
+            r#"<link rel="stylesheet" href="./assets/index.css">"#,
+            &format!(
+                r#"<style>{}</style>"#,
+                escape_inline_style(include_str!("../dist/assets/index.css"))
+            ),
+        );
+    format!("data:text/html;charset=utf-8,{}", percent_encode(&html))
+}
+
+fn escape_inline_script(value: &str) -> String {
+    value.replace("</script", "<\\/script")
+}
+
+fn escape_inline_style(value: &str) -> String {
+    value.replace("</style", "<\\/style")
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(hex(byte >> 4));
+                encoded.push(hex(byte & 0x0f));
+            }
+        }
+    }
+    encoded
+}
+
+fn hex(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'A' + (value - 10)) as char,
+        _ => unreachable!(),
+    }
 }
