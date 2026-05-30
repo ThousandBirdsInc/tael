@@ -30,8 +30,8 @@ default = ["gui"]
 gui = ["dep:tael-gui"]
 
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.5.7" }
-tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.7", package = "tael-gui", optional = true }
+tael-server = { path = "../tael-server", version = "0.5.8" }
+tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.8", package = "tael-gui", optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

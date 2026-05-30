@@ -136,6 +136,13 @@ const CANVAS_TEXT = '#b5b5b1'
 const CANVAS_FAINT = '#6f6f6c'
 const CANVAS_ERROR = '#ef4444'
 
+function streamId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
 const state: AppState = {
   server: 'http://127.0.0.1:7701',
   serviceFilter: '',
@@ -150,7 +157,7 @@ const state: AppState = {
   paused: false,
   connection: 'idle',
   error: null,
-  streamId: crypto.randomUUID(),
+  streamId: streamId(),
   spans: [],
   selectedSpanIdx: null,
   services: [],
@@ -557,7 +564,7 @@ async function submitComment() {
 async function connect() {
   state.error = null
   state.connection = 'checking'
-  state.streamId = crypto.randomUUID()
+  state.streamId = streamId()
   queueRender()
 
   try {
