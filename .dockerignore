@@ -1,0 +1,14 @@
+# Keep the build context small: drop host build artifacts, local telemetry
+# data, git history, and the GUI's web assets (the container build doesn't
+# compile the GUI). Everything else — including SKILL.md, which tael-cli
+# embeds via include_str! at compile time — must stay in the context.
+.git
+target
+**/target
+data
+wal_files
+**/*.duckdb
+**/*.duckdb.wal
+**/node_modules
+tael-gui/dist
+tael-gui/src-tauri/gen

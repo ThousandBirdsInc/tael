@@ -67,6 +67,7 @@ enum Commands {
         storage: Option<String>,
     },
     /// Launch the desktop GUI
+    #[cfg(feature = "gui")]
     Gui,
     /// Query telemetry data
     Query {
@@ -624,6 +625,7 @@ async fn main() -> Result<()> {
         },
     };
 
+    #[cfg(feature = "gui")]
     if let Commands::Gui = cli.command {
         tael_gui::run_with_server(server_url);
         return Ok(());
@@ -635,6 +637,7 @@ async fn main() -> Result<()> {
         // Handled above; the early return means this arm is never reached.
         Commands::Serve { .. } => unreachable!(),
         // Handled above; the early return means this arm is never reached.
+        #[cfg(feature = "gui")]
         Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {
             QuerySignal::Traces {

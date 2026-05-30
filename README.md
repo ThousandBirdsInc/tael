@@ -62,6 +62,39 @@ Or build from source:
 cargo build --release
 ```
 
+### Docker
+
+A prebuilt, multi-arch (amd64 + arm64) image is published to GHCR on every
+release, so you get the bundled-DuckDB build already compiled — no waiting on
+the source build:
+
+```bash
+docker run --rm \
+  -p 7701:7701 -p 4317:4317 \
+  -v tael-data:/data \
+  ghcr.io/thousandbirdsinc/tael:latest
+```
+
+That starts `tael serve` with OTLP gRPC on `:4317` and the REST API on `:7701`,
+persisting telemetry to the `tael-data` volume. Point your app's OTLP exporter
+at `http://localhost:4317` and query from the host with a locally installed
+`tael`, or run the CLI inside the container:
+
+```bash
+docker exec <container> tael --format json services
+```
+
+To embed tael in your own image, use it as a base — the `tael` binary is on
+`PATH` and `serve` is the default command:
+
+```dockerfile
+FROM ghcr.io/thousandbirdsinc/tael:latest
+# your OTLP-emitting app alongside it, or override CMD to run a query
+```
+
+The image is server/CLI only; the desktop GUI (`tael gui`) is desktop-only and
+is compiled out of the container build.
+
 ## Quickstart
 
 ```bash
