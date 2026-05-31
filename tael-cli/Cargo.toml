@@ -21,18 +21,19 @@ name = "tael"
 path = "src/main.rs"
 
 [features]
-# `gui` (default-on) pulls in the Tauri desktop app behind the `tael gui`
-# command. It hard-links webkit/GTK, which is dead weight in a headless
-# container, so the Docker image and server-only installs build with
-# `--no-default-features` to drop it. `cargo install` / `cargo binstall`
-# keep the GUI by default.
-default = ["gui"]
+# `gui` (opt-in) pulls in the Tauri desktop app behind the `tael gui` command.
+# It hard-links webkit/GTK, so a binary built with it can't even *load* on a
+# headless box (`libgdk-3.so.0: cannot open shared object file`). It is left out
+# of the default set so `cargo install tael-cli`, `cargo binstall tael-cli`, the
+# prebuilt release binaries, and the Docker image are all headless server/CLI
+# builds. Desktop users opt in with `cargo install tael-cli --features gui`.
+default = []
 gui = ["dep:tael-gui"]
 duckdb = ["tael-server/duckdb"]
 
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.5.10" }
-tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.10", package = "tael-gui", optional = true }
+tael-server = { path = "../tael-server", version = "0.5.11" }
+tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.11", package = "tael-gui", optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

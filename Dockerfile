@@ -24,11 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# Server/CLI only: `--no-default-features` drops the `gui` feature so the Tauri
-# desktop app (webkit/GTK) never enters the build — it can't open a window in a
-# headless container anyway. `--locked` keeps the image reproducible against
-# Cargo.lock. The cargo registry and target dir are cache mounts, so the binary
-# is copied out within the same RUN before the mount is unmounted.
+# Server/CLI only: the `gui` feature is opt-in (default = []), so a plain build
+# already excludes the Tauri desktop app (webkit/GTK) — it can't open a window
+# in a headless container anyway. `--no-default-features` is kept explicit to
+# pin that intent even if defaults change. `--locked` keeps the image
+# reproducible against Cargo.lock. The cargo registry and target dir are cache
+# mounts, so the binary is copied out within the same RUN before the mount is
+# unmounted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p tael-cli --no-default-features \

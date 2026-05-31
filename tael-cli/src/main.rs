@@ -66,8 +66,7 @@ enum Commands {
         #[arg(long)]
         storage: Option<String>,
     },
-    /// Launch the desktop GUI
-    #[cfg(feature = "gui")]
+    /// Launch the desktop GUI (requires a build with `--features gui`)
     Gui,
     /// Query telemetry data
     Query {
@@ -631,13 +630,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // The GUI is opt-in (default = []); on a headless build the subcommand still
+    // parses, but there's no Tauri app linked in, so explain how to get one.
+    #[cfg(not(feature = "gui"))]
+    if let Commands::Gui = cli.command {
+        anyhow::bail!(
+            "this `tael` was built without the desktop GUI. \
+             Reinstall with `cargo install tael-cli --features gui` to enable `tael gui`."
+        );
+    }
+
     let client = client::TaelClient::new(&server_url);
 
     match cli.command {
         // Handled above; the early return means this arm is never reached.
         Commands::Serve { .. } => unreachable!(),
-        // Handled above; the early return means this arm is never reached.
-        #[cfg(feature = "gui")]
+        // Handled above; the early return / bail means this arm is never reached.
         Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {
             QuerySignal::Traces {

@@ -25,8 +25,8 @@
 
 **tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (and Prometheus remote-write), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
 
-One `tael` binary — server, CLI, TUI, and desktop GUI in one — with structured
-data as the default interface.
+One `tael` binary — server, CLI, and TUI in one (plus an optional desktop GUI) —
+with structured data as the default interface.
 
 <p align="center">
   <a href="https://asciinema.org/a/fJALiYb0pILGb18H">
@@ -44,16 +44,23 @@ Windows is not supported — a dependency in the WAL uses unix-only file I/O.
 cargo binstall tael-cli
 ```
 
-`cargo install tael-cli` also works, but compiles the desktop GUI from source,
-so it can take several minutes and requires the native Tauri/WebKit build
-dependencies for your platform. `cargo binstall` fetches a
-prebuilt binary from the GitHub Release instead and finishes in seconds. Install
-it once with `cargo install cargo-binstall` (or grab it from
+`cargo install tael-cli` also works but compiles from source, so it can take
+several minutes. `cargo binstall` fetches a prebuilt binary from the GitHub
+Release instead and finishes in seconds. Install it once with
+`cargo install cargo-binstall` (or grab it from
 [its releases](https://github.com/cargo-bins/cargo-binstall#installation)).
+
+Both install the headless server/CLI by default. The desktop GUI (`tael gui`)
+is opt-in via `--features gui`, which links Tauri/WebKit and needs the native
+GUI build dependencies for your platform — so it must be compiled from source
+(`cargo install`, not `cargo binstall`).
 
 ```bash
 # Compiles from source — slower, but no extra tooling
 cargo install tael-cli
+
+# Opt in to the desktop GUI (`tael gui`)
+cargo install tael-cli --features gui
 
 # Optional legacy DuckDB storage backend
 cargo install tael-cli --features duckdb
@@ -97,6 +104,32 @@ FROM ghcr.io/thousandbirdsinc/tael:latest
 The image is server/CLI only; the desktop GUI (`tael gui`) is desktop-only and
 is compiled out of the container build.
 
+### Desktop GUI
+
+The `tael gui` window is **opt-in**. The default install (and the prebuilt
+`cargo binstall` / Docker binaries) is a headless server/CLI build that does not
+link Tauri/WebKit — so it runs anywhere, including servers and containers that
+have no GTK/WebKit libraries.
+
+To get the desktop app, compile from source with the `gui` feature:
+
+```bash
+cargo install tael-cli --features gui
+```
+
+`cargo binstall` cannot deliver the GUI — the prebuilt binaries are headless, so
+the GUI always builds from source. You need the native WebKit/GTK build
+dependencies for your platform:
+
+- **macOS** — nothing extra; WebKit ships with the OS.
+- **Debian/Ubuntu** —
+  `sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
+- Other Linux distros — install the equivalent `webkit2gtk`, `libappindicator`/
+  `libayatana-appindicator`, and `librsvg` development packages.
+
+Running `tael gui` from a headless build prints a reminder to reinstall with
+`--features gui`.
+
 ## Quickstart
 
 ```bash
@@ -115,7 +148,7 @@ tael get trace <trace-id> --format json
 # Interactive TUI
 tael live
 
-# Desktop GUI
+# Desktop GUI (requires a build with `--features gui`; see Installation)
 tael gui
 ```
 
@@ -521,8 +554,10 @@ the horizontal-scale / HA path.
 
 ## Project Structure
 
-The `tael` binary is published as `tael-cli`, which embeds `tael-server` and the
-desktop GUI as libraries — so `cargo install tael-cli` is the whole stack.
+The `tael` binary is published as `tael-cli`, which embeds `tael-server` as a
+library — so `cargo install tael-cli` is the whole server/CLI/TUI stack. The
+desktop GUI (`tael-gui`) is an optional library pulled in only with
+`--features gui`.
 
 Use `tael_server::run(config)` for a user-facing server process. In-process
 integrations that must preserve one-shot JSON output or TUI control of the

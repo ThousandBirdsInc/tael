@@ -64,18 +64,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Tauri dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      # Build only the CLI crate (it pulls in tael-server and tael-gui). Native
-      # target on each runner, so bundled native dependencies compile with the
+      # Build only the CLI crate (it pulls in tael-server). The `gui` feature is
+      # opt-in (default = []), so the prebuilt binary stays headless and never
+      # links webkit/GTK — that's what lets `cargo binstall tael-cli` run on a
+      # server/container without `libgdk-3.so.0`. No Tauri build deps needed.
+      # Native target on each runner, so bundled native deps compile with the
       # host toolchain.
       - name: Build
         run: cargo build --release --locked -p tael-cli --target ${{ matrix.target }}
