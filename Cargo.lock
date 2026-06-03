@@ -6093,7 +6093,7 @@ dependencies = [
 
 [[package]]
 name = "tael-cli"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6114,7 +6114,7 @@ dependencies = [
 
 [[package]]
 name = "tael-gui"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -6127,7 +6127,7 @@ dependencies = [
 
 [[package]]
 name = "tael-server"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "arrow",
@@ -6165,7 +6165,7 @@ dependencies = [
 
 [[package]]
 name = "tael-test"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "hex",

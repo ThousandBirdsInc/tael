@@ -15,6 +15,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Embed the built frontend (dist/) and serve it over the tauri:// protocol.
+# Required for `cargo install`/release builds: they don't run through
+# `tauri-cli`, so without this Tauri treats the build as "dev", points the
+# webview at `devUrl`, and shows a blank window. On by default; disable to
+# develop against the vite dev server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 anyhow.workspace = true
 reqwest.workspace = true
