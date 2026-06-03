@@ -1,14 +1,18 @@
 mod backend;
 mod blobs;
+mod comments;
 #[cfg(feature = "duckdb")]
 mod duckdb_store;
 mod fanout;
 pub mod models;
+mod objstore;
 mod remote;
 mod search;
 
 pub use backend::{TaelBackend, WalSink};
 pub use blobs::BlobStore;
+pub use comments::{CommentsStore, JsonlComments, open as open_comments};
+pub use objstore::{DynObjectBackend, FsBackend, ObjectBackend, StoreLocation, open_object_backend};
 #[cfg(feature = "duckdb")]
 pub use duckdb_store::DuckDbStore;
 pub use fanout::FanoutStore;

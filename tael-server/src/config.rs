@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::storage::StoreLocation;
+
 /// Selected storage backend. `TaelBackend` (the purpose-built tiered engine)
 /// is the default; pass `--storage duckdb` or set `TAEL_STORAGE=duckdb` to use
 /// the legacy embedded-DuckDB backend instead.
@@ -44,6 +46,97 @@ pub struct ServerConfig {
     /// fencing of WAL replication. `Some` when `TAEL_CLUSTER_LISTEN` is set.
     /// See `docs/tael-server-scaling-ha.md` §5.1.
     pub cluster: Option<ClusterSettings>,
+    /// Where the cold tier and blob store keep their objects. Defaults to local
+    /// filesystem (unchanged single-binary behavior); GCS is opt-in and needs
+    /// the `cloud` build feature.
+    pub object_store: ObjectStoreConfig,
+    /// Where trace comments are stored. Defaults to the local JSONL file;
+    /// Postgres (Cloud SQL) is opt-in and needs the `cloud` build feature.
+    pub comments: CommentsConfig,
+}
+
+/// Object-storage selection for the cold (Parquet) tier and the blob store.
+/// All fields default to the local-filesystem behavior, so a bare run is
+/// unchanged.
+#[derive(Debug, Clone)]
+pub struct ObjectStoreConfig {
+    /// Cold-tier backend (`TAEL_COLD_STORE`, `fs` | `gcs`).
+    pub cold: StoreLocation,
+    /// Blob-store backend (`TAEL_BLOB_STORE`, `fs` | `gcs`).
+    pub blobs: StoreLocation,
+    /// Cold bucket URL when `cold == Gcs` (`TAEL_COLD_BUCKET`, `gs://b/prefix`).
+    pub cold_bucket: Option<String>,
+    /// Blob bucket URL when `blobs == Gcs` (`TAEL_BLOB_BUCKET`, `gs://b/prefix`).
+    pub blob_bucket: Option<String>,
+    /// Whether this node owns blob GC over a shared object store
+    /// (`TAEL_BLOB_GC_ROLE=coordinator`). When the blob store is shared (GCS),
+    /// per-node mark-and-sweep would delete blobs other shards reference, so it
+    /// is disabled unless this node is the coordinator. Ignored for local FS
+    /// (each node owns its own blobs).
+    pub blob_gc_coordinator: bool,
+}
+
+impl ObjectStoreConfig {
+    fn from_env() -> Self {
+        Self {
+            cold: std::env::var("TAEL_COLD_STORE")
+                .map(|s| StoreLocation::parse(&s))
+                .unwrap_or_default(),
+            blobs: std::env::var("TAEL_BLOB_STORE")
+                .map(|s| StoreLocation::parse(&s))
+                .unwrap_or_default(),
+            cold_bucket: non_empty_env("TAEL_COLD_BUCKET"),
+            blob_bucket: non_empty_env("TAEL_BLOB_BUCKET"),
+            blob_gc_coordinator: std::env::var("TAEL_BLOB_GC_ROLE")
+                .map(|s| s.trim().eq_ignore_ascii_case("coordinator"))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Whether the blob store is shared across nodes (object storage rather
+    /// than a node-local directory). Drives the blob-GC single-owner guard.
+    pub fn blobs_shared(&self) -> bool {
+        self.blobs == StoreLocation::Gcs
+    }
+}
+
+/// Where trace comments live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommentsBackend {
+    /// Local append-only JSONL file (`<data_dir>/trace_comments.jsonl`).
+    #[default]
+    Jsonl,
+    /// Postgres (e.g. Cloud SQL) — requires the `cloud` feature.
+    Postgres,
+}
+
+impl CommentsBackend {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "postgres" | "postgresql" | "pg" => CommentsBackend::Postgres,
+            _ => CommentsBackend::Jsonl,
+        }
+    }
+}
+
+/// Comments-store selection.
+#[derive(Debug, Clone)]
+pub struct CommentsConfig {
+    pub backend: CommentsBackend,
+    /// Postgres connection URL when `backend == Postgres`
+    /// (`TAEL_COMMENTS_DATABASE_URL`).
+    pub database_url: Option<String>,
+}
+
+impl CommentsConfig {
+    fn from_env() -> Self {
+        Self {
+            backend: std::env::var("TAEL_COMMENTS_STORE")
+                .map(|s| CommentsBackend::parse(&s))
+                .unwrap_or_default(),
+            database_url: non_empty_env("TAEL_COMMENTS_DATABASE_URL"),
+        }
+    }
 }
 
 /// Gossip-cluster settings for HA leader election (chitchat).
@@ -85,6 +178,8 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.trim().parse().ok()),
             cluster: cluster_from_env(),
+            object_store: ObjectStoreConfig::from_env(),
+            comments: CommentsConfig::from_env(),
         };
         // A `--storage <duckdb|tael-backend>` flag (or `--storage=…`) takes
         // precedence over the env var.
@@ -140,6 +235,11 @@ fn cluster_from_env() -> Option<ClusterSettings> {
         seeds: parse_csv_env("TAEL_CLUSTER_SEEDS"),
         cluster_id: std::env::var("TAEL_CLUSTER_ID").unwrap_or_else(|_| "tael".to_string()),
     })
+}
+
+/// Read an env var, returning `None` when unset or blank.
+fn non_empty_env(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|s| !s.trim().is_empty())
 }
 
 /// Parse a comma-separated env var into a trimmed, non-empty list.

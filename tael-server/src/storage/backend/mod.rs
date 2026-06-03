@@ -13,7 +13,7 @@ mod cold;
 mod hot;
 mod wal;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 #[cfg(feature = "duckdb")]
 use super::DuckDbStore;
@@ -24,12 +24,11 @@ use super::models::{
     SpanStatus, SummaryReport, TraceComment, TraceQuery, TraceSummary,
 };
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use super::DynObjectBackend;
 use super::SearchIndex;
+use super::{CommentsStore, JsonlComments};
 use cold::ColdTier;
 use hot::HotTier;
 use wal::WalLog;
@@ -43,7 +42,8 @@ pub struct TaelBackend {
     /// Optional legacy projection used only when the `duckdb` feature is enabled.
     #[cfg(feature = "duckdb")]
     inner: DuckDbStore,
-    comments: CommentStore,
+    /// Pluggable comments store (JSONL locally, Postgres in the cloud).
+    comments: Box<dyn CommentsStore>,
     /// Full-text index over LLM payloads (shared with the ingest path).
     search: Arc<SearchIndex>,
     wal: WalLog,
@@ -73,11 +73,30 @@ impl TaelBackend {
         sinks: Vec<Arc<dyn WalSink>>,
         required_acks: Option<usize>,
     ) -> Result<Self> {
+        // Default components: local cold tier + local JSONL comments.
+        let comments: Box<dyn CommentsStore> = Box::new(JsonlComments::open(data_dir)?);
+        Self::with_components(data_dir, wal_key, sinks, required_acks, None, comments)
+    }
+
+    /// Full constructor used by the cloud deployment path: pass an optional
+    /// cold-tier object backend (`None` = local filesystem) and an already-built
+    /// comments store (JSONL or Postgres). The local constructors above forward
+    /// here with the single-binary defaults, so their behavior is unchanged.
+    pub fn with_components(
+        data_dir: &str,
+        wal_key: &str,
+        sinks: Vec<Arc<dyn WalSink>>,
+        required_acks: Option<usize>,
+        cold_backend: Option<DynObjectBackend>,
+        comments: Box<dyn CommentsStore>,
+    ) -> Result<Self> {
         let hot = HotTier::open(data_dir)?;
-        let cold = ColdTier::open(data_dir)?;
+        let cold = match cold_backend {
+            Some(backend) => ColdTier::with_backend(backend)?,
+            None => ColdTier::open(data_dir)?,
+        };
         #[cfg(feature = "duckdb")]
         let inner = DuckDbStore::new(data_dir)?;
-        let comments = CommentStore::open(data_dir)?;
         let search = Arc::new(SearchIndex::open(data_dir)?);
         let mut wal = if sinks.is_empty() {
             WalLog::new_for_key(wal_key)?
@@ -599,82 +618,6 @@ impl TaelBackend {
             logs,
             metrics,
         }))
-    }
-}
-
-#[derive(Debug)]
-struct CommentStore {
-    path: PathBuf,
-    comments: Mutex<HashMap<String, Vec<TraceComment>>>,
-}
-
-impl CommentStore {
-    fn open(data_dir: &str) -> Result<Self> {
-        let path = Path::new(data_dir).join("trace_comments.jsonl");
-        let mut comments: HashMap<String, Vec<TraceComment>> = HashMap::new();
-        if path.exists() {
-            let file = std::fs::File::open(&path)
-                .with_context(|| format!("opening {}", path.display()))?;
-            for line in std::io::BufReader::new(file).lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let comment: TraceComment = serde_json::from_str(&line)
-                    .with_context(|| format!("decoding {}", path.display()))?;
-                comments
-                    .entry(comment.trace_id.clone())
-                    .or_default()
-                    .push(comment);
-            }
-        }
-        Ok(Self {
-            path,
-            comments: Mutex::new(comments),
-        })
-    }
-
-    fn add(
-        &self,
-        trace_id: &str,
-        span_id: Option<&str>,
-        author: &str,
-        body: &str,
-    ) -> Result<TraceComment> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let comment = TraceComment {
-            id: uuid::Uuid::new_v4().to_string(),
-            trace_id: trace_id.to_string(),
-            span_id: span_id.map(str::to_string),
-            author: author.to_string(),
-            body: body.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("opening {}", self.path.display()))?;
-        writeln!(file, "{}", serde_json::to_string(&comment)?)?;
-        self.comments
-            .lock()
-            .expect("comment store lock poisoned")
-            .entry(trace_id.to_string())
-            .or_default()
-            .push(comment.clone());
-        Ok(comment)
-    }
-
-    fn get(&self, trace_id: &str) -> Result<Vec<TraceComment>> {
-        Ok(self
-            .comments
-            .lock()
-            .expect("comment store lock poisoned")
-            .get(trace_id)
-            .cloned()
-            .unwrap_or_default())
     }
 }
 

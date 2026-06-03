@@ -15,6 +15,7 @@ mod promql;
 mod span_bus;
 mod storage;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -32,6 +33,7 @@ pub use storage::DuckDbStore;
 pub use storage::{
     BlobStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
 };
+use storage::{StoreLocation, open_comments, open_object_backend};
 
 use log_bus::LogBus;
 use span_bus::SpanBus;
@@ -81,7 +83,7 @@ impl ServerRunOptions {
 /// (`retention.traces.hot_tier`, default 24h) and interval are env-tunable
 /// (`TAEL_HOT_TIER_HOURS`, `TAEL_COMPACT_INTERVAL_SECS`) until retention config
 /// lands (Phase 7); a 0-hour window compacts everything (used in tests).
-fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>) {
+fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>, blob_gc_enabled: bool) {
     let window_hours: i64 = std::env::var("TAEL_HOT_TIER_HOURS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -109,9 +111,16 @@ fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>) {
                 let dropped =
                     backend.enforce_span_retention(now - chrono::Duration::days(retention_days))?;
                 // Payload blob GC: drop blobs no live row references (e.g. rows
-                // just removed by retention). Runs after partition drops.
-                let live = backend.collect_live_blob_hashes()?;
-                let blobs_gcd = blobs.gc(&live)?;
+                // just removed by retention). Runs after partition drops. Skipped
+                // when this node doesn't own GC over a shared blob store (the
+                // single-owner guard), to avoid deleting blobs other shards
+                // reference.
+                let blobs_gcd = if blob_gc_enabled {
+                    let live = backend.collect_live_blob_hashes()?;
+                    blobs.gc(&live)?
+                } else {
+                    0
+                };
                 anyhow::Ok((compacted, dropped, blobs_gcd))
             })
             .await;
@@ -164,7 +173,19 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
 
     configure_walrus_data_dir(&config.wal_dir);
 
-    let blobs = Arc::new(BlobStore::new(&config.data_dir)?);
+    // Blob store: local filesystem by default; GCS when configured (opt-in,
+    // requires the `cloud` feature — otherwise this fails loudly).
+    let blobs = Arc::new(match config.object_store.blobs {
+        StoreLocation::Fs => BlobStore::new(&config.data_dir)?,
+        StoreLocation::Gcs => {
+            let backend = open_object_backend(
+                StoreLocation::Gcs,
+                Path::new(&config.data_dir).join("blobs").as_path(),
+                config.object_store.blob_bucket.as_deref(),
+            )?;
+            BlobStore::with_backend(backend)?
+        }
+    });
 
     // Cluster coordination (chitchat): automatic leader election + epoch fencing
     // of WAL replication (§5.1). On when TAEL_CLUSTER_LISTEN is set.
@@ -232,23 +253,47 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
                         sink.map(|s| Arc::new(s) as Arc<dyn WalSink>)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let backend = Arc::new(if sinks.is_empty() {
-                    TaelBackend::new(&config.data_dir)?
-                } else {
+                if !sinks.is_empty() {
                     tracing::info!(
                         standbys = sinks.len(),
                         required_acks = ?config.wal_required_acks,
                         "WAL replication enabled: shipping to standbys (leader)"
                     );
-                    TaelBackend::with_wal_key_and_sinks(
-                        &config.data_dir,
-                        "tael-backend",
-                        sinks,
-                        config.wal_required_acks,
-                    )?
-                });
+                }
+                // Cold tier: local filesystem by default; GCS when configured
+                // (opt-in, requires the `cloud` feature).
+                let cold_backend = match config.object_store.cold {
+                    StoreLocation::Fs => None,
+                    StoreLocation::Gcs => Some(open_object_backend(
+                        StoreLocation::Gcs,
+                        Path::new(&config.data_dir).join("cold").as_path(),
+                        config.object_store.cold_bucket.as_deref(),
+                    )?),
+                };
+                // Comments: local JSONL by default; Postgres when configured.
+                let comments = open_comments(&config.comments, &config.data_dir)?;
+                let backend = Arc::new(TaelBackend::with_components(
+                    &config.data_dir,
+                    "tael-backend",
+                    sinks,
+                    config.wal_required_acks,
+                    cold_backend,
+                    comments,
+                )?);
                 search = Some(backend.search_index());
-                spawn_span_compactor(Arc::clone(&backend), Arc::clone(&blobs));
+                // Blob GC single-owner guard: on a shared (GCS) blob store,
+                // per-node mark-and-sweep would delete blobs other shards still
+                // reference, so it only runs on the designated coordinator. On a
+                // node-local store every node owns its own blobs and GCs freely.
+                let blob_gc_enabled = !config.object_store.blobs_shared()
+                    || config.object_store.blob_gc_coordinator;
+                if !blob_gc_enabled {
+                    tracing::info!(
+                        "blob GC disabled on this node: shared blob store, not the GC coordinator \
+                         (set TAEL_BLOB_GC_ROLE=coordinator on exactly one node)"
+                    );
+                }
+                spawn_span_compactor(Arc::clone(&backend), Arc::clone(&blobs), blob_gc_enabled);
                 backend as Arc<dyn Store>
             }
         }

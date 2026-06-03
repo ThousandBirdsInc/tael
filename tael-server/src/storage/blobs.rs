@@ -2,30 +2,45 @@
 //! tables — LLM prompts/completions and oversized log bodies.
 //!
 //! Blobs are keyed by `sha256(content)` and stored snap-compressed at
-//! `blobs/<aa>/<bb>/<full-sha256>`. Identical content (e.g. a system prompt
-//! reused across thousands of calls, or a repeated stack trace) is stored
-//! once — the write is skipped when the hash already exists. See
+//! `<aa>/<bb>/<full-sha256>`. Identical content (e.g. a system prompt reused
+//! across thousands of calls, or a repeated stack trace) is stored once — the
+//! write is skipped when the hash already exists. See
 //! `docs/tael-backend-design.md` → "Payload blobs".
+//!
+//! Storage sits on the shared [`ObjectBackend`](super::ObjectBackend): a local
+//! directory by default (`<data_dir>/blobs`, overridable via `TAEL_BLOB_DIR`),
+//! or a GCS bucket under the `cloud` feature. Content-addressing makes object
+//! storage ideal — puts are idempotent and dedup is cross-node (two shards
+//! writing the same payload collapse to one object).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-/// A local-filesystem content-addressed blob store. The same path layout is a
-/// valid object-store key prefix, so a future S3/R2 backend is a swap behind
-/// this type (design Phase 9).
+use super::objstore::{DynObjectBackend, FsBackend};
+
+/// A content-addressed blob store over a pluggable object backend.
 pub struct BlobStore {
-    root: PathBuf,
+    backend: DynObjectBackend,
 }
 
 impl BlobStore {
-    /// Open (creating if needed) the blob store rooted at `<data_dir>/blobs`.
+    /// Open the blob store on the local filesystem at `<data_dir>/blobs`, or at
+    /// `TAEL_BLOB_DIR` when set (e.g. a separate fast mount). This is the
+    /// default, single-binary path.
     pub fn new(data_dir: &str) -> Result<Self> {
-        let root = Path::new(data_dir).join("blobs");
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("creating blob dir {}", root.display()))?;
-        Ok(Self { root })
+        let root = match std::env::var("TAEL_BLOB_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => Path::new(data_dir).join("blobs"),
+        };
+        Self::with_backend(std::sync::Arc::new(FsBackend::new(root)?))
+    }
+
+    /// Open the blob store on an arbitrary object backend (e.g. GCS). The path
+    /// layout is identical, so the backend is a transparent swap.
+    pub fn with_backend(backend: DynObjectBackend) -> Result<Self> {
+        Ok(Self { backend })
     }
 
     /// Hash `content`, write it snap-compressed if not already present, and
@@ -33,64 +48,56 @@ impl BlobStore {
     /// cheap no-op (the dedup property).
     pub fn put(&self, content: &[u8]) -> Result<String> {
         let hash = hex::encode(Sha256::digest(content));
-        let path = self.path_for(&hash);
-        if path.exists() {
+        let key = key_for(&hash);
+        if self.backend.exists(&key)? {
             return Ok(hash);
         }
         let compressed = snap::raw::Encoder::new()
             .compress_vec(content)
             .context("compressing blob")?;
-        // Parent dirs: blobs/<aa>/<bb>/
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating blob shard {}", parent.display()))?;
-        }
-        // Write to a temp file then rename, so a concurrent reader never sees a
-        // half-written blob.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &compressed)
-            .with_context(|| format!("writing blob {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("finalizing blob {}", path.display()))?;
+        self.backend.put(&key, &compressed)?;
         Ok(hash)
     }
 
     /// Fetch and decompress a blob by hex sha256. `Ok(None)` if it doesn't
     /// exist (e.g. GC'd under retention).
     pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.path_for(hash);
-        match std::fs::read(&path) {
-            Ok(compressed) => {
+        match self.backend.get(&key_for(hash))? {
+            Some(compressed) => {
                 let content = snap::raw::Decoder::new()
                     .decompress_vec(&compressed)
                     .context("decompressing blob")?;
                 Ok(Some(content))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("reading blob {hash}")),
+            None => Ok(None),
         }
     }
 
-    /// List every stored blob hash (walks the shard tree).
+    /// List every stored blob hash.
     pub fn list_hashes(&self) -> Result<Vec<String>> {
-        let mut out = Vec::new();
-        collect_hashes(&self.root, &mut out)?;
-        Ok(out)
+        Ok(self
+            .backend
+            .list("")?
+            .iter()
+            .filter_map(|key| key.rsplit('/').next().map(str::to_string))
+            .collect())
     }
 
     /// Delete a blob by hash. Missing blobs are a no-op.
     pub fn remove(&self, hash: &str) -> Result<()> {
-        match std::fs::remove_file(self.path_for(hash)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("removing blob {hash}")),
-        }
+        self.backend.delete(&key_for(hash))
     }
 
     /// Mark-and-sweep GC: delete every blob whose hash is not in `live`.
     /// Returns the number of blobs removed. (Blobs are written before their
     /// referencing row, so an orphan = a row that never landed, or a row that
     /// retention has since dropped — both safe to collect.)
+    ///
+    /// **Single-owner contract:** on a shared object store this must run on
+    /// exactly one node with a `live` set spanning all shards, or it will
+    /// delete blobs other shards still reference. `lib.rs` enforces this by
+    /// disabling per-node GC when the blob store is shared (GCS) unless this
+    /// node is the designated coordinator.
     pub fn gc(&self, live: &std::collections::HashSet<String>) -> Result<usize> {
         let mut removed = 0;
         for hash in self.list_hashes()? {
@@ -101,34 +108,16 @@ impl BlobStore {
         }
         Ok(removed)
     }
-
-    /// `blobs/<aa>/<bb>/<hash>` — two-level sharding to keep directory sizes
-    /// sane. Falls back to a flat path for pathologically short hashes.
-    fn path_for(&self, hash: &str) -> PathBuf {
-        if hash.len() >= 4 {
-            self.root.join(&hash[0..2]).join(&hash[2..4]).join(hash)
-        } else {
-            self.root.join(hash)
-        }
-    }
 }
 
-/// Collect blob hashes (leaf filenames, skipping temp files) under `dir`.
-fn collect_hashes(dir: &Path, out: &mut Vec<String>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
+/// `<aa>/<bb>/<hash>` — two-level sharding to keep listing/dir sizes sane.
+/// Falls back to a flat key for pathologically short hashes.
+fn key_for(hash: &str) -> String {
+    if hash.len() >= 4 {
+        format!("{}/{}/{}", &hash[0..2], &hash[2..4], hash)
+    } else {
+        hash.to_string()
     }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_hashes(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) != Some("tmp") {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                out.push(name.to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -156,9 +145,12 @@ mod tests {
         let h1 = s.put(b"same system prompt").unwrap();
         let h2 = s.put(b"same system prompt").unwrap();
         assert_eq!(h1, h2);
-        // Exactly one blob file exists on disk.
-        let count = walk_count(&s.root);
-        assert_eq!(count, 1, "duplicate content should produce one blob");
+        // Exactly one blob exists.
+        assert_eq!(
+            s.list_hashes().unwrap().len(),
+            1,
+            "duplicate content should produce one blob"
+        );
     }
 
     #[test]
@@ -188,16 +180,20 @@ mod tests {
         assert!(s.get(&keep).unwrap().is_some());
     }
 
-    fn walk_count(dir: &Path) -> usize {
-        let mut n = 0;
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                n += walk_count(&path);
-            } else if path.extension().and_then(|e| e.to_str()) != Some("tmp") {
-                n += 1;
-            }
-        }
-        n
+    #[test]
+    fn blob_dir_env_override_relocates_store() {
+        let data = tempfile::tempdir().unwrap();
+        let blobs = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; restored immediately after construction.
+        unsafe { std::env::set_var("TAEL_BLOB_DIR", blobs.path()) };
+        let s = BlobStore::new(data.path().to_str().unwrap()).unwrap();
+        unsafe { std::env::remove_var("TAEL_BLOB_DIR") };
+        let hash = s.put(b"relocated").unwrap();
+        // Lands under the override dir, not <data_dir>/blobs.
+        assert!(s.get(&hash).unwrap().is_some());
+        assert!(
+            !data.path().join("blobs").exists(),
+            "nothing should be written under data_dir when TAEL_BLOB_DIR is set"
+        );
     }
 }

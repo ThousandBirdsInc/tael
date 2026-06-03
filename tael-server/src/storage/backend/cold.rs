@@ -1,12 +1,18 @@
 //! Parquet cold tier for `TaelBackend` (spans).
 //!
-//! Aged spans roll out of the LSM hot tier into immutable Parquet files,
-//! **sorted by `trace_id`** within `cold/spans/date=YYYY-MM-DD/hour=HH/`
-//! partitions so a span-tree read is one contiguous scan (see
-//! `docs/tael-backend-design.md` → "Cold tier"). Reads currently scan the
-//! partitions and filter in memory; DataFusion (Phase 6) replaces the manual
-//! scan with predicate/partition pushdown. v1 writes to local disk; the path
-//! layout is a valid object-store key prefix for the S3/R2 move (Phase 9).
+//! Aged spans roll out of the LSM hot tier into immutable Parquet objects,
+//! **sorted by `trace_id`** within `spans/date=YYYY-MM-DD/hour=HH/` partitions
+//! so a span-tree read is one contiguous scan (see
+//! `docs/tael-backend-design.md` → "Cold tier"). Reads scan the partitions and
+//! filter in memory; DataFusion (Phase 6) replaces the manual scan with
+//! predicate/partition pushdown.
+//!
+//! Objects live on the shared [`ObjectBackend`](crate::storage::ObjectBackend):
+//! a local directory by default (`<data_dir>/cold`, overridable via
+//! `TAEL_COLD_DIR`), or a GCS bucket under the `cloud` feature. Parquet is
+//! built fully in memory and written with a single atomic `put`; reads `get`
+//! the object and decode from `Bytes`. The `date=…/hour=…` layout is a valid
+//! object-store key prefix.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +28,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use crate::storage::models::{
     LogRecord, LogSeverity, MetricPoint, MetricType, Span, SpanKind, SpanStatus,
 };
+use crate::storage::{DynObjectBackend, FsBackend};
 
 /// A 5-minute downsampled metric aggregate (one series, one bucket).
 #[derive(Debug, Clone, PartialEq)]
@@ -47,42 +54,37 @@ impl RollupPoint {
 
 const ROLLUP_BUCKET_SECS: i64 = 300; // 5 minutes
 
+// Per-signal key prefixes within the cold object namespace.
+const SPANS: &str = "spans";
+const LOGS: &str = "logs";
+const METRICS: &str = "metrics";
+const METRICS_5M: &str = "metrics_5m";
+
 pub struct ColdTier {
-    spans_root: PathBuf,
-    logs_root: PathBuf,
-    metrics_root: PathBuf,
-    metrics_5m_root: PathBuf,
+    backend: DynObjectBackend,
 }
 
 impl ColdTier {
     pub fn open(data_dir: &str) -> Result<Self> {
         // The cold tier can live on a different mount than the hot tier — set
-        // `TAEL_COLD_DIR` to a path backed by network/object storage (e.g. an
-        // s3fs/gcsfuse mount) to keep aged Parquet off local disk. Native
-        // S3/R2 via the `object_store` crate is the v2 follow-on (design B5),
-        // which needs the read path to go async.
+        // `TAEL_COLD_DIR` to a separate path to keep aged Parquet off the hot
+        // disk. For native object storage (GCS), construct with
+        // [`Self::with_backend`]; this default path is local filesystem.
         let base = match std::env::var("TAEL_COLD_DIR") {
             Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
             _ => Path::new(data_dir).join("cold"),
         };
-        let spans_root = base.join("spans");
-        let logs_root = base.join("logs");
-        let metrics_root = base.join("metrics");
-        let metrics_5m_root = base.join("metrics_5m");
-        for d in [&spans_root, &logs_root, &metrics_root, &metrics_5m_root] {
-            std::fs::create_dir_all(d)
-                .with_context(|| format!("creating cold dir {}", d.display()))?;
-        }
-        Ok(Self {
-            spans_root,
-            logs_root,
-            metrics_root,
-            metrics_5m_root,
-        })
+        Self::with_backend(Arc::new(FsBackend::new(base)?))
+    }
+
+    /// Open the cold tier on an arbitrary object backend (e.g. GCS). The key
+    /// layout is identical, so the backend is a transparent swap.
+    pub fn with_backend(backend: DynObjectBackend) -> Result<Self> {
+        Ok(Self { backend })
     }
 
     /// Write a batch of spans to Parquet, grouped into `date=…/hour=…`
-    /// partitions and sorted by `trace_id` within each file.
+    /// partitions and sorted by `trace_id` within each object.
     pub fn write_spans(&self, spans: &[Span]) -> Result<()> {
         use std::collections::BTreeMap;
         // Group by (date, hour) of start_time.
@@ -96,49 +98,35 @@ impl ColdTier {
 
         for ((date, hour), mut group) in by_partition {
             group.sort_by(|a, b| a.trace_id.cmp(&b.trace_id));
-            let dir = self
-                .spans_root
-                .join(format!("date={date}"))
-                .join(format!("hour={hour}"));
-            std::fs::create_dir_all(&dir)?;
-            let file_path = dir.join(format!("spans-{}.parquet", ulid::Ulid::new()));
             let batch = spans_to_batch(&group)?;
-            let file = std::fs::File::create(&file_path)
-                .with_context(|| format!("creating parquet {}", file_path.display()))?;
-            let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
-            writer.write(&batch)?;
-            writer.close()?;
+            self.put_parquet(&partition_key(SPANS, &date, &hour, "spans"), &batch)?;
         }
         Ok(())
     }
 
     /// Drop whole `date=YYYY-MM-DD` partitions older than `cutoff_date`
-    /// (exclusive) — metadata GC at partition granularity is an `unlink`, not a
-    /// rewrite. Returns the number of partitions removed. `cutoff_date` is the
-    /// oldest date to keep, formatted `YYYY-MM-DD`.
+    /// (exclusive). Returns the number of distinct partitions removed.
+    /// `cutoff_date` is the oldest date to keep, formatted `YYYY-MM-DD`.
+    ///
+    /// Object stores have no atomic directory unlink, so this lists the keys
+    /// under each signal and deletes the expired ones individually (a crash
+    /// mid-drop leaves a harmless partial partition that a re-run finishes).
     pub fn drop_partitions_before(&self, cutoff_date: &str) -> Result<usize> {
-        let mut dropped = 0;
-        for root in [&self.spans_root, &self.logs_root, &self.metrics_root] {
-            if !root.exists() {
-                continue;
-            }
-            for entry in std::fs::read_dir(root)? {
-                let path = entry?.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                // Partition dirs look like `date=YYYY-MM-DD`; lexicographic
-                // compare works because the date is zero-padded, fixed-width.
-                if let Some(date) = name.strip_prefix("date=") {
+        use std::collections::HashSet;
+        let mut dropped: HashSet<String> = HashSet::new();
+        for root in [SPANS, LOGS, METRICS] {
+            for key in self.backend.list(root)? {
+                // Keys look like `spans/date=YYYY-MM-DD/hour=HH/…`; the date is
+                // zero-padded fixed-width, so a lexicographic compare is correct.
+                if let Some(date) = parse_date_segment(&key) {
                     if date < cutoff_date {
-                        std::fs::remove_dir_all(&path)
-                            .with_context(|| format!("dropping partition {}", path.display()))?;
-                        dropped += 1;
+                        self.backend.delete(&key)?;
+                        dropped.insert(format!("{root}/date={date}"));
                     }
                 }
             }
         }
-        Ok(dropped)
+        Ok(dropped.len())
     }
 
     /// Read all spans for a trace from the cold tier.
@@ -159,9 +147,9 @@ impl ColdTier {
         Ok(out)
     }
 
-    /// Walk every Parquet file under the spans root, decoding each row.
+    /// Read every Parquet object under the spans prefix, decoding each row.
     fn for_each_span(&self, f: &mut dyn FnMut(Span)) -> Result<()> {
-        for_each_row(&self.spans_root, &mut |b| {
+        self.for_each_row(SPANS, &mut |b| {
             for s in batch_to_spans(b)? {
                 f(s);
             }
@@ -174,8 +162,8 @@ impl ColdTier {
     /// Write aged logs to Parquet, partitioned by date/hour, sorted by
     /// `(service, ts)`.
     pub fn write_logs(&self, logs: &[LogRecord]) -> Result<()> {
-        write_partitioned(
-            &self.logs_root,
+        self.write_partitioned(
+            LOGS,
             "logs",
             logs,
             |l| l.timestamp,
@@ -190,7 +178,7 @@ impl ColdTier {
 
     pub fn all_logs(&self) -> Result<Vec<LogRecord>> {
         let mut out = Vec::new();
-        for_each_row(&self.logs_root, &mut |b| {
+        self.for_each_row(LOGS, &mut |b| {
             out.extend(batch_to_logs(b)?);
             Ok(())
         })?;
@@ -202,8 +190,8 @@ impl ColdTier {
     /// Write aged metric points to Parquet, partitioned by date/hour, sorted by
     /// `(name, ts)`.
     pub fn write_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
-        write_partitioned(
-            &self.metrics_root,
+        self.write_partitioned(
+            METRICS,
             "metrics",
             metrics,
             |m| m.timestamp,
@@ -218,7 +206,7 @@ impl ColdTier {
 
     pub fn all_metrics(&self) -> Result<Vec<MetricPoint>> {
         let mut out = Vec::new();
-        for_each_row(&self.metrics_root, &mut |b| {
+        self.for_each_row(METRICS, &mut |b| {
             out.extend(batch_to_metrics(b)?);
             Ok(())
         })?;
@@ -228,10 +216,9 @@ impl ColdTier {
     // ── Metric downsampling (5m rollups) ────────────────────────────
 
     /// Aggregate raw points into 5-minute (`service`, `name`) buckets and write
-    /// them to `cold/metrics_5m/date=…/` (day-partitioned — rollups are sparse
-    /// and long-lived). Idempotent per call; buckets across calls are not
-    /// merged (acceptable: a series' raw points are downsampled once at
-    /// compaction).
+    /// them to `metrics_5m/date=…/` (day-partitioned — rollups are sparse and
+    /// long-lived). Idempotent per call; buckets across calls are not merged
+    /// (acceptable: a series' raw points are downsampled once at compaction).
     pub fn write_downsampled(&self, points: &[MetricPoint]) -> Result<()> {
         let rollups = downsample(points);
         if rollups.is_empty() {
@@ -246,26 +233,101 @@ impl ColdTier {
                 .push(r);
         }
         for (date, group) in by_day {
-            let dir = self.metrics_5m_root.join(format!("date={date}"));
-            std::fs::create_dir_all(&dir)?;
-            let path = dir.join(format!("metrics_5m-{}.parquet", ulid::Ulid::new()));
             let batch = rollups_to_batch(&group)?;
-            let file = std::fs::File::create(&path)?;
-            let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
-            writer.write(&batch)?;
-            writer.close()?;
+            self.put_parquet(&day_partition_key(METRICS_5M, &date, "metrics_5m"), &batch)?;
         }
         Ok(())
     }
 
     pub fn all_rollups(&self) -> Result<Vec<RollupPoint>> {
         let mut out = Vec::new();
-        for_each_row(&self.metrics_5m_root, &mut |b| {
+        self.for_each_row(METRICS_5M, &mut |b| {
             out.extend(batch_to_rollups(b)?);
             Ok(())
         })?;
         Ok(out)
     }
+
+    // ── Object I/O helpers ──────────────────────────────────────────
+
+    /// Encode `batch` as Parquet in memory and write it as one atomic object.
+    fn put_parquet(&self, key: &str, batch: &RecordBatch) -> Result<()> {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None)
+                .with_context(|| format!("creating parquet writer for {key}"))?;
+            writer.write(batch)?;
+            writer.close()?;
+        }
+        self.backend.put(key, &buf)
+    }
+
+    /// Group records by `date=…/hour=…` of their timestamp, sort+encode each
+    /// group via `to_batch`, and write one Parquet object per partition.
+    fn write_partitioned<T>(
+        &self,
+        root: &str,
+        stem: &str,
+        records: &[T],
+        ts_of: impl Fn(&T) -> DateTime<Utc>,
+        to_batch: impl Fn(&mut Vec<&T>) -> Result<RecordBatch>,
+    ) -> Result<()> {
+        use std::collections::BTreeMap;
+        let mut by_partition: BTreeMap<(String, String), Vec<&T>> = BTreeMap::new();
+        for r in records {
+            let dt = ts_of(r);
+            let key = (
+                dt.format("%Y-%m-%d").to_string(),
+                dt.format("%H").to_string(),
+            );
+            by_partition.entry(key).or_default().push(r);
+        }
+        for ((date, hour), mut group) in by_partition {
+            let batch = to_batch(&mut group)?;
+            self.put_parquet(&partition_key(root, &date, &hour, stem), &batch)?;
+        }
+        Ok(())
+    }
+
+    /// Read every Parquet object under `prefix`, invoking `f` with each batch.
+    fn for_each_row(
+        &self,
+        prefix: &str,
+        f: &mut dyn FnMut(&RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        for key in self.backend.list(prefix)? {
+            if !key.ends_with(".parquet") {
+                continue;
+            }
+            let Some(bytes) = self.backend.get(&key)? else {
+                continue; // raced with a concurrent delete (e.g. retention)
+            };
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))?.build()?;
+            for batch in reader {
+                f(&batch?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `<root>/date=<date>/hour=<hour>/<stem>-<ulid>.parquet`.
+fn partition_key(root: &str, date: &str, hour: &str, stem: &str) -> String {
+    format!(
+        "{root}/date={date}/hour={hour}/{stem}-{}.parquet",
+        ulid::Ulid::new()
+    )
+}
+
+/// `<root>/date=<date>/<stem>-<ulid>.parquet` (day-granular, for rollups).
+fn day_partition_key(root: &str, date: &str, stem: &str) -> String {
+    format!("{root}/date={date}/{stem}-{}.parquet", ulid::Ulid::new())
+}
+
+/// Extract the `date=YYYY-MM-DD` segment's value from a partition key.
+fn parse_date_segment(key: &str) -> Option<&str> {
+    key.split('/').find_map(|seg| seg.strip_prefix("date="))
 }
 
 /// Aggregate raw points into 5-minute (service, name) buckets.
@@ -292,71 +354,6 @@ fn downsample(points: &[MetricPoint]) -> Vec<RollupPoint> {
         entry.count += 1;
     }
     buckets.into_values().collect()
-}
-
-/// Group records by `date=…/hour=…` of their timestamp, sort+encode each group
-/// via `to_batch`, and write one Parquet file per partition.
-fn write_partitioned<T>(
-    root: &Path,
-    stem: &str,
-    records: &[T],
-    ts_of: impl Fn(&T) -> DateTime<Utc>,
-    to_batch: impl Fn(&mut Vec<&T>) -> Result<RecordBatch>,
-) -> Result<()> {
-    use std::collections::BTreeMap;
-    let mut by_partition: BTreeMap<(String, String), Vec<&T>> = BTreeMap::new();
-    for r in records {
-        let dt = ts_of(r);
-        let key = (
-            dt.format("%Y-%m-%d").to_string(),
-            dt.format("%H").to_string(),
-        );
-        by_partition.entry(key).or_default().push(r);
-    }
-    for ((date, hour), mut group) in by_partition {
-        let dir = root
-            .join(format!("date={date}"))
-            .join(format!("hour={hour}"));
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{stem}-{}.parquet", ulid::Ulid::new()));
-        let batch = to_batch(&mut group)?;
-        let file = std::fs::File::create(&path)
-            .with_context(|| format!("creating parquet {}", path.display()))?;
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
-        writer.write(&batch)?;
-        writer.close()?;
-    }
-    Ok(())
-}
-
-/// Walk every Parquet file under `root`, invoking `f` with each RecordBatch.
-fn for_each_row(root: &Path, f: &mut dyn FnMut(&RecordBatch) -> Result<()>) -> Result<()> {
-    let mut files = Vec::new();
-    collect_parquet_files(root, &mut files)?;
-    for path in files {
-        let file = std::fs::File::open(&path)
-            .with_context(|| format!("opening parquet {}", path.display()))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-        for batch in reader {
-            f(&batch?)?;
-        }
-    }
-    Ok(())
-}
-
-fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 // ── Arrow schema + (de)serialization ────────────────────────────────

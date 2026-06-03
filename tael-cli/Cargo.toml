@@ -32,8 +32,8 @@ gui = ["dep:tael-gui"]
 duckdb = ["tael-server/duckdb"]
 
 [dependencies]
-tael-server = { path = "../tael-server", version = "0.5.12" }
-tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.12", package = "tael-gui", optional = true }
+tael-server = { path = "../tael-server", version = "0.5.13" }
+tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.13", package = "tael-gui", optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

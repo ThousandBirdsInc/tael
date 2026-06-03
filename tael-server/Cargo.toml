@@ -41,10 +41,17 @@ ulid.workspace = true
 tantivy.workspace = true
 form_urlencoded.workspace = true
 chitchat.workspace = true
+object_store = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 
 [features]
 default = []
 duckdb = ["dep:duckdb"]
+# Cloud deployment surface: native GCS object storage (cold tier + blobs) and
+# Postgres-backed comments. Off by default so the single-binary local build has
+# zero extra dependencies and byte-identical behavior. Selected at runtime via
+# TAEL_COLD_STORE/TAEL_BLOB_STORE=gcs and TAEL_COMMENTS_STORE=postgres.
+cloud = ["dep:object_store", "dep:sqlx"]
 # Builds the `storage` bench target (DuckDbStore through the Store trait). Kept
 # behind a feature so the default `cargo bench` stays focused on CPU/blob-store
 # hot paths. Run with: cargo bench --features bench-storage
