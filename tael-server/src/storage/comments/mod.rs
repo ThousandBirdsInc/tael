@@ -40,6 +40,11 @@ pub trait CommentsStore: Send + Sync {
 
     /// All comments on `trace_id`, in insertion order.
     fn get(&self, trace_id: &str) -> Result<Vec<TraceComment>>;
+
+    /// The most recent `limit` comments across all traces, newest first
+    /// (matching the SQL layer's `ORDER BY created_at DESC` that the CLI's
+    /// reliability scanners were written against).
+    fn list_recent(&self, limit: usize) -> Result<Vec<TraceComment>>;
 }
 
 /// Build the configured comments store. Defaults to the local JSONL file;

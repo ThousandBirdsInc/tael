@@ -51,14 +51,29 @@ pub async fn compare(
         let Some(attrs) = attrs else {
             continue;
         };
-        if attrs.get("tael.experiment.id").and_then(|v| v.as_str()) != Some(experiment_id) {
+        // Two instrumentation paths resolve to (experiment, variant):
+        //   1. explicit `tael.experiment.id` / `tael.experiment.variant` attrs;
+        //   2. a Chidori `chidori.branch` fan-out — the run id is the
+        //      experiment and each variant's spans carry `chidori.branch_label`,
+        //      so `tael experiment compare <chidori_run_id>` works with no
+        //      extra instrumentation.
+        let variant = if attrs.get("tael.experiment.id").and_then(|v| v.as_str())
+            == Some(experiment_id)
+        {
+            attrs
+                .get("tael.experiment.variant")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string()
+        } else if attrs.get("chidori.run_id").and_then(|v| v.as_str()) == Some(experiment_id) {
+            match attrs.get("chidori.branch_label").and_then(|v| v.as_str()) {
+                Some(label) => label.to_string(),
+                // Non-branch spans of the run aren't part of any variant.
+                None => continue,
+            }
+        } else {
             continue;
-        }
-        let variant = attrs
-            .get("tael.experiment.variant")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        };
         let trace_id = span
             .get("trace_id")
             .and_then(|v| v.as_str())

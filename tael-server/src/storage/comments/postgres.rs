@@ -152,4 +152,29 @@ impl CommentsStore for PgComments {
             })
             .collect())
     }
+
+    fn list_recent(&self, limit: usize) -> Result<Vec<TraceComment>> {
+        let pool = self.pool.clone();
+        let rows = block(async move {
+            sqlx::query(
+                "SELECT id, trace_id, span_id, author, body, created_at \
+                 FROM tael_comments ORDER BY seq DESC LIMIT $1",
+            )
+            .bind(limit as i64)
+            .fetch_all(&pool)
+            .await
+            .context("listing comments")
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TraceComment {
+                id: r.get("id"),
+                trace_id: r.get("trace_id"),
+                span_id: r.get("span_id"),
+                author: r.get("author"),
+                body: r.get("body"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
 }

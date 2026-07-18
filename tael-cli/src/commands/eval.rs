@@ -86,6 +86,17 @@ pub async fn case_add(
     if let Some(v) = expected_behavior.filter(|s| !s.is_empty()) {
         body["expected_behavior"] = Value::String(v);
     }
+    // When the source trace came from a Chidori agent, the run is not just
+    // described by the trace — it IS a replayable artifact. Capture the run id
+    // and checkpoint path so the case's fixture is the checkpoint itself:
+    // `chidori resume <agent.ts> <run_id> --ci` replays it byte-for-byte at $0
+    // (see docs/chidori.md for the eval-run recipes).
+    if let Some((run_id, checkpoint)) = chidori_run_ref(client, from_trace).await {
+        body["chidori_run_id"] = Value::String(run_id);
+        if let Some(path) = checkpoint {
+            body["chidori_checkpoint_path"] = Value::String(path);
+        }
+    }
 
     let result = client
         .add_comment(
@@ -382,6 +393,36 @@ fn new_trace_span_ids() -> (String, String) {
     (trace_id, span_id)
 }
 
+/// Scan a trace's spans for Chidori run correlation attributes. Returns
+/// `(chidori.run_id, chidori.checkpoint_path?)` when the trace was emitted by
+/// a Chidori agent run, None otherwise (including when the trace is missing —
+/// promotion still works, it just records no replayable fixture).
+async fn chidori_run_ref(client: &TaelClient, trace_id: &str) -> Option<(String, Option<String>)> {
+    let trace = client.get_trace(trace_id).await.ok()?;
+    let spans = trace.get("spans")?.as_array()?;
+    let mut run_id = None;
+    let mut checkpoint = None;
+    for span in spans {
+        let Some(attrs) = span.get("attributes").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        if run_id.is_none() {
+            if let Some(v) = attrs.get("chidori.run_id").and_then(|v| v.as_str()) {
+                run_id = Some(v.to_string());
+            }
+        }
+        if checkpoint.is_none() {
+            if let Some(v) = attrs.get("chidori.checkpoint_path").and_then(|v| v.as_str()) {
+                checkpoint = Some(v.to_string());
+            }
+        }
+        if run_id.is_some() && checkpoint.is_some() {
+            break;
+        }
+    }
+    run_id.map(|id| (id, checkpoint))
+}
+
 async fn find_eval_case_trace(
     client: &TaelClient,
     case_id: &str,
@@ -415,6 +456,11 @@ fn print_eval_case_add(value: &Value) {
             field(&body, "case_id"),
             field(&body, "source_trace_id")
         );
+        if let Some(run_id) = body.get("chidori_run_id").and_then(|v| v.as_str()) {
+            println!(
+                "Fixture: chidori run {run_id} — replay with `chidori resume <agent.ts> {run_id} --ci` ($0)"
+            );
+        }
     }
 }
 
