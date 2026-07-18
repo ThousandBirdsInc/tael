@@ -442,6 +442,23 @@ impl Store for TaelBackend {
             self.comments.get(trace_id)
         }
     }
+    fn list_comments(&self, limit: usize) -> Result<Vec<TraceComment>> {
+        // Cross-trace listing powers the reliability-loop scanners without the
+        // SQL layer. The duckdb build keeps its SQL path in `query_sql`; here
+        // the comments store enumerates directly.
+        #[cfg(feature = "duckdb")]
+        {
+            let _ = limit;
+            anyhow::bail!(
+                "listing comments is served by the SQL layer on duckdb builds; \
+                 query trace_comments via /api/v1/sql"
+            )
+        }
+        #[cfg(not(feature = "duckdb"))]
+        {
+            self.comments.list_recent(limit)
+        }
+    }
     fn query_summary(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
         #[cfg(feature = "duckdb")]
         {

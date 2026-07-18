@@ -92,6 +92,22 @@ impl CommentsStore for JsonlComments {
             .cloned()
             .unwrap_or_default())
     }
+
+    fn list_recent(&self, limit: usize) -> Result<Vec<TraceComment>> {
+        let mut all: Vec<TraceComment> = self
+            .comments
+            .lock()
+            .expect("comment store lock poisoned")
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        // Newest first; created_at is RFC 3339, so the lexicographic order is
+        // the chronological order.
+        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all.truncate(limit);
+        Ok(all)
+    }
 }
 
 #[cfg(test)]

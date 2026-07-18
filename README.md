@@ -241,6 +241,29 @@ The initial implementation is intentionally comment-backed: issues, signal
 definitions, eval case provenance, and self diagnostics are structured trace
 comments, so they stay attached to the trace that motivated them.
 
+Paired with [Chidori](https://github.com/ThousandBirds/chidori) — the agent
+framework whose runs are durable and replayable by default — the loop closes
+into a full self-improvement harness: tael mines weaknesses from traces and
+validates fixes; Chidori supplies the experiment substrate (fork a controlled
+`chidori.branch` experiment from a failure's exact anchored state, replay any
+golden case byte-for-byte at $0). A `tael eval case add --from-trace` on a
+Chidori trace records the run's checkpoint as the case fixture automatically.
+See [Tracing Chidori agents](./docs/chidori.md) and the runnable
+[self-harness-loop demo](https://github.com/ThousandBirds/chidori/tree/main/examples/self-harness-loop).
+
+```text
+            ┌──────────────── tael ────────────────┐
+            │  traces · issues · signals · evals   │
+            │  (weakness mining + validation)      │
+            └───────▲──────────────────┬───────────┘
+             OTLP   │                  │ eval run --cmd
+                    │                  ▼
+            ┌───────┴───────── chidori ────────────┐
+            │  durable runs · checkpoints · branch │
+            │  (the experiment substrate)          │
+            └──────────────────────────────────────┘
+```
+
 ```bash
 # Classify a representative production failure
 tael issue create --from-trace <trace-id> \

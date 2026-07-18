@@ -49,6 +49,13 @@ pub trait Store: Send + Sync {
         body: &str,
     ) -> Result<TraceComment>;
     fn get_comments(&self, trace_id: &str) -> Result<Vec<TraceComment>>;
+    /// The most recent comments across ALL traces, newest first. Powers the
+    /// reliability-loop scanners (`tael issue list`, `signal trend`, `eval
+    /// suite inspect`) on builds without the SQL layer. Default: unsupported —
+    /// backends that can enumerate comments override this.
+    fn list_comments(&self, _limit: usize) -> Result<Vec<TraceComment>> {
+        anyhow::bail!("listing comments across traces is not supported by this storage backend")
+    }
 
     // ── Logs ────────────────────────────────────────────────────────
     fn insert_logs(&self, logs: &[LogRecord]) -> Result<()>;

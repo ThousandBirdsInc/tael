@@ -64,6 +64,7 @@ pub fn router(
             "/api/v1/traces/{trace_id}/comments",
             get(get_comments).post(add_comment),
         )
+        .route("/api/v1/comments", get(list_comments))
         .route("/api/v1/logs", get(query_logs))
         .route("/api/v1/logs/live", get(live_logs))
         .route("/api/v1/metrics", get(query_metrics))
@@ -331,6 +332,31 @@ async fn get_comments(
     Path(trace_id): Path<String>,
 ) -> impl IntoResponse {
     match state.store.get_comments(&trace_id) {
+        Ok(comments) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "comments": comments, "count": comments.len() })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ListCommentsParams {
+    limit: Option<usize>,
+}
+
+/// The most recent comments across ALL traces, newest first. Powers the CLI's
+/// reliability-loop scanners (`tael issue list`, `signal trend`, `eval suite
+/// inspect`) on storage backends without the SQL layer.
+async fn list_comments(
+    State(state): State<AppState>,
+    Query(params): Query<ListCommentsParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(1000).min(100_000);
+    match state.store.list_comments(limit) {
         Ok(comments) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({ "comments": comments, "count": comments.len() })),

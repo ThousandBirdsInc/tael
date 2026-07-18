@@ -116,6 +116,22 @@ impl TaelClient {
         Ok(resp)
     }
 
+    /// The most recent comments across all traces, newest first
+    /// (`/api/v1/comments`). Errors on older servers without the endpoint —
+    /// callers fall back to the SQL layer.
+    pub async fn list_comments(&self, limit: u32) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/comments", self.base_url))
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http
