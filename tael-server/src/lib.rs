@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
-pub use config::{ServerConfig, StorageBackend};
+pub use config::{DEFAULT_DD_AGENT_ADDR, ServerConfig, StorageBackend, parse_dd_agent_addr};
 #[cfg(feature = "duckdb")]
 pub use storage::DuckDbStore;
 pub use storage::models::{
@@ -161,7 +161,7 @@ pub async fn run_embedded(config: ServerConfig) -> Result<()> {
 /// Runs until both listeners receive shutdown. The configured storage backend is
 /// shared by OTLP ingest and REST query APIs, with the background maintenance
 /// task enabled when running on tael-backend.
-pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -> Result<()> {
+pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOptions) -> Result<()> {
     // Initialize tracing for the server process in the default CLI mode.
     // `try_init` keeps embedding in a binary that already set a subscriber from
     // panicking. Quiet mode leaves all tracing ownership to the host process.
@@ -305,6 +305,7 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
         otlp_grpc = %config.otlp_grpc_addr,
         rest_api = %config.rest_api_addr,
         rest_api_socket = ?config.rest_api_socket,
+        dd_agent = ?config.dd_agent_addr,
         data_dir = %config.data_dir,
         wal_dir = %config.wal_dir,
         storage = ?config.storage,
@@ -388,15 +389,58 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
         }
     });
 
+    // Dedicated Datadog trace-agent listener on the agent's default port, so
+    // dd-trace clients work with no configuration at all. Bound here (not in
+    // the task) so the startup banner reflects reality: a bind failure (most
+    // likely a real Datadog agent already on 8126) is a warning, not fatal —
+    // the same endpoints stay available on the REST listener via
+    // DD_TRACE_AGENT_URL, and the banner falls back to that advice.
+    let dd_listener = match &config.dd_agent_addr {
+        Some(addr) => match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(%addr, "Datadog trace-agent intake listening");
+                Some(listener)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %addr, error = %e,
+                    "Datadog agent port unavailable (another agent running?); \
+                     dd-trace intake stays available on the REST listener"
+                );
+                config.dd_agent_addr = None;
+                None
+            }
+        },
+        None => None,
+    };
+    let dd_handle = dd_listener.map(|listener| {
+        tokio::spawn({
+            let store = Arc::clone(&store);
+            let blobs = Arc::clone(&blobs);
+            let bus = Arc::clone(&bus);
+            let log_bus = Arc::clone(&log_bus);
+            async move {
+                let app = api::rest::dd_router(store, blobs, bus, log_bus);
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+                    .context("Datadog trace-agent server failed")
+            }
+        })
+    });
+
     if !options.is_quiet() {
         print_startup_banner(&config);
     }
 
-    // Both listeners drain on SIGTERM/Ctrl-C; await both so in-flight requests
+    // All listeners drain on SIGTERM/Ctrl-C; await them so in-flight requests
     // finish before we flush and exit (`docs/tael-server-scaling-ha.md` §5.4).
     let (grpc_res, rest_res) = tokio::join!(grpc_handle, rest_handle);
     grpc_res?;
     rest_res??;
+    if let Some(dd_handle) = dd_handle {
+        dd_handle.await??;
+    }
 
     // Best-effort flush so a restart/standby replays less WAL. Durability is
     // already guaranteed by the per-write WAL fsync.
@@ -473,6 +517,9 @@ fn print_startup_banner(config: &ServerConfig) {
     println!("tael server starting");
     println!("  REST API     {rest}");
     println!("  OTLP gRPC    {otlp}");
+    if let Some(addr) = &config.dd_agent_addr {
+        println!("  dd-trace     {addr}");
+    }
     println!("  data dir     {}", config.data_dir);
     println!("  WAL dir      {}", config.wal_dir);
     println!("  storage      {:?}", config.storage);
@@ -487,13 +534,28 @@ fn print_startup_banner(config: &ServerConfig) {
     println!("  export OTEL_SERVICE_NAME=<your-service>");
     println!();
     println!("Or a Datadog-instrumented service (dd-trace):");
-    println!("  export DD_TRACE_AGENT_URL={}", dd_agent_url(config));
+    match &config.dd_agent_addr {
+        // Listening on the agent's default port: dd-trace clients find it
+        // with no configuration at all.
+        Some(addr) if addr == config::DEFAULT_DD_AGENT_ADDR => {
+            println!("  no exports needed — listening on the default agent port ({addr})");
+        }
+        Some(addr) => {
+            println!("  export DD_TRACE_AGENT_URL=http://{addr}");
+        }
+        // Dedicated listener disabled: the REST listener still serves the
+        // trace-agent endpoints.
+        None => {
+            println!("  export DD_TRACE_AGENT_URL={}", dd_agent_url(config));
+        }
+    }
     println!();
 }
 
 /// The `DD_TRACE_AGENT_URL` value that reaches this server's REST listener,
-/// where the Datadog trace-agent endpoints are mounted. dd-trace clients
-/// accept both `http://` and `unix://` agent URLs.
+/// where the Datadog trace-agent endpoints are also mounted (used when the
+/// dedicated agent-port listener is disabled). dd-trace clients accept both
+/// `http://` and `unix://` agent URLs.
 fn dd_agent_url(config: &ServerConfig) -> String {
     match &config.rest_api_socket {
         Some(socket) => format!("unix://{socket}"),

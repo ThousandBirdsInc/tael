@@ -5,7 +5,7 @@
 # get the bundled-DuckDB build precompiled instead of paying the ~1.4 GB C++
 # amalgamation compile that `cargo install tael-cli` triggers.
 #
-#   docker run -p 7701:7701 -p 4317:4317 -v tael-data:/data \
+#   docker run -p 7701:7701 -p 4317:4317 -p 8126:8126 -v tael-data:/data \
 #     ghcr.io/thousandbirdsinc/tael:latest
 #
 # The same `tael` binary is the server (`serve`) and the query CLI, so you can
@@ -51,14 +51,16 @@ COPY --from=builder /usr/local/bin/tael /usr/local/bin/tael
 # /data volume so state survives container restarts.
 ENV TAEL_OTLP_GRPC_ADDR=0.0.0.0:4317 \
     TAEL_REST_API_ADDR=0.0.0.0:7701 \
+    TAEL_DD_AGENT_ADDR=0.0.0.0:8126 \
     TAEL_DATA_DIR=/data \
     TAEL_WAL_DIR=/data/wal_files
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-# 4317 = OTLP gRPC ingest, 7701 = REST API / CLI surface.
-EXPOSE 4317 7701
+# 4317 = OTLP gRPC ingest, 7701 = REST API / CLI surface,
+# 8126 = Datadog trace-agent (dd-trace) intake.
+EXPOSE 4317 7701 8126
 
 # `server status` prints {"status":"healthy"|"unreachable"} but always exits 0,
 # so grep the JSON for a healthy verdict to drive the container health state.

@@ -141,7 +141,7 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run the tael server: OTLP ingest (gRPC :4317), storage, REST API (:7701)
+    /// Run the tael server: OTLP ingest (gRPC :4317), Datadog trace-agent intake (:8126), storage, REST API (:7701)
     Serve {
         /// OTLP gRPC listen address (env: TAEL_OTLP_GRPC_ADDR)
         #[arg(long)]
@@ -152,6 +152,10 @@ pub enum Commands {
         /// REST API Unix socket path (env: TAEL_REST_API_SOCKET)
         #[arg(long)]
         rest_api_socket: Option<String>,
+        /// Datadog trace-agent listen address; `off` disables the dedicated
+        /// listener (env: TAEL_DD_AGENT_ADDR) [default: 127.0.0.1:8126]
+        #[arg(long)]
+        dd_agent_addr: Option<String>,
         /// Data directory (env: TAEL_DATA_DIR)
         #[arg(long)]
         data_dir: Option<String>,
@@ -683,6 +687,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         otlp_grpc_addr,
         rest_api_addr,
         rest_api_socket,
+        dd_agent_addr,
         data_dir,
         wal_dir,
         storage,
@@ -707,6 +712,9 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         } else if let Some(p) = opts.port_rest {
             config.rest_api_addr = format!("127.0.0.1:{p}");
             config.rest_api_socket = None;
+        }
+        if let Some(a) = dd_agent_addr {
+            config.dd_agent_addr = tael_server::parse_dd_agent_addr(Some(a));
         }
         if let Some(d) = data_dir {
             config.data_dir = d;

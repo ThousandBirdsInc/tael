@@ -83,18 +83,48 @@ pub fn router(
         .route("/api/v1/blobs", post(put_blob))
         .route("/api/v1/blobs/{sha256}", get(get_blob))
         .route("/api/v1/write", post(prom_remote_write))
-        // Datadog trace-agent (dd-trace) intake: point DD_TRACE_AGENT_URL at
-        // this listener. See `ingest::datadog`.
+        // Datadog trace-agent (dd-trace) intake, also usable through this
+        // listener via DD_TRACE_AGENT_URL. See `ingest::datadog`.
+        .merge(dd_routes())
+        .route("/internal/wal/records", post(apply_wal_record))
+        .route("/internal/cluster", get(cluster_status))
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .with_state(state)
+}
+
+/// The Datadog trace-agent endpoint set (see `ingest::datadog`). Mounted on
+/// the main REST router and, via [`dd_router`], on the dedicated agent-port
+/// listener.
+fn dd_routes() -> Router<AppState> {
+    Router::new()
         .route("/info", get(dd_info))
         .route("/v0.3/traces", post(dd_traces_v04).put(dd_traces_v04))
         .route("/v0.4/traces", post(dd_traces_v04).put(dd_traces_v04))
         .route("/v0.5/traces", post(dd_traces_v05).put(dd_traces_v05))
         .route("/v0.6/stats", post(dd_discard).put(dd_discard))
         .route("/telemetry/proxy/{*path}", any(dd_discard))
-        .route("/internal/wal/records", post(apply_wal_record))
-        .route("/internal/cluster", get(cluster_status))
+}
+
+/// Standalone router for the dedicated Datadog agent-port listener (default
+/// `127.0.0.1:8126`), so dd-trace clients work with zero configuration. Serves
+/// only the trace-agent surface (plus `/healthz`), not the query API.
+pub fn dd_router(
+    store: Arc<dyn Store>,
+    blobs: Arc<BlobStore>,
+    bus: Arc<SpanBus>,
+    log_bus: Arc<LogBus>,
+) -> Router {
+    let state = AppState {
+        store,
+        blobs,
+        bus,
+        log_bus,
+        cluster: None,
+        wal_fencer: None,
+    };
+    dd_routes()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
         .with_state(state)
 }
 
