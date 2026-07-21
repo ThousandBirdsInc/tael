@@ -2563,6 +2563,49 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text), area);
 }
 
+/// Options for the live TUI when launched from a host application. Mirrors
+/// the flags of `tael live`; `Default` matches the CLI defaults.
+#[derive(Debug, Clone)]
+pub struct LiveOptions {
+    /// Filter the feed to a single service.
+    pub service: Option<String>,
+    /// Filter by span status (ok, error, unset).
+    pub status: Option<String>,
+    /// Poll interval in seconds.
+    pub interval_secs: u64,
+    /// Open the eval progress view instead of the trace feed.
+    pub evals: bool,
+    /// Open a specific eval run in the eval progress view.
+    pub eval_run: Option<String>,
+}
+
+impl Default for LiveOptions {
+    fn default() -> Self {
+        Self {
+            service: None,
+            status: None,
+            interval_secs: 2,
+            evals: false,
+            eval_run: None,
+        }
+    }
+}
+
+/// Run the live TUI against `server` (an `http://`/`unix://` URL). Takes over
+/// the terminal (raw mode + alternate screen) until the user quits, then
+/// restores it — safe to call from a host application's own terminal session.
+pub async fn run_with_options(server: &str, options: LiveOptions) -> Result<()> {
+    run(
+        server,
+        options.service,
+        options.status,
+        options.interval_secs,
+        options.evals,
+        options.eval_run,
+    )
+    .await
+}
+
 pub async fn run(
     server: &str,
     service: Option<String>,

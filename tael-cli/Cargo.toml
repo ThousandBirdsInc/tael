@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "AI-agent-native observability — a single `tael` binary that runs the OTLP ingest/storage server (`tael serve`) and queries, visualizes, and annotates traces"
+description = "AI-agent-native observability — a single `tael` binary that runs the OTLP ingest/storage server (`tael serve`) and queries, visualizes, and annotates traces. Also a library: embed the CLI command tree, typed REST client, live TUI, and in-process server in your own application"
 
 # `cargo binstall tael-cli` downloads a prebuilt binary from the GitHub Release
 # for the matching `v{version}` tag instead of compiling from source. Archive
@@ -15,6 +15,14 @@ description = "AI-agent-native observability — a single `tael` binary that run
 pkg-url = "{ repo }/releases/download/v{ version }/tael-cli-v{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "tael-cli-v{ version }-{ target }/{ bin }{ binary-ext }"
+
+# The crate is both the `tael` binary and an embeddable library: host
+# applications depend on `tael-cli` to mount the full CLI (including
+# `tael live`) inside their own clap tree, drive the typed REST client, or run
+# the whole stack in-process via the re-exported `tael_server`.
+[lib]
+name = "tael_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "tael"
