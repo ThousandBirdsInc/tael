@@ -575,12 +575,93 @@ See [`docs/tael-backend-design.md`](docs/tael-backend-design.md) for the storage
 engine and [`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md) for
 the horizontal-scale / HA path.
 
+## Embedding tael as a library
+
+Both workspace crates are libraries, so other projects can pull tael's
+functionality into their own binaries instead of shelling out to a `tael`
+process:
+
+- **`tael-cli`** (crate `tael_cli`) — the whole CLI surface: the clap command
+  tree, the typed REST client, the JSON/table output renderers, and the
+  interactive `tael live` TUI. The `tael` binary itself is a one-line wrapper
+  around this library.
+- **`tael-server`** (crate `tael_server`, re-exported as `tael_cli::tael_server`)
+  — the OTLP ingest, tiered storage, and REST/gRPC query server, runnable
+  in-process.
+
+```toml
+[dependencies]
+tael-cli = "0.5"
+```
+
+Mount the full CLI — including `tael live` — inside your own clap app by
+nesting `tael_cli::Commands` and flattening `tael_cli::GlobalOpts`, then
+dispatching with `tael_cli::run_command`:
+
+```rust
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+struct MyApp {
+    #[command(subcommand)]
+    command: MyCommand,
+    #[command(flatten)]
+    tael_opts: tael_cli::GlobalOpts,
+}
+
+#[derive(Subcommand)]
+enum MyCommand {
+    /// Your app's own commands…
+    Deploy,
+    /// …with every tael subcommand mounted under `myapp tael <cmd>`
+    #[command(subcommand)]
+    Tael(tael_cli::Commands),
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let app = MyApp::parse();
+    match app.command {
+        MyCommand::Deploy => todo!(),
+        MyCommand::Tael(cmd) => tael_cli::run_command(cmd, &app.tael_opts).await,
+    }
+}
+```
+
+Or use the pieces individually:
+
+```rust
+// In-process server (quiet: no banner, host keeps its tracing subscriber).
+tokio::spawn(tael_cli::tael_server::run_embedded(
+    tael_cli::tael_server::ServerConfig::from_env(),
+));
+
+// Typed queries — structured JSON, no subprocess.
+let client = tael_cli::TaelClient::new("http://127.0.0.1:7701");
+let traces = client
+    .query_traces(Some("checkout"), None, None, None, Some("error"), Some("1h"), 50, &[], None)
+    .await?;
+
+// Hand the terminal to the live trace-feed TUI; it restores the terminal
+// when the user quits, so the host app carries on afterward.
+tael_cli::tui::run_with_options(
+    "http://127.0.0.1:7701",
+    tael_cli::tui::LiveOptions { service: Some("checkout".into()), ..Default::default() },
+)
+.await?;
+```
+
+A complete runnable host application lives in
+[`tael-cli/examples/embedded.rs`](tael-cli/examples/embedded.rs)
+(`cargo run -p tael-cli --example embedded -- --live`).
+
 ## Project Structure
 
 The `tael` binary is published as `tael-cli`, which embeds `tael-server` as a
-library — so `cargo install tael-cli` is the whole server/CLI/TUI stack. The
-desktop GUI (`tael-gui`) is an optional library pulled in only with
-`--features gui`.
+library — so `cargo install tael-cli` is the whole server/CLI/TUI stack, and
+`tael-cli` is itself a library other projects can embed (see
+[Embedding tael as a library](#embedding-tael-as-a-library)). The desktop GUI
+(`tael-gui`) is an optional library pulled in only with `--features gui`.
 
 Use `tael_server::run(config)` for a user-facing server process. In-process
 integrations that must preserve one-shot JSON output or TUI control of the
@@ -600,11 +681,14 @@ startup banner and default tracing subscriber setup.
 │       │   ├── search.rs  #   Tantivy full-text index
 │       │   └── duckdb_store.rs  # legacy --storage=duckdb backend
 │       └── api/          # REST endpoints (axum)
-├── tael-cli/        # The `tael` binary: serve + query/get/comment/live TUI
+├── tael-cli/        # The `tael` binary + embeddable CLI library
+│   ├── examples/
+│   │   └── embedded.rs  # Host-app example: in-process server + CLI + live TUI
 │   └── src/
-│       ├── main.rs      # clap dispatch; `serve` → tael_server::run
-│       ├── client.rs    # HTTP client to the server REST API
-│       ├── tui.rs       # Interactive TUI (ratatui)
+│       ├── lib.rs       # Public API: Cli/Commands/GlobalOpts, run_command
+│       ├── main.rs      # Thin binary: Cli::parse().run()
+│       ├── client.rs    # HTTP client to the server REST API (TaelClient)
+│       ├── tui.rs       # Interactive `live` TUI (ratatui), LiveOptions
 │       ├── output.rs    # JSON + table formatters
 │       └── commands/    # Subcommand handlers
 ├── tael-gui/        # Tauri desktop GUI launched by `tael gui`
