@@ -477,8 +477,7 @@ impl Store for TaelBackend {
     ) -> Result<AnomalyReport> {
         #[cfg(feature = "duckdb")]
         {
-            self
-                .inner
+            self.inner
                 .query_anomalies(current_seconds, baseline_seconds, service)
         }
         #[cfg(not(feature = "duckdb"))]
@@ -641,7 +640,11 @@ impl TaelBackend {
 fn trace_summary(spans: &[Span]) -> TraceSummary {
     let mut durations: Vec<f64> = spans.iter().map(|s| s.duration_ms).collect();
     durations.sort_by(|a, b| a.total_cmp(b));
-    let trace_count = spans.iter().map(|s| &s.trace_id).collect::<HashSet<_>>().len() as i64;
+    let trace_count = spans
+        .iter()
+        .map(|s| &s.trace_id)
+        .collect::<HashSet<_>>()
+        .len() as i64;
     let error_count = spans
         .iter()
         .filter(|s| matches!(s.status, SpanStatus::Error))
@@ -731,7 +734,11 @@ fn log_summary(logs: &[LogRecord]) -> LogSummary {
 fn metric_summary(metrics: &[MetricPoint]) -> MetricSummary {
     MetricSummary {
         point_count: metrics.len() as i64,
-        unique_names: metrics.iter().map(|m| &m.name).collect::<HashSet<_>>().len() as i64,
+        unique_names: metrics
+            .iter()
+            .map(|m| &m.name)
+            .collect::<HashSet<_>>()
+            .len() as i64,
     }
 }
 

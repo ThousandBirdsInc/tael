@@ -11,7 +11,7 @@ use axum::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,14 @@ pub fn router(
         .route("/api/v1/blobs", post(put_blob))
         .route("/api/v1/blobs/{sha256}", get(get_blob))
         .route("/api/v1/write", post(prom_remote_write))
+        // Datadog trace-agent (dd-trace) intake: point DD_TRACE_AGENT_URL at
+        // this listener. See `ingest::datadog`.
+        .route("/info", get(dd_info))
+        .route("/v0.3/traces", post(dd_traces_v04).put(dd_traces_v04))
+        .route("/v0.4/traces", post(dd_traces_v04).put(dd_traces_v04))
+        .route("/v0.5/traces", post(dd_traces_v05).put(dd_traces_v05))
+        .route("/v0.6/stats", post(dd_discard).put(dd_discard))
+        .route("/telemetry/proxy/{*path}", any(dd_discard))
         .route("/internal/wal/records", post(apply_wal_record))
         .route("/internal/cluster", get(cluster_status))
         .route("/healthz", get(healthz))
@@ -1361,6 +1369,51 @@ async fn prom_remote_write(State(state): State<AppState>, body: Bytes) -> impl I
     crate::ingest::prom_remote_write::handle_write(state.store, body).await
 }
 
+// ── Datadog trace-agent (dd-trace) intake ───────────────────────────
+
+async fn dd_info() -> impl IntoResponse {
+    crate::ingest::datadog::handle_info()
+}
+
+async fn dd_traces_v04(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    crate::ingest::datadog::handle_traces(
+        state.store,
+        state.blobs,
+        state.bus,
+        crate::ingest::datadog::TracesVersion::V04,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn dd_traces_v05(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    crate::ingest::datadog::handle_traces(
+        state.store,
+        state.blobs,
+        state.bus,
+        crate::ingest::datadog::TracesVersion::V05,
+        headers,
+        body,
+    )
+    .await
+}
+
+/// Accept-and-discard for dd-trace background traffic (client stats,
+/// instrumentation telemetry) so client loops don't log errors. The data
+/// itself is derivable from the traces we already store.
+async fn dd_discard() -> impl IntoResponse {
+    StatusCode::OK
+}
+
 /// WAL replication ingress: a standby receives one framed WAL record
 /// (`[version][tag][json]`) shipped from a leader and applies it to local state
 /// (`docs/tael-server-scaling-ha.md` §5.1). Internal endpoint — firewall it to
@@ -1456,11 +1509,15 @@ mod tests {
         SummaryReport, TraceComment,
     };
 
-    /// Minimal store whose WAL apply always succeeds, so the test isolates the
-    /// endpoint's fencing decision from the storage engine.
-    struct OkApplyStore;
+    /// Minimal store that records inserted spans and whose WAL apply always
+    /// succeeds, so tests isolate endpoint behavior from the storage engine.
+    #[derive(Default)]
+    struct OkApplyStore {
+        inserted: std::sync::Mutex<Vec<Span>>,
+    }
     impl Store for OkApplyStore {
-        fn insert_spans(&self, _: &[Span]) -> anyhow::Result<()> {
+        fn insert_spans(&self, spans: &[Span]) -> anyhow::Result<()> {
+            self.inserted.lock().unwrap().extend_from_slice(spans);
             Ok(())
         }
         fn query_traces(&self, _: &TraceQuery) -> anyhow::Result<Vec<Span>> {
@@ -1518,16 +1575,20 @@ mod tests {
         }
     }
 
-    fn state_with_fencer(fencer: Arc<EpochFencer>) -> AppState {
+    fn test_state(store: Arc<OkApplyStore>, fencer: Option<Arc<EpochFencer>>) -> AppState {
         let dir = tempfile::tempdir().unwrap();
         AppState {
-            store: Arc::new(OkApplyStore),
+            store,
             blobs: Arc::new(BlobStore::new(dir.path().to_str().unwrap()).unwrap()),
             bus: Arc::new(SpanBus::new().unwrap()),
             log_bus: Arc::new(LogBus::new().unwrap()),
             cluster: None,
-            wal_fencer: Some(fencer),
+            wal_fencer: fencer,
         }
+    }
+
+    fn state_with_fencer(fencer: Arc<EpochFencer>) -> AppState {
+        test_state(Arc::new(OkApplyStore::default()), Some(fencer))
     }
 
     fn headers_with_epoch(epoch: u64) -> axum::http::HeaderMap {
@@ -1570,6 +1631,65 @@ mod tests {
         .await
         .into_response();
         assert_eq!(r.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn datadog_v04_traces_are_ingested_and_acked() {
+        let store = Arc::new(OkApplyStore::default());
+        let state = test_state(Arc::clone(&store), None);
+
+        // A minimal dd-trace v0.4 msgpack payload: one trace with one span.
+        let span = rmpv::Value::Map(vec![
+            (rmpv::Value::from("service"), rmpv::Value::from("billing")),
+            (rmpv::Value::from("name"), rmpv::Value::from("http.request")),
+            (rmpv::Value::from("trace_id"), rmpv::Value::from(42u64)),
+            (rmpv::Value::from("span_id"), rmpv::Value::from(7u64)),
+            (
+                rmpv::Value::from("start"),
+                rmpv::Value::from(1_700_000_000_000_000_000_i64),
+            ),
+            (
+                rmpv::Value::from("duration"),
+                rmpv::Value::from(5_000_000_i64),
+            ),
+        ]);
+        let payload = rmpv::Value::Array(vec![rmpv::Value::Array(vec![span])]);
+        let mut body = Vec::new();
+        rmpv::encode::write_value(&mut body, &payload).unwrap();
+
+        let r = dd_traces_v04(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        let ack = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_slice(&ack).unwrap();
+        assert!(ack.get("rate_by_service").is_some());
+
+        let inserted = store.inserted.lock().unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].service, "billing");
+        assert_eq!(inserted[0].operation, "http.request");
+        assert_eq!(inserted[0].trace_id, format!("{:016x}{:016x}", 0, 42));
+    }
+
+    #[tokio::test]
+    async fn datadog_info_advertises_supported_trace_endpoints() {
+        let r = dd_info().await.into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let endpoints = info["endpoints"].as_array().unwrap();
+        assert!(endpoints.contains(&serde_json::json!("/v0.4/traces")));
+        assert!(endpoints.contains(&serde_json::json!("/v0.5/traces")));
+        assert_eq!(info["client_drop_p0s"], serde_json::json!(false));
     }
 
     #[test]

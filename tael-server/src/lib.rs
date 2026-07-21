@@ -24,12 +24,12 @@ use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
 pub use config::{ServerConfig, StorageBackend};
+#[cfg(feature = "duckdb")]
+pub use storage::DuckDbStore;
 pub use storage::models::{
     LogRecord, LogSeverity, MetricPoint, MetricType, Span, SpanEvent, SpanKind, SpanStatus,
     TraceQuery,
 };
-#[cfg(feature = "duckdb")]
-pub use storage::DuckDbStore;
 pub use storage::{
     BlobStore, FanoutStore, RemoteStore, RemoteWalSink, Store, TaelBackend, WalSink,
 };
@@ -285,8 +285,8 @@ pub async fn run_with_options(config: ServerConfig, options: ServerRunOptions) -
                 // per-node mark-and-sweep would delete blobs other shards still
                 // reference, so it only runs on the designated coordinator. On a
                 // node-local store every node owns its own blobs and GCs freely.
-                let blob_gc_enabled = !config.object_store.blobs_shared()
-                    || config.object_store.blob_gc_coordinator;
+                let blob_gc_enabled =
+                    !config.object_store.blobs_shared() || config.object_store.blob_gc_coordinator;
                 if !blob_gc_enabled {
                     tracing::info!(
                         "blob GC disabled on this node: shared blob store, not the GC coordinator \
@@ -486,6 +486,19 @@ fn print_startup_banner(config: &ServerConfig) {
     println!("  export OTEL_EXPORTER_OTLP_PROTOCOL=grpc");
     println!("  export OTEL_SERVICE_NAME=<your-service>");
     println!();
+    println!("Or a Datadog-instrumented service (dd-trace):");
+    println!("  export DD_TRACE_AGENT_URL={}", dd_agent_url(config));
+    println!();
+}
+
+/// The `DD_TRACE_AGENT_URL` value that reaches this server's REST listener,
+/// where the Datadog trace-agent endpoints are mounted. dd-trace clients
+/// accept both `http://` and `unix://` agent URLs.
+fn dd_agent_url(config: &ServerConfig) -> String {
+    match &config.rest_api_socket {
+        Some(socket) => format!("unix://{socket}"),
+        None => format!("http://{}", config.rest_api_addr),
+    }
 }
 
 /// Pick the CLI flag (if any) needed to reach this REST listener. Empty when

@@ -262,7 +262,7 @@ fn map_span_kind(kind: opentelemetry_proto::tonic::trace::v1::span::SpanKind) ->
 /// attributes (`gen_ai.*`). Returns `None` when the span is not an LLM call.
 /// Promoted keys are left in the attribute map so existing attribute filters
 /// keep working; only the well-known fields are additionally typed here.
-fn extract_llm_span(attrs: &HashMap<String, String>) -> Option<LlmSpan> {
+pub(crate) fn extract_llm_span(attrs: &HashMap<String, String>) -> Option<LlmSpan> {
     let provider = attrs.get("gen_ai.system").cloned();
     let model = attrs
         .get("gen_ai.request.model")

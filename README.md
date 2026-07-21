@@ -23,7 +23,7 @@
 
 ---
 
-**tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (and Prometheus remote-write), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
+**tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (plus Prometheus remote-write and the Datadog trace-agent protocol), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
 
 One `tael` binary — server, CLI, and TUI in one (plus an optional desktop GUI) —
 with structured data as the default interface.
@@ -156,6 +156,22 @@ tael gui
 
 ### OTLP Ingestion
 Accepts traces, logs, and metrics from any OpenTelemetry-instrumented application via standard OTLP gRPC (port 4317), plus Prometheus remote-write over HTTP (`POST /api/v1/write`). No proprietary SDKs or agents required. LLM spans (`gen_ai.*` semantic conventions) get typed model/token/cost fields, with prompt/completion payloads stored as deduplicated blobs.
+
+### Datadog (dd-trace) Ingestion
+The REST listener also speaks the Datadog trace-agent protocol (`/v0.3`,
+`/v0.4`, and `/v0.5` traces in msgpack or JSON, plus the `/info` discovery
+endpoint), so a project already instrumented with a `dd-trace` library can
+point at a local tael without re-instrumenting — no Datadog agent needed:
+
+```bash
+export DD_TRACE_AGENT_URL=http://127.0.0.1:7701
+```
+
+Datadog `meta`/`metrics` tags become span attributes (`resource` and `type`
+land on `resource.name` / `span.type`), the `error` flag maps to span status,
+and 64-bit Datadog trace ids are widened to 128-bit ids via the `_dd.p.tid`
+tag when present. Client stats and telemetry uploads are accepted and
+discarded.
 
 ### CLI-First Querying
 Every command returns structured JSON by default. Human-readable tables via `--format table`.
@@ -543,7 +559,7 @@ ingest/storage/API side; the other subcommands are the client.
 │         Data Sources         │
 │  (OTel-instrumented apps)    │
 └──────────┬───────────────────┘
-           │ OTLP gRPC :4317 · Prometheus remote-write (HTTP)
+           │ OTLP gRPC :4317 · Prometheus remote-write (HTTP) · Datadog trace-agent (HTTP)
            ▼
 ┌──────────────────────────────────────────────┐
 │   tael serve                                   │
