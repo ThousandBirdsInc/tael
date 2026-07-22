@@ -103,10 +103,21 @@ jobs:
   # don't exist yet. Publish order matters: tael-cli's packaged verification
   # resolves tael-server and tael-gui from the registry, and `cargo publish`
   # (1.66+) blocks until each crate is indexed before returning.
+  #
+  # Auth is crates.io Trusted Publishing (OIDC) — no long-lived registry token
+  # stored anywhere. Each crate on crates.io is configured to trust this repo's
+  # release.yml + the `release` environment, and crates-io-auth-action swaps
+  # the job's OIDC identity for a ~30-minute publish token. A fresh token is
+  # minted per crate because the verify builds (bundled DuckDB) can outlast a
+  # single token's lifetime.
   publish-crates:
     name: publish to crates.io
     needs: build
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # OIDC token exchange for crates.io Trusted Publishing
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -126,23 +137,48 @@ jobs:
         with:
           key: publish-crates
 
-      - name: Publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # Mark crates already published so a partially failed run can be re-run
+      # without erroring on the ones that made it through.
+      - name: Check which crates still need publishing
+        id: todo
         run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "::error::CARGO_REGISTRY_TOKEN secret is not set (create one at https://crates.io/settings/tokens)"
-            exit 1
-          fi
           version="${GITHUB_REF_NAME#v}"
           for crate in tael-server tael-gui tael-cli; do
-            # Skip crates already published so a partially failed run can be
-            # re-run without erroring on the ones that made it through.
             if curl -fsSo /dev/null -A "tael-release-ci (github.com/${GITHUB_REPOSITORY})" \
                 "https://crates.io/api/v1/crates/${crate}/${version}"; then
               echo "==> ${crate} ${version} already on crates.io, skipping"
-              continue
+              echo "${crate}=skip" >> "$GITHUB_OUTPUT"
+            else
+              echo "${crate}=publish" >> "$GITHUB_OUTPUT"
             fi
-            echo "==> Publishing ${crate} ${version}..."
-            cargo publish -p "$crate" --locked
           done
+
+      - name: Mint token (tael-server)
+        if: steps.todo.outputs.tael-server == 'publish'
+        id: auth-server
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish tael-server
+        if: steps.todo.outputs.tael-server == 'publish'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-server.outputs.token }}
+        run: cargo publish -p tael-server --locked
+
+      - name: Mint token (tael-gui)
+        if: steps.todo.outputs.tael-gui == 'publish'
+        id: auth-gui
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish tael-gui
+        if: steps.todo.outputs.tael-gui == 'publish'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-gui.outputs.token }}
+        run: cargo publish -p tael-gui --locked
+
+      - name: Mint token (tael-cli)
+        if: steps.todo.outputs.tael-cli == 'publish'
+        id: auth-cli
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish tael-cli
+        if: steps.todo.outputs.tael-cli == 'publish'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-cli.outputs.token }}
+        run: cargo publish -p tael-cli --locked

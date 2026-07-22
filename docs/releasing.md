@@ -36,11 +36,27 @@ release/docker workflows — `cut-release` is just the zero-touch front door.
 
 ## One-time setup
 
-The release workflow needs a `CARGO_REGISTRY_TOKEN` repository secret: a
-crates.io API token (https://crates.io/settings/tokens) with the
-`publish-update` scope for `tael-server`, `tael-gui`, and `tael-cli`
-(`publish-new` too if publishing a new crate). Set it under
-**Settings → Secrets and variables → Actions**.
+crates.io auth uses [Trusted Publishing](https://crates.io/docs/trusted-publishing)
+(OIDC) — there is no long-lived API token stored in GitHub. The workflow
+exchanges its GitHub Actions identity for a short-lived publish token via
+`rust-lang/crates-io-auth-action`.
+
+For **each** of `tael-server`, `tael-gui`, and `tael-cli` on crates.io
+(you must be an owner): crate page → **Settings → Trusted Publishing →
+Add** a GitHub config with:
+
+- Repository owner: `ThousandBirdsInc`
+- Repository name: `tael`
+- Workflow filename: `release.yml`
+- Environment: `release`
+
+The `release` GitHub environment is created automatically the first time the
+publish job runs; optionally add protection rules to it (required reviewers,
+tag-only deployment) under **Settings → Environments** for an extra gate
+before anything reaches crates.io.
+
+Once trusted publishing is configured, consider revoking any old crates.io
+API tokens that had publish scope for these crates.
 
 If `main` has branch-protection rules, GitHub Actions must be allowed to push
 the version-bump commit (e.g. add it to the rule's bypass list).
