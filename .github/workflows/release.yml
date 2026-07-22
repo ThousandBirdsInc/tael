@@ -1,12 +1,18 @@
 name: release
 
-# Build prebuilt `tael` binaries on every `v*` tag and attach them to the
-# matching GitHub Release. This is what makes `cargo binstall tael-cli` fast:
-# binstall downloads one of these archives instead of compiling the bundled
-# DuckDB C++ amalgamation (~1.4 GB of object code) from source.
+# Build prebuilt `tael` binaries on every `v*` tag, attach them to the
+# matching GitHub Release, then publish the crates to crates.io. This is what
+# makes `cargo binstall tael-cli` fast: binstall downloads one of these
+# archives instead of compiling the bundled DuckDB C++ amalgamation (~1.4 GB
+# of object code) from source.
+#
+# Normally dispatched at the tag by the `cut-release` workflow (tags pushed
+# with GITHUB_TOKEN don't fire `on: push`), but a manually pushed tag still
+# triggers it too.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -90,3 +96,53 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: ${{ env.ASSET }}
           fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  # Publish to crates.io only after every binary is attached to the release,
+  # so `cargo binstall tael-cli` never sees a version whose prebuilt archives
+  # don't exist yet. Publish order matters: tael-cli's packaged verification
+  # resolves tael-server and tael-gui from the registry, and `cargo publish`
+  # (1.66+) blocks until each crate is indexed before returning.
+  publish-crates:
+    name: publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tael-gui's publish verification compiles the Tauri app crate, which
+      # links webkit/GTK on Linux.
+      - name: Install Tauri build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-crates
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN secret is not set (create one at https://crates.io/settings/tokens)"
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          for crate in tael-server tael-gui tael-cli; do
+            # Skip crates already published so a partially failed run can be
+            # re-run without erroring on the ones that made it through.
+            if curl -fsSo /dev/null -A "tael-release-ci (github.com/${GITHUB_REPOSITORY})" \
+                "https://crates.io/api/v1/crates/${crate}/${version}"; then
+              echo "==> ${crate} ${version} already on crates.io, skipping"
+              continue
+            fi
+            echo "==> Publishing ${crate} ${version}..."
+            cargo publish -p "$crate" --locked
+          done

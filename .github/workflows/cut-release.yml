@@ -1,0 +1,104 @@
+name: cut-release
+
+# One-click releases: bump the workspace version, commit, tag `v{version}`,
+# and kick off the `release` (binaries + crates.io) and `docker` (GHCR image)
+# workflows at that tag. Run it from the Actions tab with a bump level, or an
+# explicit version for pre-releases/jumps.
+#
+# The downstream workflows are dispatched explicitly (`gh workflow run`)
+# because tags pushed with the built-in GITHUB_TOKEN deliberately do not fire
+# `on: push` workflows — GitHub suppresses those to prevent workflow
+# recursion, but workflow_dispatch events are exempt.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump level"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Explicit version (e.g. 0.6.0) — overrides bump"
+        required: false
+
+permissions:
+  contents: write # push the version-bump commit and tag
+  actions: write # dispatch the release and docker workflows
+
+concurrency: cut-release
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    # Releases are always cut from main.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute new version
+        id: version
+        run: |
+          current=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          explicit="${{ inputs.version }}"
+          if [ -n "$explicit" ]; then
+            if ! echo "$explicit" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::'$explicit' is not a valid semver version"
+              exit 1
+            fi
+            new="$explicit"
+          else
+            IFS=. read -r major minor patch <<< "$current"
+            case "${{ inputs.bump }}" in
+              major) new="$((major + 1)).0.0" ;;
+              minor) new="${major}.$((minor + 1)).0" ;;
+              patch) new="${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$new" > /dev/null; then
+            echo "::error::tag v$new already exists"
+            exit 1
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$new (was $current)"
+
+      - name: Bump version
+        run: |
+          current="${{ steps.version.outputs.current }}"
+          new="${{ steps.version.outputs.new }}"
+          # Workspace version (single source of truth for all crates)...
+          sed -i "s/^version = \"$current\"/version = \"$new\"/" Cargo.toml
+          # ...plus the explicit registry versions on tael-cli's path deps,
+          # which cargo requires alongside `path = ...` for publishing.
+          sed -i "s/version = \"$current\"/version = \"$new\"/g" tael-cli/Cargo.toml
+          # Refresh the lockfile entries for the workspace members.
+          cargo update --workspace
+          git diff --stat
+
+      - name: Commit, tag, and push
+        run: |
+          new="${{ steps.version.outputs.new }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock tael-cli/Cargo.toml
+          git commit -m "Release v$new"
+          git tag -a "v$new" -m "Release v$new"
+          git push origin main "v$new"
+
+      - name: Dispatch release and docker workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          new="${{ steps.version.outputs.new }}"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$new"
+          gh workflow run docker.yml --repo "$GITHUB_REPOSITORY" --ref "v$new"
+          {
+            echo "## Released v$new"
+            echo ""
+            echo "Tagged \`v$new\` on \`main\` and dispatched:"
+            echo "- **release** — prebuilt binaries + GitHub Release + crates.io publish"
+            echo "- **docker** — multi-arch image to GHCR"
+          } >> "$GITHUB_STEP_SUMMARY"

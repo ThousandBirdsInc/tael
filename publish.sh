@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publish tael crates to crates.io
+# Publish tael crates to crates.io — MANUAL FALLBACK ONLY.
+#
+# Releases are normally fully automated: run the `cut-release` workflow from
+# the GitHub Actions tab, which bumps the version, tags, builds binaries,
+# publishes to crates.io, and pushes the Docker image. See docs/releasing.md.
+# Use this script only if the CI publish job is broken.
 
 # Ensure we're in the workspace root
 if [[ ! -f Cargo.toml ]]; then
