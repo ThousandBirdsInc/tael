@@ -143,8 +143,7 @@ impl ObjectBackend for FsBackend {
                 .with_context(|| format!("creating object parent {}", parent.display()))?;
         }
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes)
-            .with_context(|| format!("writing object {}", tmp.display()))?;
+        std::fs::write(&tmp, bytes).with_context(|| format!("writing object {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("finalizing object {}", path.display()))?;
         Ok(())
@@ -416,9 +415,12 @@ mod tests {
     #[test]
     fn list_returns_relative_keys_recursively() {
         let (b, _d) = fs();
-        b.put("spans/date=2026-05-28/hour=14/s-1.parquet", b"x").unwrap();
-        b.put("spans/date=2026-05-28/hour=15/s-2.parquet", b"y").unwrap();
-        b.put("logs/date=2026-05-28/hour=14/l-1.parquet", b"z").unwrap();
+        b.put("spans/date=2026-05-28/hour=14/s-1.parquet", b"x")
+            .unwrap();
+        b.put("spans/date=2026-05-28/hour=15/s-2.parquet", b"y")
+            .unwrap();
+        b.put("logs/date=2026-05-28/hour=14/l-1.parquet", b"z")
+            .unwrap();
         let mut spans = b.list("spans").unwrap();
         spans.sort();
         assert_eq!(
@@ -460,7 +462,10 @@ mod tests {
                 .as_deref(),
             Some(&b"hello"[..])
         );
-        assert!(b.exists("spans/date=2026-05-28/hour=14/s-1.parquet").unwrap());
+        assert!(
+            b.exists("spans/date=2026-05-28/hour=14/s-1.parquet")
+                .unwrap()
+        );
         assert!(!b.exists("spans/missing").unwrap());
         assert!(b.get("spans/missing").unwrap().is_none());
 
@@ -480,8 +485,10 @@ mod tests {
         );
 
         // delete is idempotent.
-        b.delete("logs/date=2026-05-28/hour=14/l-1.parquet").unwrap();
-        b.delete("logs/date=2026-05-28/hour=14/l-1.parquet").unwrap();
+        b.delete("logs/date=2026-05-28/hour=14/l-1.parquet")
+            .unwrap();
+        b.delete("logs/date=2026-05-28/hour=14/l-1.parquet")
+            .unwrap();
         assert!(b.list("logs").unwrap().is_empty());
     }
 

@@ -412,7 +412,10 @@ async fn chidori_run_ref(client: &TaelClient, trace_id: &str) -> Option<(String,
             }
         }
         if checkpoint.is_none() {
-            if let Some(v) = attrs.get("chidori.checkpoint_path").and_then(|v| v.as_str()) {
+            if let Some(v) = attrs
+                .get("chidori.checkpoint_path")
+                .and_then(|v| v.as_str())
+            {
                 checkpoint = Some(v.to_string());
             }
         }

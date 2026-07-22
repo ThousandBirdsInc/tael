@@ -20,6 +20,8 @@ duckdb = { workspace = true, optional = true }
 hex.workspace = true
 opentelemetry-proto.workspace = true
 prost.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

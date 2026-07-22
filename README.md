@@ -23,7 +23,7 @@
 
 ---
 
-**tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (and Prometheus remote-write), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
+**tael** is an observability platform built for AI agents. It ingests [OpenTelemetry](https://opentelemetry.io/) traces, logs, and metrics via standard OTLP (plus Prometheus remote-write and the Datadog trace-agent protocol), stores them in a purpose-built tiered engine tuned for OTel + LLM traces, and exposes a CLI-first interface that returns structured JSON — designed for agents like Claude Code, Devin, or custom autonomous systems to query, monitor, and annotate production telemetry programmatically.
 
 One `tael` binary — server, CLI, and TUI in one (plus an optional desktop GUI) —
 with structured data as the default interface.
@@ -79,12 +79,13 @@ release, so there is no source build:
 
 ```bash
 docker run --rm \
-  -p 7701:7701 -p 4317:4317 \
+  -p 7701:7701 -p 4317:4317 -p 8126:8126 \
   -v tael-data:/data \
   ghcr.io/thousandbirdsinc/tael:latest
 ```
 
-That starts `tael serve` with OTLP gRPC on `:4317` and the REST API on `:7701`,
+That starts `tael serve` with OTLP gRPC on `:4317`, the REST API on `:7701`,
+and the Datadog trace-agent intake on `:8126`,
 persisting telemetry to the `tael-data` volume. Point your app's OTLP exporter
 at `http://localhost:4317` and query from the host with a locally installed
 `tael`, or run the CLI inside the container:
@@ -133,7 +134,7 @@ Running `tael gui` from a headless build prints a reminder to reinstall with
 ## Quickstart
 
 ```bash
-# Start the server (OTLP on :4317, REST API on :7701)
+# Start the server (OTLP on :4317, REST API on :7701, dd-trace agent on :8126)
 tael serve
 
 # In another terminal — send sample traces
@@ -156,6 +157,30 @@ tael gui
 
 ### OTLP Ingestion
 Accepts traces, logs, and metrics from any OpenTelemetry-instrumented application via standard OTLP gRPC (port 4317), plus Prometheus remote-write over HTTP (`POST /api/v1/write`). No proprietary SDKs or agents required. LLM spans (`gen_ai.*` semantic conventions) get typed model/token/cost fields, with prompt/completion payloads stored as deduplicated blobs.
+
+### Datadog (dd-trace) Ingestion
+tael also speaks the Datadog trace-agent protocol (`/v0.3`, `/v0.4`, and
+`/v0.5` traces in msgpack or JSON, plus the `/info` discovery endpoint), so a
+project already instrumented with a `dd-trace` library works without
+re-instrumenting — no Datadog agent needed. By default `tael serve` listens on
+the agent's standard port (`127.0.0.1:8126`), so dd-trace clients need **zero
+configuration**: just run your service. The same endpoints are also mounted on
+the REST listener, so pointing explicitly works too:
+
+```bash
+export DD_TRACE_AGENT_URL=http://127.0.0.1:7701   # optional; :8126 is automatic
+```
+
+If something else already holds port 8126 (say, a real Datadog agent), tael
+logs a warning and keeps running with the REST-listener intake only. Move or
+disable the dedicated listener with `--dd-agent-addr <addr|off>` or
+`TAEL_DD_AGENT_ADDR`.
+
+Datadog `meta`/`metrics` tags become span attributes (`resource` and `type`
+land on `resource.name` / `span.type`), the `error` flag maps to span status,
+and 64-bit Datadog trace ids are widened to 128-bit ids via the `_dd.p.tid`
+tag when present. Client stats and telemetry uploads are accepted and
+discarded.
 
 ### CLI-First Querying
 Every command returns structured JSON by default. Human-readable tables via `--format table`.
@@ -360,7 +385,7 @@ Restart any running Claude Code session after the first install so it picks up t
 tael [OPTIONS] <COMMAND>
 
 Commands:
-  serve           Run the server (OTLP ingest + storage + REST API)
+  serve           Run the server (OTLP + dd-trace ingest + storage + REST API)
   query traces    Search and filter traces (--text for LLM payload search)
   query logs      Search and filter logs
   query metrics   Query metrics (incl. PromQL subset)
@@ -401,6 +426,7 @@ Runs the server in the same binary. Flags fall back to the matching env var
 |------|-------------|---------|
 | `--otlp-grpc-addr` | OTLP gRPC listen address | `127.0.0.1:4317` |
 | `--rest-api-addr` | REST API listen address | `127.0.0.1:7701` |
+| `--dd-agent-addr` | Datadog trace-agent listen address; `off` disables the dedicated listener | `127.0.0.1:8126` |
 | `--data-dir` | Telemetry data directory | `~/.tael/data` |
 | `--wal-dir` | Write-ahead log directory | `~/.tael/wal_files` |
 | `--storage` | Storage backend. `duckdb` requires installing with `--features duckdb` | `tael-backend` |
@@ -543,7 +569,7 @@ ingest/storage/API side; the other subcommands are the client.
 │         Data Sources         │
 │  (OTel-instrumented apps)    │
 └──────────┬───────────────────┘
-           │ OTLP gRPC :4317 · Prometheus remote-write (HTTP)
+           │ OTLP gRPC :4317 · Prometheus remote-write (HTTP) · Datadog trace-agent (HTTP)
            ▼
 ┌──────────────────────────────────────────────┐
 │   tael serve                                   │

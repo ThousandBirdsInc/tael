@@ -24,12 +24,9 @@ fn print_trace_with_correlation(value: &Value) {
         .cloned()
         .unwrap_or_default();
     let attr = |key: &str| -> Option<String> {
-        spans.iter().find_map(|s| {
-            s.get("attributes")?
-                .get(key)?
-                .as_str()
-                .map(str::to_string)
-        })
+        spans
+            .iter()
+            .find_map(|s| s.get("attributes")?.get(key)?.as_str().map(str::to_string))
     };
     let Some(run_id) = attr("chidori.run_id") else {
         return;

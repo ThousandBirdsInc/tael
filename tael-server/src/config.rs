@@ -26,6 +26,11 @@ pub struct ServerConfig {
     pub otlp_grpc_addr: String,
     pub rest_api_addr: String,
     pub rest_api_socket: Option<String>,
+    /// Dedicated Datadog trace-agent listener address, so dd-trace clients
+    /// work zero-config on the agent's default port (8126). `None` disables
+    /// the extra listener; the same endpoints stay mounted on the REST
+    /// listener either way. Set via `TAEL_DD_AGENT_ADDR` (`off` to disable).
+    pub dd_agent_addr: Option<String>,
     pub data_dir: String,
     pub wal_dir: String,
     pub storage: StorageBackend,
@@ -164,6 +169,7 @@ impl ServerConfig {
             rest_api_socket: std::env::var("TAEL_REST_API_SOCKET")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            dd_agent_addr: parse_dd_agent_addr(std::env::var("TAEL_DD_AGENT_ADDR").ok()),
             data_dir: std::env::var("TAEL_DATA_DIR").unwrap_or_else(|_| default_data_dir()),
             wal_dir: std::env::var("TAEL_WAL_DIR")
                 .or_else(|_| std::env::var("WALRUS_DATA_DIR"))
@@ -238,6 +244,26 @@ fn cluster_from_env() -> Option<ClusterSettings> {
 }
 
 /// Read an env var, returning `None` when unset or blank.
+/// The Datadog trace-agent's default listen address; dd-trace clients send
+/// here when `DD_TRACE_AGENT_URL`/`DD_AGENT_HOST` are unset.
+pub const DEFAULT_DD_AGENT_ADDR: &str = "127.0.0.1:8126";
+
+/// Resolve `TAEL_DD_AGENT_ADDR` (or the `--dd-agent-addr` flag): unset defaults
+/// to the agent's standard port so dd-trace clients work zero-config;
+/// `off`/`none`/`disabled`/`false`/`0` (or empty) disables the listener.
+pub fn parse_dd_agent_addr(value: Option<String>) -> Option<String> {
+    match value {
+        None => Some(DEFAULT_DD_AGENT_ADDR.to_string()),
+        Some(v) => {
+            let v = v.trim().to_string();
+            match v.to_lowercase().as_str() {
+                "" | "off" | "none" | "disabled" | "false" | "0" => None,
+                _ => Some(v),
+            }
+        }
+    }
+}
+
 fn non_empty_env(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|s| !s.trim().is_empty())
 }
@@ -267,4 +293,24 @@ fn storage_flag() -> Option<StorageBackend> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dd_agent_addr_defaults_on_and_honors_off_values() {
+        assert_eq!(
+            parse_dd_agent_addr(None).as_deref(),
+            Some(DEFAULT_DD_AGENT_ADDR)
+        );
+        assert_eq!(
+            parse_dd_agent_addr(Some("0.0.0.0:8126".into())).as_deref(),
+            Some("0.0.0.0:8126")
+        );
+        for off in ["off", "OFF", "none", "disabled", "false", "0", "  "] {
+            assert_eq!(parse_dd_agent_addr(Some(off.into())), None, "{off}");
+        }
+    }
 }

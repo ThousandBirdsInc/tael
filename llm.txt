@@ -222,6 +222,28 @@ the client before export.
 - `NaN` samples (Prometheus "stale" markers) are dropped on ingest.
 - No metadata handling, no exemplars, no native histograms.
 
+## Datadog trace-agent intake (`/v0.3|/v0.4|/v0.5/traces`, `GET /info`)
+
+- `tael serve` listens on the Datadog agent's default port
+  (`127.0.0.1:8126`) by default, so dd-trace clients work with zero
+  configuration. Move or disable it with `--dd-agent-addr <addr|off>` /
+  `TAEL_DD_AGENT_ADDR`. If the port is already taken (a real Datadog
+  agent), tael warns and keeps running without the dedicated listener.
+- The same endpoints are also mounted on the REST listener; pointing a
+  service explicitly with `DD_TRACE_AGENT_URL=http://127.0.0.1:7701`
+  (or `unix://<socket>`) works too.
+- v0.3/v0.4 accept msgpack (default) or JSON payloads; v0.5 accepts the
+  msgpack string-table format. `GET /info` advertises these so clients
+  negotiate a supported version.
+- Mapping: `meta` and `metrics` tags → span attributes; `resource` →
+  `resource.name` attribute; `type` → `span.type` attribute; `error` →
+  span status; `span.kind` meta tag → span kind; `name` → operation.
+  64-bit trace ids are widened to 128-bit using the `_dd.p.tid` tag.
+- `gen_ai.*` tags in `meta` get the same typed-LLM promotion as OTLP.
+- Client stats (`/v0.6/stats`) and telemetry (`/telemetry/proxy/*`) are
+  accepted and discarded. Remote config is not implemented (404), which
+  clients handle by disabling it.
+
 ## Filter-mode metric query (`GET /api/v1/metrics`)
 
 If you don't need PromQL, the simpler endpoint supports:
