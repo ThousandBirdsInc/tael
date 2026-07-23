@@ -394,7 +394,10 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     // the task) so the startup banner reflects reality: a bind failure (most
     // likely a real Datadog agent already on 8126) is a warning, not fatal —
     // the same endpoints stay available on the REST listener via
-    // DD_TRACE_AGENT_URL, and the banner falls back to that advice.
+    // DD_TRACE_AGENT_URL, and the banner falls back to that advice. The
+    // requested address is kept so the banner can say why it fell back
+    // (the tracing warning is filtered out under the default RUST_LOG).
+    let dd_addr_requested = config.dd_agent_addr.clone();
     let dd_listener = match &config.dd_agent_addr {
         Some(addr) => match TcpListener::bind(addr).await {
             Ok(listener) => {
@@ -429,8 +432,14 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         })
     });
 
+    // Requested a dedicated agent listener but the bind failed above.
+    let dd_addr_unavailable = match config.dd_agent_addr {
+        None => dd_addr_requested,
+        Some(_) => None,
+    };
+
     if !options.is_quiet() {
-        print_startup_banner(&config);
+        print_startup_banner(&config, dd_addr_unavailable.as_deref());
     }
 
     // All listeners drain on SIGTERM/Ctrl-C; await them so in-flight requests
@@ -509,7 +518,12 @@ fn cleanup_unix_socket_path(socket: &str) {
 /// (with or without `--port`) immediately sees where to connect a CLI and
 /// where to point an OTLP exporter. Goes through `println!` so it's visible
 /// regardless of `RUST_LOG`.
-fn print_startup_banner(config: &ServerConfig) {
+///
+/// `dd_addr_unavailable` is the requested dedicated agent address when its
+/// bind failed: the dd-trace endpoints are always mounted on the REST
+/// listener too, so the banner always has a Datadog address to show — it just
+/// notes why the dedicated port isn't it.
+fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>) {
     let rest = rest_endpoint_label(config);
     let otlp = &config.otlp_grpc_addr;
     let connect_flag = cli_connect_flag(config);
@@ -517,8 +531,15 @@ fn print_startup_banner(config: &ServerConfig) {
     println!("tael server starting");
     println!("  REST API     {rest}");
     println!("  OTLP gRPC    {otlp}");
-    if let Some(addr) = &config.dd_agent_addr {
-        println!("  dd-trace     {addr}");
+    match &config.dd_agent_addr {
+        Some(addr) => println!("  dd-trace     {addr}"),
+        None => match dd_addr_unavailable {
+            Some(requested) => println!(
+                "  dd-trace     {} ({requested} unavailable — another agent running?)",
+                dd_agent_url(config)
+            ),
+            None => println!("  dd-trace     {} (via REST listener)", dd_agent_url(config)),
+        },
     }
     println!("  data dir     {}", config.data_dir);
     println!("  WAL dir      {}", config.wal_dir);
@@ -543,9 +564,14 @@ fn print_startup_banner(config: &ServerConfig) {
         Some(addr) => {
             println!("  export DD_TRACE_AGENT_URL=http://{addr}");
         }
-        // Dedicated listener disabled: the REST listener still serves the
-        // trace-agent endpoints.
+        // Dedicated listener disabled or its port taken: the REST listener
+        // still serves the trace-agent endpoints.
         None => {
+            if let Some(requested) = dd_addr_unavailable {
+                println!(
+                    "  note: agent port {requested} was unavailable (another agent running?)"
+                );
+            }
             println!("  export DD_TRACE_AGENT_URL={}", dd_agent_url(config));
         }
     }
