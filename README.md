@@ -364,7 +364,7 @@ Restart any running Claude Code session after the first install so it picks up t
 │ 06:53:19 oncall-bot: Payment declined — Stripe 402         │
 │ 06:53:20 debug-agent: Card expired. Not a system issue.    │
 └────────────────────────────────────────────────────────────-┘
- q:quit  esc:back  j/k:navigate  c:comment
+ ctrl-c:quit  q/esc:back  j/k:navigate  c:comment
 ```
 
 **Controls:**
@@ -374,10 +374,10 @@ Restart any running Claude Code session after the first install so it picks up t
 | `1` / `2` | Switch between Traces and Services tabs |
 | `j` / `k` | Navigate up/down |
 | `Enter` | Open trace waterfall visualizer |
-| `Esc` / `Backspace` | Go back |
+| `q` / `Esc` / `Backspace` | Go back (leave trace view, or clear active filters) |
 | `c` | Add comment (in trace view) |
 | `Space` | Pause/resume live updates |
-| `q` | Quit |
+| `Ctrl-C` | Quit |
 
 ## CLI Reference
 

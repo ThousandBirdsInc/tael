@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
@@ -712,15 +712,17 @@ impl App {
 
         // Normal mode
         match code {
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-                return None;
-            }
-            KeyCode::Esc => {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                // Back button: leave the detail view, otherwise clear filters.
+                // Only ctrl-c exits the TUI entirely.
                 if self.tab == Tab::Detail {
                     self.tab = self.prev_tab;
                 } else {
-                    self.should_quit = true;
+                    self.filter_text.clear();
+                    self.table_state.select(None);
+                    self.services_state.select(None);
+                    self.timeline_state.select(None);
+                    self.eval_state.select(None);
                 }
             }
             KeyCode::Char('1') => {
@@ -2452,9 +2454,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else if app.tab == Tab::Detail {
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
             Span::raw(":quit  "),
-            Span::styled("esc", Style::default().fg(Color::Cyan)),
+            Span::styled("q/esc", Style::default().fg(Color::Cyan)),
             Span::raw(":back  "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(":navigate  "),
@@ -2465,7 +2467,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else if app.tab == Tab::Timeline {
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
             Span::raw(":quit  "),
             Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
             Span::raw(":tab  "),
@@ -2480,7 +2482,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(":filter  "),
             if !app.filter_text.is_empty() {
-                Span::styled("\\", Style::default().fg(Color::Cyan))
+                Span::styled("q/\\", Style::default().fg(Color::Cyan))
             } else {
                 Span::raw("")
             },
@@ -2492,7 +2494,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else if app.tab == Tab::Services {
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
             Span::raw(":quit  "),
             Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
             Span::raw(":tab  "),
@@ -2503,7 +2505,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("space", Style::default().fg(Color::Cyan)),
             Span::raw(":pause  "),
             if !app.filter_text.is_empty() {
-                Span::styled("\\", Style::default().fg(Color::Cyan))
+                Span::styled("q/\\", Style::default().fg(Color::Cyan))
             } else {
                 Span::raw("")
             },
@@ -2515,7 +2517,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Cyan)),
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
             Span::raw(":quit  "),
             Span::styled("1/2/3", Style::default().fg(Color::Cyan)),
             Span::raw(":tab  "),
@@ -2548,7 +2550,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw("")
             },
             if !app.filter_text.is_empty() {
-                Span::styled("\\", Style::default().fg(Color::Cyan))
+                Span::styled("q/\\", Style::default().fg(Color::Cyan))
             } else {
                 Span::raw("")
             },
@@ -2652,7 +2654,12 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     if let Event::Key(key) = event::read()? {
                         if key.kind == KeyEventKind::Press {
                             let current_tab = app.tab;
-                            match app.handle_key(key.code) {
+                            let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+                                && key.code == KeyCode::Char('c');
+                            if ctrl_c {
+                                app.should_quit = true;
+                            }
+                            match if ctrl_c { None } else { app.handle_key(key.code) } {
                                 Some("load_trace") => {
                                     let trace_id = if current_tab == Tab::Timeline {
                                         app.timeline_state.selected().and_then(|i| {
