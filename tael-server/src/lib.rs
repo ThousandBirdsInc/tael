@@ -6,6 +6,7 @@
 //! server in quiet mode for in-process integrations. [`ServerConfig`] configures
 //! the listeners and storage.
 
+pub mod alerts;
 mod api;
 pub mod auth;
 mod cluster;
@@ -132,6 +133,73 @@ fn spawn_span_compactor(
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => tracing::warn!(error = %e, "maintenance failed"),
                 Err(e) => tracing::warn!(error = %e, "maintenance task panicked"),
+            }
+        }
+    });
+}
+
+/// Evaluate alert rules on a schedule and deliver the resulting transitions.
+///
+/// Span-derived series are written before each pass so a rule can reference
+/// error rate or p95 latency without a service first emitting them as metrics.
+fn spawn_alert_evaluator(
+    store: Arc<dyn Store>,
+    alerts: Arc<alerts::AlertStore>,
+    interval_secs: u64,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            tick.tick().await;
+            if alerts.list().is_empty() {
+                continue;
+            }
+
+            // Derivation and evaluation both hit storage synchronously.
+            let derived = {
+                let store = Arc::clone(&store);
+                let alerts = Arc::clone(&alerts);
+                tokio::task::spawn_blocking(move || {
+                    // The window matches the shortest rule window so derived
+                    // points stay fresh enough for every rule to see them.
+                    let window = alerts
+                        .list()
+                        .iter()
+                        .map(|r| r.window_seconds)
+                        .min()
+                        .unwrap_or(300);
+                    let points = alerts::span_derived_points(store.as_ref(), window)?;
+                    store.insert_metrics(&points)?;
+                    anyhow::Ok(alerts.evaluate_all(store.as_ref(), chrono::Utc::now()))
+                })
+                .await
+            };
+
+            let events = match derived {
+                Ok(Ok(events)) => events,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "alert evaluation pass failed");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "alert evaluation task panicked");
+                    continue;
+                }
+            };
+
+            for event in events {
+                tracing::info!(
+                    rule = %event.rule,
+                    state = ?event.state,
+                    "alert state changed"
+                );
+                let rules = alerts.list();
+                let Some(rule) = rules.iter().find(|r| r.name == event.rule) else {
+                    continue;
+                };
+                for sink in &rule.sinks {
+                    alerts::deliver(&event, sink).await;
+                }
             }
         }
     });
@@ -368,6 +436,10 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     };
     let bus = Arc::new(SpanBus::new()?);
     let log_bus = Arc::new(LogBus::new()?);
+    let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
+    // Evaluate more often than the compaction pass: an alert is only useful if
+    // it fires close to when the condition started.
+    spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
 
     tracing::info!(
         otlp_grpc = %config.otlp_grpc_addr,
@@ -434,10 +506,11 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let socket = config.rest_api_socket.clone();
         let otlp = otlp_services.clone();
         let auth = Arc::clone(&auth_state);
+        let alerts = Arc::clone(&alert_store);
         async move {
             // OTLP/HTTP is mounted here as well as on its own listener, so a
             // deployment that can expose only one port still accepts it.
-            let app = api::rest::router(store, blobs, bus, log_bus, cluster)
+            let app = api::rest::router(store, blobs, bus, log_bus, cluster, alerts)
                 .merge(ingest::otlp_http::router(otlp))
                 .layer(axum::middleware::from_fn_with_state(
                     auth,

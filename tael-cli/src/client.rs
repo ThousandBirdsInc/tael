@@ -179,6 +179,76 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn create_alert(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/alerts", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_alerts(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/alerts", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn delete_alert(&self, name: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/v1/alerts/{name}", self.base_url))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn alert_events(&self, limit: u32) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/alerts/events", self.base_url))
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Subscribe to the live alert feed. Reconnects on transport failure so a
+    /// long-running `--follow` survives a server restart.
+    pub fn subscribe_alerts(&self) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let http = self.http.clone();
+        let url = format!("{}/api/v1/alerts/live", self.base_url);
+        tokio::spawn(async move {
+            loop {
+                match sse_lines(&http, &url, &tx).await {
+                    Ok(()) => break,
+                    Err(_) => {
+                        if tx.is_closed() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        });
+        rx
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http
@@ -584,5 +654,29 @@ async fn sse_read_loop(
         }
     }
 
+    Ok(())
+}
+
+/// Read `data:` lines from an SSE endpoint until the stream ends or the
+/// receiver is dropped. Shared by the alert feed; the trace feed has its own
+/// loop because it also applies server-side filters.
+async fn sse_lines(http: &Client, url: &str, tx: &mpsc::UnboundedSender<String>) -> Result<()> {
+    let mut response = http.get(url).send().await?.error_for_status()?;
+    let mut buffer = String::new();
+    while let Some(chunk) = response.chunk().await? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buffer.find("\n\n") {
+            let block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+            for line in block.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() && tx.send(data.to_string()).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

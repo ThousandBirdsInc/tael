@@ -37,6 +37,8 @@ struct AppState {
     /// Standby-side epoch gate for WAL replication (the coordinator's fencer).
     /// `None` keeps replication unfenced (single leader / tests).
     wal_fencer: Option<Arc<EpochFencer>>,
+    /// Alert rules and their live event feed.
+    alerts: Arc<crate::alerts::AlertStore>,
 }
 
 pub fn router(
@@ -45,6 +47,7 @@ pub fn router(
     bus: Arc<SpanBus>,
     log_bus: Arc<LogBus>,
     cluster: Option<Arc<ClusterCoordinator>>,
+    alerts: Arc<crate::alerts::AlertStore>,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -54,6 +57,7 @@ pub fn router(
         log_bus,
         cluster,
         wal_fencer,
+        alerts,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -73,6 +77,10 @@ pub fn router(
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
         .route("/api/v1/sql", get(query_sql))
+        .route("/api/v1/alerts", get(list_alerts).post(create_alert))
+        .route("/api/v1/alerts/{name}", axum::routing::delete(delete_alert))
+        .route("/api/v1/alerts/events", get(alert_events))
+        .route("/api/v1/alerts/live", get(live_alerts))
         .route("/api/v1/evals/runs", get(eval_runs))
         .route("/api/v1/evals/runs/{run_id}", get(eval_run))
         .route("/api/v1/evals/runs/{run_id}/cases", get(eval_cases))
@@ -122,6 +130,12 @@ pub fn dd_router(
         log_bus,
         cluster: None,
         wal_fencer: None,
+        // The dd-trace listener serves ingest only; it never reads alerts, but
+        // shares AppState, so it gets an empty in-memory store.
+        alerts: Arc::new(
+            crate::alerts::AlertStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path alert store cannot fail to open")),
+        ),
     };
     dd_routes()
         .route("/healthz", get(healthz))
@@ -1620,13 +1634,15 @@ mod tests {
 
     fn test_state(store: Arc<OkApplyStore>, fencer: Option<Arc<EpochFencer>>) -> AppState {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
         AppState {
             store,
-            blobs: Arc::new(BlobStore::new(dir.path().to_str().unwrap()).unwrap()),
+            blobs: Arc::new(BlobStore::new(path).unwrap()),
             bus: Arc::new(SpanBus::new().unwrap()),
             log_bus: Arc::new(LogBus::new().unwrap()),
             cluster: None,
             wal_fencer: fencer,
+            alerts: Arc::new(crate::alerts::AlertStore::open(path).unwrap()),
         }
     }
 
@@ -1805,4 +1821,123 @@ mod tests {
         assert_eq!(case.status, "pass");
         assert_eq!(case.trace_id.as_deref(), Some("trace-a"));
     }
+}
+
+// ── Alerts ──────────────────────────────────────────────────────────
+
+/// Rules and their current state. This is the closest thing tael has to a
+/// dashboard, and it is JSON on purpose: the intended consumer polls or
+/// follows it, rather than looking at it.
+async fn list_alerts(State(state): State<AppState>) -> impl IntoResponse {
+    let states = state.alerts.states();
+    let rules: Vec<serde_json::Value> = state
+        .alerts
+        .list()
+        .into_iter()
+        .map(|rule| {
+            let current = states
+                .get(&rule.name)
+                .copied()
+                .unwrap_or(crate::alerts::AlertState::Ok);
+            serde_json::json!({
+                "name": rule.name,
+                "query": rule.query,
+                "for_seconds": rule.for_seconds,
+                "window_seconds": rule.window_seconds,
+                "sinks": rule.sinks,
+                "description": rule.description,
+                "created_at": rule.created_at,
+                "state": current,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "alerts": rules, "count": rules.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAlertPayload {
+    name: String,
+    query: String,
+    #[serde(default)]
+    for_seconds: i64,
+    #[serde(default)]
+    window_seconds: Option<i64>,
+    #[serde(default)]
+    sinks: Vec<crate::alerts::Sink>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn create_alert(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateAlertPayload>,
+) -> impl IntoResponse {
+    let rule = crate::alerts::AlertRule {
+        name: payload.name,
+        query: payload.query,
+        for_seconds: payload.for_seconds,
+        window_seconds: payload.window_seconds.unwrap_or(300),
+        sinks: payload.sinks,
+        description: payload.description,
+        created_at: Utc::now(),
+    };
+    match state.alerts.create(rule.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "created": rule.name, "query": rule.query })),
+        ),
+        // A rejected rule is the caller's mistake (bad query, duplicate name),
+        // not a server fault.
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn delete_alert(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.alerts.delete(&name) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": name }))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no alert named `{name}`") })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AlertEventParams {
+    limit: Option<usize>,
+}
+
+async fn alert_events(
+    State(state): State<AppState>,
+    Query(params): Query<AlertEventParams>,
+) -> impl IntoResponse {
+    let events = state.alerts.recent_events(params.limit.unwrap_or(50));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "events": events, "count": events.len() })),
+    )
+}
+
+/// Live alert feed. This is the long-poll primitive a babysitting agent blocks
+/// on: connect once and be woken when something changes, instead of polling.
+async fn live_alerts(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.alerts.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|result| result.ok().map(|json| Ok(Event::default().data(json))));
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

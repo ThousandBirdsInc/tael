@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod anomalies;
 pub mod auth;
 pub mod comment;

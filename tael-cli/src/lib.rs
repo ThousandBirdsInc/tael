@@ -313,6 +313,20 @@ pub enum Commands {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Manage alert rules
+    Alert {
+        #[command(subcommand)]
+        action: AlertAction,
+    },
+    /// Read the alert feed; --follow blocks until something fires
+    Alerts {
+        /// Max recent events to print before following
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Block and stream new events as they happen
+        #[arg(long)]
+        follow: bool,
+    },
     /// Inspect or scaffold the retention and compaction config
     Config {
         #[command(subcommand)]
@@ -322,6 +336,43 @@ pub enum Commands {
     Mcp {
         #[command(subcommand)]
         action: McpAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AlertAction {
+    /// Create an alert rule
+    Create {
+        /// Rule name (unique)
+        #[arg(long)]
+        name: String,
+        /// PromQL-subset expression, normally ending in a comparison.
+        /// Span-derived series are available without instrumenting metrics:
+        /// tael:span_error_rate, tael:span_p95_ms, tael:span_p99_ms,
+        /// tael:span_count, tael:span_error_count — each labelled by service.
+        /// Example: 'tael:span_error_rate{service="api"} > 0.05'
+        #[arg(long)]
+        query: String,
+        /// How long the condition must hold continuously before firing
+        /// (e.g. 5m). Default 0 — fire on the first satisfied evaluation.
+        #[arg(long = "for")]
+        for_duration: Option<String>,
+        /// Lookback window used when evaluating the query (default 5m)
+        #[arg(long)]
+        window: Option<String>,
+        /// Where to deliver, repeatable: webhook=<url> or exec=<command>
+        #[arg(long = "sink")]
+        sinks: Vec<String>,
+        /// Human-readable note carried on every event
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List alert rules and their current state
+    List,
+    /// Delete an alert rule
+    Delete {
+        /// Rule name
+        name: String,
     },
 }
 
@@ -1267,6 +1318,35 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 mcp::serve(client, &server_url).await?;
             }
         },
+        Commands::Alert { action } => match action {
+            AlertAction::Create {
+                name,
+                query,
+                for_duration,
+                window,
+                sinks,
+                description,
+            } => {
+                commands::alert::create(
+                    &client,
+                    &opts.format,
+                    &name,
+                    &query,
+                    for_duration.as_deref(),
+                    window.as_deref(),
+                    &sinks,
+                    description.as_deref(),
+                )
+                .await?;
+            }
+            AlertAction::List => commands::alert::list(&client, &opts.format).await?,
+            AlertAction::Delete { name } => {
+                commands::alert::delete(&client, &opts.format, &name).await?
+            }
+        },
+        Commands::Alerts { limit, follow } => {
+            commands::alert::feed(&client, &opts.format, limit, follow).await?;
+        }
         Commands::Skill { action } => match action {
             SkillAction::Install { project, force } => {
                 commands::skill::install(project, force)?;

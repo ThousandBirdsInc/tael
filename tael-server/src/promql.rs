@@ -51,6 +51,49 @@ pub enum Expr {
         /// one result per distinct label set.
         by: Vec<String>,
     },
+    /// `<expr> <op> <scalar>` — keep only the series satisfying the comparison.
+    /// Top level only; this exists so an alert rule can be written as one
+    /// expression, not so series can be compared to each other.
+    Compare {
+        inner: Box<Expr>,
+        op: CompareOp,
+        threshold: f64,
+    },
+}
+
+/// Scalar comparison used by [`Expr::Compare`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Eq,
+    NotEq,
+}
+
+impl CompareOp {
+    pub fn test(self, value: f64, threshold: f64) -> bool {
+        match self {
+            CompareOp::Gt => value > threshold,
+            CompareOp::Gte => value >= threshold,
+            CompareOp::Lt => value < threshold,
+            CompareOp::Lte => value <= threshold,
+            CompareOp::Eq => (value - threshold).abs() < f64::EPSILON,
+            CompareOp::NotEq => (value - threshold).abs() >= f64::EPSILON,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompareOp::Gt => ">",
+            CompareOp::Gte => ">=",
+            CompareOp::Lt => "<",
+            CompareOp::Lte => "<=",
+            CompareOp::Eq => "==",
+            CompareOp::NotEq => "!=",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +292,24 @@ impl<'a> Parser<'a> {
         Ok(seconds)
     }
 
+    /// Consume a comparison operator if one is next. Two-character forms are
+    /// tried first so `>=` is not read as `>` followed by `=`.
+    fn parse_compare_op(&mut self) -> Option<CompareOp> {
+        for (lit, op) in [
+            (">=", CompareOp::Gte),
+            ("<=", CompareOp::Lte),
+            ("==", CompareOp::Eq),
+            ("!=", CompareOp::NotEq),
+            (">", CompareOp::Gt),
+            ("<", CompareOp::Lt),
+        ] {
+            if self.eat(lit) {
+                return Some(op);
+            }
+        }
+        None
+    }
+
     /// Parse a bare float literal (currently only a quantile argument).
     fn parse_number(&mut self) -> Result<f64> {
         self.skip_ws();
@@ -372,6 +433,24 @@ pub fn parse(src: &str) -> Result<Expr> {
     let mut p = Parser::new(src);
     let expr = p.parse_expr()?;
     p.skip_ws();
+
+    // A trailing comparison against a scalar is supported at the top level
+    // only. That is what an alert rule is — "this series crossed this line" —
+    // and keeping it out of the grammar's interior avoids implying that
+    // series-to-series comparison works, which it does not.
+    if let Some(op) = p.parse_compare_op() {
+        let threshold = p.parse_number()?;
+        p.skip_ws();
+        if !p.rest().is_empty() {
+            bail!("unexpected trailing input: {}", p.rest());
+        }
+        return Ok(Expr::Compare {
+            inner: Box::new(expr),
+            op,
+            threshold,
+        });
+    }
+
     if !p.rest().is_empty() {
         bail!("unexpected trailing input: {}", p.rest());
     }
@@ -405,6 +484,14 @@ pub fn evaluate(store: &dyn Store, expr: &Expr, lookback_seconds: i64) -> Result
         Expr::HistogramQuantile { phi, selector, by } => {
             eval_histogram_quantile(store, selector, *phi, by, lookback_seconds)
         }
+        Expr::Compare {
+            inner,
+            op,
+            threshold,
+        } => Ok(evaluate(store, inner, lookback_seconds)?
+            .into_iter()
+            .filter(|s| op.test(s.value, *threshold))
+            .collect()),
     }
 }
 
