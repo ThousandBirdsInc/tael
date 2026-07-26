@@ -508,9 +508,15 @@ attribute filtering yet.
 - The default storage engine is `tael-backend` (an LSM hot tier over a
   Parquet cold tier), not DuckDB. DuckDB is a legacy backend behind
   `--features duckdb`.
-- `tael query sql` requires a build with the `duckdb` feature. On a default
-  install it returns an error; use the filter commands, the PromQL subset,
-  and `summarize`/`diff`/`topology` instead.
+- `tael query sql` needs a build with `--features sql` (DataFusion over the
+  default engine) or `--features duckdb` (the legacy backend). Neither is in
+  the default install; the error names both. Column names are identical
+  across the two, so a query is portable. The `spans` table additionally
+  exposes flattened `llm_provider`, `llm_model`, `input_tokens`,
+  `output_tokens`, `total_tokens`, and `cost_usd` columns. SQL execution is
+  in-memory and bounded at 200k rows per table — it is the escape hatch, not
+  the primary read path. Without a SQL build, use the filter commands, the
+  PromQL subset, and `summarize`/`diff`/`topology`.
 - `query_traces` has no secondary indexes: it walks the time index
   newest-first and deserializes every span until the limit fills, so a
   low-selectivity filter over a large window is the slow case. Prefer narrow

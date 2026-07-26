@@ -40,6 +40,9 @@ snap = "1"
 flate2 = "1"
 toml = "0.8"
 regex = "1"
+# SQL over the default backend. default-features off keeps the dependency to the
+# planner and in-memory execution: no object-store readers, no compression codecs.
+datafusion = { version = "54", default-features = false, features = ["sql", "unicode_expressions", "datetime_expressions"] }
 bytes = "1"
 sha2 = "0.10"
 fjall = "3"

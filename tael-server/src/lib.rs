@@ -17,6 +17,8 @@ mod promql;
 pub mod retention;
 pub mod scoring;
 mod span_bus;
+#[cfg(feature = "sql")]
+pub mod sql;
 mod storage;
 pub mod suites;
 

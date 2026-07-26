@@ -592,14 +592,36 @@ impl Store for TaelBackend {
         }
     }
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        // DataFusion serves SQL on the default build. The DuckDB projection,
+        // when compiled in, keeps serving it instead: that build already
+        // maintains a second copy of everything, and querying it avoids
+        // materializing the tables a second time in memory.
         #[cfg(feature = "duckdb")]
         {
             self.inner.query_sql(sql)
         }
-        #[cfg(not(feature = "duckdb"))]
+        #[cfg(all(not(feature = "duckdb"), feature = "sql"))]
+        {
+            let (trace_query, log_query, metric_query) = crate::sql::source_queries();
+            crate::sql::query(
+                self.query_traces(&trace_query)?,
+                self.query_logs(&log_query)?,
+                self.query_metrics(&metric_query)?,
+                self.list_comments(crate::sql::row_limit() as usize)?,
+                sql,
+            )
+        }
+        #[cfg(all(not(feature = "duckdb"), not(feature = "sql")))]
         {
             let _ = sql;
-            bail!("SQL queries require a build with the `duckdb` feature")
+            bail!(concat!(
+                "this build has no SQL engine. Reinstall with ",
+                "`cargo install tael-cli --features sql` (DataFusion over the ",
+                "default storage engine) or `--features duckdb` (the legacy ",
+                "backend). Without one, use `summarize`, `diff`, `topology`, ",
+                "or the PromQL subset — between them they cover most of what ",
+                "SQL gets reached for."
+            ))
         }
     }
 

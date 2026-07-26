@@ -383,15 +383,23 @@ tael live --eval-run <run_id>
 
 As an agent, prefer the JSON eval commands over the TUI unless the user explicitly asks for an interactive view.
 
-### SQL escape hatch (advanced, and not on a default install)
+### SQL escape hatch (advanced, and opt-in at build time)
 
-**Check this before reaching for it.** `tael query sql` requires a server built
-with `--features duckdb`. On a default install — which is what `cargo install
-tael-cli`, `cargo binstall`, and the Docker image all produce — it returns
-`{"error": "SQL queries require a build with the duckdb feature"}` and exits 3.
+**Check this before reaching for it.** `tael query sql` needs a server built
+with either `--features sql` (DataFusion over the default storage engine) or
+`--features duckdb` (the legacy backend). A plain `cargo install tael-cli`
+has neither, and the error names both.
+
+DataFusion roughly doubles the binary, which is why it is opt-in rather than
+default. Install it with `cargo install tael-cli --features sql` when the
+structured commands genuinely can't express the cut you need.
 
 Where it is available, it runs read-only SQL over the telemetry tables
-(`spans`, `logs`, `metrics`, `trace_comments`):
+(`spans`, `logs`, `metrics`, `trace_comments`), with identical column names on
+both backends so a query is portable between them. Span rows additionally
+carry flattened `llm_provider`, `llm_model`, `input_tokens`, `output_tokens`,
+`total_tokens`, and `cost_usd` columns, so token and cost aggregations don't
+need JSON surgery:
 
 ```bash
 tael --format json query sql "SELECT service, COUNT(*) AS n FROM spans WHERE status = 'error' GROUP BY service ORDER BY n DESC"
@@ -399,9 +407,10 @@ tael --format json query sql "SELECT service, COUNT(*) AS n FROM spans WHERE sta
 
 Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected.
 
-On a default install, cover the same ground with `summarize` (aggregates by
+Without a SQL build, cover the same ground with `summarize` (aggregates by
 service and operation), `diff` (window comparison), `topology` (cross-service
 call counts and error rates), and the PromQL subset with `sum by (...)`.
+Between them these answer most of what SQL gets reached for.
 
 ## Instrumenting apps to export to tael
 
@@ -537,7 +546,7 @@ get trace        → {"trace_id", "span_count", "spans": [...]}
 query logs       → {"logs": [...], "count": N}
 query metrics    → {"metrics": [...], "count": N}                  (filter mode)
 query metrics    → {"query", "series": [...], "count": N}          (--query mode)
-query sql        → {"rows": [...], "count": N}   (needs a --features duckdb build)
+query sql        → {"rows": [...], "count": N}   (needs a --features sql or --features duckdb build)
 comment list     → {"comments": [...], "count": N}
 summarize        → {"window_seconds", "traces", "top_services", "top_error_operations", "logs", "metrics"}
 anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}

@@ -37,6 +37,7 @@ snap.workspace = true
 flate2.workspace = true
 toml.workspace = true
 regex.workspace = true
+datafusion = { workspace = true, optional = true }
 rand.workspace = true
 bytes.workspace = true
 sha2.workspace = true
@@ -53,6 +54,15 @@ sqlx = { workspace = true, optional = true }
 [features]
 default = []
 duckdb = ["dep:duckdb"]
+# SQL query surface on the default tael-backend engine, via DataFusion.
+#
+# Off by default despite closing a real gap: DataFusion is a large dependency
+# — measured at roughly double the debug binary (448 MB to 983 MB) — and
+# tael's pitch is one small binary. An escape hatch used occasionally should
+# not be what makes the common install heavy. `--features sql` and
+# `--features duckdb` both provide `query sql`; without either, the error
+# names them.
+sql = ["dep:datafusion"]
 # Cloud deployment surface: native GCS object storage (cold tier + blobs) and
 # Postgres-backed comments. Off by default so the single-binary local build has
 # zero extra dependencies and byte-identical behavior. Selected at runtime via
