@@ -1,6 +1,6 @@
 # Gap-Closure Roadmap: Competing with Eval-First SaaS Platforms
 
-Status: proposed
+Status: partially implemented — see **Implementation status** below
 Extends: [DESIGN.md](../DESIGN.md) milestones M4+, [tael-backend-design.md](tael-backend-design.md), [tael-evals-design.md](tael-evals-design.md)
 
 ## Context
@@ -26,6 +26,48 @@ The gaps fall into four groups:
 This document plans closure of all four groups **without compromising the
 thesis**. Every feature below is designed CLI-first with JSON output, runs in
 the same single binary, and treats an AI agent as the primary operator.
+
+## Implementation status
+
+Tracked against the phases below. Everything marked done ships with tests and
+was verified end to end against a running server.
+
+**Done**
+
+| Item | What landed |
+|---|---|
+| A1 auth | API keys with reader/writer/admin, salted-digest keystore, one middleware over REST/OTLP-HTTP/remote-write/dd-trace plus a gRPC interceptor, live keystore reload, fail-closed on non-loopback binds |
+| A2 OTLP/HTTP | `:4318` listener and the same routes on the REST listener, gzip, 415 naming the supported content type for OTLP/JSON |
+| A3 histograms | Bucket layout retained (explicit + exponential, converted at ingest), aggregation temporality stored, `histogram_quantile(phi, selector)` with `by (...)`; also fixed the PromQL lexer rejecting dotted OTel metric names |
+| A4 retention | Per-signal TOML policy with flag > env > file > default, per-signal cold-partition drops (which also fixed metric rollups never expiring), `tael config show/init` |
+| A5 benchmarks | `tael-backend` ingest/query/aggregation/compaction benches; BENCHMARKS.md leads with them and marks the DuckDB numbers as non-comparable |
+| B1 MCP | `tael mcp serve` over stdio, 19 tools mapped onto existing endpoints, SKILL.md and llm.txt as resources |
+| B2 exit codes | Category codes 0–6, `watch --exit-on` with absolute and baseline-relative thresholds, `query traces --explain` |
+| B3 search | Substring (`k~=v`) and regex (`k=~v`) attribute matchers; the text index now covers log bodies and span attribute values, not just LLM payloads |
+| B4 M3 commands | `topology`, `diff`, `get metric` |
+| C1 case suites | `eval suite push/pull/snapshot/list/diff`, content-addressed cases, content-derived immutable snapshot ids, byte-stable canonical JSONL round trip |
+| C2 online scoring | `score rule create/list/delete`, deterministic per-trace sampling, per-rule scored memory, scorer contract identical to `eval run`, progress and last-error reporting |
+| C3 alerting | Rules with `for` semantics, span-derived series needing no instrumentation, webhook/exec/SSE sinks, transition-only delivery; PromQL gained top-level scalar comparison |
+| C4 review | `review request/list/submit`, comment-backed, append-only with derived state, option validation, eval-case linkage |
+
+**Not done**
+
+| Item | Note |
+|---|---|
+| B5 SQL on the default backend | Discovered during this work: `tael query sql` needs a `--features duckdb` build and errors on a default install, while SKILL.md taught it as the general aggregation escape hatch. The docs now say so plainly and point at the alternatives, but the capability gap is real and unclosed. |
+| C4 review in the TUI/GUI | The CLI loop works; the Review tab described in the plan is not built. |
+| C5 clustering | `tael similar` / `tael cluster` and the embedding index are untouched. |
+| D1 multi-tenancy | Keys carry a tenant claim and storage is tenant-partitioned, but no read/write path filters on it yet. |
+| D2 S3 cold tier + HA hardening | GCS still the only object backend; the HA failover test is unwritten. |
+| D3 packaging | No Homebrew tap, no `install.sh`, Windows client unchanged. |
+| D4 CI contract check | Docs were refreshed by hand; the generated-reference check that would keep them from drifting again is not in CI. |
+
+**Findings worth acting on separately.** The A5 benchmarks turned up three
+things the roadmap did not anticipate: unbatched ingest is 367 spans/s because
+the WAL fsync barrier dominates below ~1000 records per call, `query_traces`
+has no secondary indexes so cost scales inversely with filter selectivity, and
+`query_summary` takes 65ms per 10k spans — which puts a million-span hot tier
+into multi-second territory for the command SKILL.md tells agents to run first.
 
 ## Thesis guardrails (won't build)
 
