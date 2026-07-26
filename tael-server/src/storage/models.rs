@@ -333,6 +333,19 @@ pub struct HistogramBuckets {
     pub temporality: Temporality,
 }
 
+/// A 5-minute downsampled metric aggregate, as returned by the query API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricRollup {
+    pub bucket_start: DateTime<Utc>,
+    pub service: String,
+    pub name: String,
+    pub min: f64,
+    pub max: f64,
+    pub avg: f64,
+    pub sum: f64,
+    pub count: i64,
+}
+
 /// How a histogram's counts accumulate over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

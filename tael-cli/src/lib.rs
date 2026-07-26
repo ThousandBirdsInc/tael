@@ -42,6 +42,11 @@
 //! # }
 //! ```
 
+// CLI command functions take one parameter per flag on purpose: the
+// signature is the command's surface, and grouping flags into a struct hides
+// which ones a command actually accepts.
+#![allow(clippy::too_many_arguments)]
+
 pub mod client;
 pub mod commands;
 pub mod exit;
@@ -576,6 +581,11 @@ pub enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "500")]
         limit: u32,
+        /// Read 5-minute downsampled rollups instead of raw points. Rollups
+        /// are retained far longer than raw data, so this is what answers a
+        /// long-range trend question. Each bucket carries min/max/avg/sum/count.
+        #[arg(long)]
+        rollups: bool,
     },
     /// Search and filter logs
     Logs {
@@ -1197,6 +1207,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 metric_type,
                 last,
                 limit,
+                rollups,
             } => {
                 commands::query::metrics(
                     &client,
@@ -1207,6 +1218,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     metric_type,
                     last,
                     limit,
+                    rollups,
                 )
                 .await?;
             }

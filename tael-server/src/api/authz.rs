@@ -208,6 +208,9 @@ pub async fn require_auth(
 
 /// gRPC counterpart for the OTLP ingest listener. Ingest is a write, so every
 /// export needs at least [`Role::Writer`].
+#[allow(clippy::result_large_err)]
+// `tonic::Status` is the interceptor signature tonic requires; boxing it would
+// not compile against the trait.
 pub fn grpc_interceptor(
     state: Arc<AuthState>,
 ) -> impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {

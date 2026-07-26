@@ -4570,6 +4570,7 @@ dependencies = [
  "humantime",
  "hyper",
  "itertools 0.13.0",
+ "md-5",
  "parking_lot",
  "percent-encoding",
  "quick-xml 0.37.5",

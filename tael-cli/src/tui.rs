@@ -646,13 +646,13 @@ impl App {
                     picker.state.select(Some(i));
                 }
                 KeyCode::Enter => {
-                    if let Some(idx) = picker.state.selected() {
-                        if let Some(key) = picker.keys.get(idx).cloned() {
-                            if let Some(pos) = self.pinned_columns.iter().position(|k| *k == key) {
-                                self.pinned_columns.remove(pos);
-                            } else {
-                                self.pinned_columns.push(key);
-                            }
+                    if let Some(idx) = picker.state.selected()
+                        && let Some(key) = picker.keys.get(idx).cloned()
+                    {
+                        if let Some(pos) = self.pinned_columns.iter().position(|k| *k == key) {
+                            self.pinned_columns.remove(pos);
+                        } else {
+                            self.pinned_columns.push(key);
                         }
                     }
                 }
@@ -1462,28 +1462,28 @@ fn draw_selected_span_properties(frame: &mut Frame, area: Rect, app: &App) {
         ]),
     ];
 
-    if let Some(obj) = span.attributes.as_object() {
-        if !obj.is_empty() {
-            let mut attr_spans: Vec<Span> = vec![Span::styled(
-                " attrs: ",
-                Style::default().fg(Color::DarkGray),
-            )];
-            for (i, (k, v)) in obj.iter().enumerate() {
-                if i > 0 {
-                    attr_spans.push(Span::raw("  "));
-                }
-                let val = match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                attr_spans.push(Span::styled(
-                    format!("{k}="),
-                    Style::default().fg(Color::Yellow),
-                ));
-                attr_spans.push(Span::raw(val));
+    if let Some(obj) = span.attributes.as_object()
+        && !obj.is_empty()
+    {
+        let mut attr_spans: Vec<Span> = vec![Span::styled(
+            " attrs: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        for (i, (k, v)) in obj.iter().enumerate() {
+            if i > 0 {
+                attr_spans.push(Span::raw("  "));
             }
-            lines.push(Line::from(attr_spans));
+            let val = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            attr_spans.push(Span::styled(
+                format!("{k}="),
+                Style::default().fg(Color::Yellow),
+            ));
+            attr_spans.push(Span::raw(val));
         }
+        lines.push(Line::from(attr_spans));
     }
 
     if let Some(events) = span.events.as_array() {
@@ -1950,7 +1950,7 @@ fn draw_trace_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     let comment_height = if app.comments.is_empty() && !has_input {
         0
     } else {
-        (app.comments.len() as u16 + 2).min(8).max(3) + if has_input { 1 } else { 0 }
+        (app.comments.len() as u16 + 2).clamp(3, 8) + if has_input { 1 } else { 0 }
     };
 
     let chunks = Layout::vertical([
@@ -2147,28 +2147,28 @@ fn draw_span_detail(frame: &mut Frame, area: Rect, app: &App) {
     ])];
 
     // Attributes on one line if small, multi-line if large
-    if let Some(obj) = span.attributes.as_object() {
-        if !obj.is_empty() {
-            let mut attr_spans: Vec<Span> = vec![Span::styled(
-                " attrs: ",
-                Style::default().fg(Color::DarkGray),
-            )];
-            for (i, (k, v)) in obj.iter().enumerate() {
-                if i > 0 {
-                    attr_spans.push(Span::raw("  "));
-                }
-                let val = match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                attr_spans.push(Span::styled(
-                    format!("{k}="),
-                    Style::default().fg(Color::Yellow),
-                ));
-                attr_spans.push(Span::raw(val));
+    if let Some(obj) = span.attributes.as_object()
+        && !obj.is_empty()
+    {
+        let mut attr_spans: Vec<Span> = vec![Span::styled(
+            " attrs: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        for (i, (k, v)) in obj.iter().enumerate() {
+            if i > 0 {
+                attr_spans.push(Span::raw("  "));
             }
-            lines.push(Line::from(attr_spans));
+            let val = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            attr_spans.push(Span::styled(
+                format!("{k}="),
+                Style::default().fg(Color::Yellow),
+            ));
+            attr_spans.push(Span::raw(val));
         }
+        lines.push(Line::from(attr_spans));
     }
 
     // Events
@@ -2321,73 +2321,73 @@ fn draw_span_viewer(frame: &mut Frame, area: Rect, viewer: &SpanViewer) {
         }
     };
 
-    if let Some(obj) = span.attributes.as_object() {
-        if !obj.is_empty() {
+    if let Some(obj) = span.attributes.as_object()
+        && !obj.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "── Attributes ──",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        for k in keys {
             lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "── Attributes ──",
+            lines.push(Line::from(vec![Span::styled(
+                format!("{k}:"),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
-            ));
-            let mut keys: Vec<&String> = obj.keys().collect();
-            keys.sort();
-            for k in keys {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{k}:"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-                let val = render_value(&obj[k]);
-                for vline in val.split('\n') {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(vline.to_string()),
-                    ]));
-                }
+            )]));
+            let val = render_value(&obj[k]);
+            for vline in val.split('\n') {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(vline.to_string()),
+                ]));
             }
         }
     }
 
-    if let Some(events) = span.events.as_array() {
-        if !events.is_empty() {
+    if let Some(events) = span.events.as_array()
+        && !events.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "── Events ──",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for evt in events {
+            let name = evt["name"].as_str().unwrap_or("-");
+            let ts = evt["timestamp"].as_str().unwrap_or("");
             lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "── Events ──",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            for evt in events {
-                let name = evt["name"].as_str().unwrap_or("-");
-                let ts = evt["timestamp"].as_str().unwrap_or("");
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("[{name}] "),
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(ts.to_string(), Style::default().fg(Color::DarkGray)),
-                ]));
-                if let Some(attrs) = evt["attributes"].as_object() {
-                    let mut keys: Vec<&String> = attrs.keys().collect();
-                    keys.sort();
-                    for k in keys {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("[{name}] "),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(ts.to_string(), Style::default().fg(Color::DarkGray)),
+            ]));
+            if let Some(attrs) = evt["attributes"].as_object() {
+                let mut keys: Vec<&String> = attrs.keys().collect();
+                keys.sort();
+                for k in keys {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("{k}:"), Style::default().fg(Color::Yellow)),
+                    ]));
+                    let val = render_value(&attrs[k]);
+                    for vline in val.split('\n') {
                         lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(format!("{k}:"), Style::default().fg(Color::Yellow)),
+                            Span::raw("    "),
+                            Span::raw(vline.to_string()),
                         ]));
-                        let val = render_value(&attrs[k]);
-                        for vline in val.split('\n') {
-                            lines.push(Line::from(vec![
-                                Span::raw("    "),
-                                Span::raw(vline.to_string()),
-                            ]));
-                        }
                     }
                 }
             }
@@ -2651,9 +2651,9 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             ready = tokio::task::spawn_blocking(|| {
                 event::poll(Duration::from_millis(50)).unwrap_or(false)
             }) => {
-                if ready.unwrap_or(false) {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
+                if ready.unwrap_or(false)
+                    && let Event::Key(key) = event::read()?
+                        && key.kind == KeyEventKind::Press {
                             let current_tab = app.tab;
                             let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
                                 && key.code == KeyCode::Char('c');
@@ -2690,8 +2690,6 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                 _ => {}
                             }
                         }
-                    }
-                }
             }
         }
 

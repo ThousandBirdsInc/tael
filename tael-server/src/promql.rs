@@ -1,14 +1,18 @@
 //! Minimal PromQL subset for instant queries over stored metrics.
 //!
 //! Supported syntax:
-//!   - Bare selector:         `metric_name`
-//!   - Labelled selector:     `metric_name{label="value", other!="x"}`
-//!   - Rate over range:       `rate(metric_name{...}[5m])`
-//!   - Aggregators:           `sum|avg|min|max|count(expr)`
-//!                            `sum by (label1,label2) (expr)`
-//!                            `sum(expr) by (label1,label2)`
-//!   - Histogram quantile:    `histogram_quantile(0.95, metric{...})`
-//!                            `histogram_quantile(0.99, metric) by (service)`
+//!
+//! ```text
+//! metric_name                                  bare selector
+//! metric_name{label="value", other!="x"}       labelled selector
+//! rate(metric_name{...}[5m])                   rate over a range
+//! sum|avg|min|max|count(expr)                  aggregators
+//! sum by (label1,label2) (expr)
+//! sum(expr) by (label1,label2)
+//! histogram_quantile(0.95, metric{...})        quantile from stored buckets
+//! histogram_quantile(0.99, metric) by (service)
+//! <expr> > 0.05                                top-level scalar comparison
+//! ```
 //!
 //! Note that `histogram_quantile` takes a metric selector, not a fan of
 //! `le`-labelled bucket series as in Prometheus — tael stores each data point's
@@ -84,6 +88,8 @@ impl CompareOp {
         }
     }
 
+    /// Rendered form, used when echoing a rule's comparison back to a caller.
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             CompareOp::Gt => ">",
@@ -727,9 +733,12 @@ fn eval_rate(store: &dyn Store, sel: &Selector, range_seconds: i64) -> Result<Ve
     Ok(out)
 }
 
+/// One aggregation group: the labels it is keyed by, the values collected into
+/// it, and the newest timestamp seen (which becomes the result's timestamp).
+type AggGroup = (HashMap<String, String>, Vec<f64>, DateTime<Utc>);
+
 fn aggregate(input: Vec<Series>, op: AggOp, by: &[String]) -> Vec<Series> {
-    let mut groups: HashMap<String, (HashMap<String, String>, Vec<f64>, DateTime<Utc>)> =
-        HashMap::new();
+    let mut groups: HashMap<String, AggGroup> = HashMap::new();
 
     for s in input {
         let mut group_labels: HashMap<String, String> = HashMap::new();

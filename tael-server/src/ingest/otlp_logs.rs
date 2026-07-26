@@ -126,17 +126,17 @@ impl LogsService for OtlpLogsService {
 
                     let mut attributes = HashMap::new();
                     for attr in &otel_log.attributes {
-                        if let Some(ref value) = attr.value {
-                            if let Some(ref val) = value.value {
-                                let s = match val {
+                        if let Some(ref value) = attr.value
+                            && let Some(ref val) = value.value
+                        {
+                            let s = match val {
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s) => s.clone(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) => i.to_string(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d) => d.to_string(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b) => b.to_string(),
                                     _ => continue,
                                 };
-                                attributes.insert(attr.key.clone(), s);
-                            }
+                            attributes.insert(attr.key.clone(), s);
                         }
                     }
 

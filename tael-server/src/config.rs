@@ -114,7 +114,7 @@ impl ObjectStoreConfig {
     /// Whether the blob store is shared across nodes (object storage rather
     /// than a node-local directory). Drives the blob-GC single-owner guard.
     pub fn blobs_shared(&self) -> bool {
-        self.blobs == StoreLocation::Gcs
+        self.blobs.is_shared()
     }
 }
 

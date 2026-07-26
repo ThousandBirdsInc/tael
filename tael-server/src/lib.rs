@@ -6,6 +6,15 @@
 //! server in quiet mode for in-process integrations. [`ServerConfig`] configures
 //! the listeners and storage.
 
+// `from_str` on these enums predates and mirrors the codebase's own
+// convention; renaming them to satisfy the trait-confusion lint would be a
+// breaking change to a public API for no behavioral gain.
+#![allow(clippy::should_implement_trait)]
+// Constructors that mirror a wide CLI flag set or a REST router's dependency
+// list are long by nature; bundling them into a struct would only move the
+// argument count somewhere less visible.
+#![allow(clippy::too_many_arguments)]
+
 pub mod alerts;
 mod api;
 pub mod auth;
@@ -411,13 +420,13 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         "retention policy resolved"
     );
 
-    // Blob store: local filesystem by default; GCS when configured (opt-in,
-    // requires the `cloud` feature — otherwise this fails loudly).
+    // Blob store: local filesystem by default; object storage when configured
+    // (opt-in, requires the `cloud` feature — otherwise this fails loudly).
     let blobs = Arc::new(match config.object_store.blobs {
         StoreLocation::Fs => BlobStore::new(&config.data_dir)?,
-        StoreLocation::Gcs => {
+        location => {
             let backend = open_object_backend(
-                StoreLocation::Gcs,
+                location,
                 Path::new(&config.data_dir).join("blobs").as_path(),
                 config.object_store.blob_bucket.as_deref(),
             )?;
@@ -498,12 +507,12 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                         "WAL replication enabled: shipping to standbys (leader)"
                     );
                 }
-                // Cold tier: local filesystem by default; GCS when configured
-                // (opt-in, requires the `cloud` feature).
+                // Cold tier: local filesystem by default; object storage when
+                // configured (opt-in, requires the `cloud` feature).
                 let cold_backend = match config.object_store.cold {
                     StoreLocation::Fs => None,
-                    StoreLocation::Gcs => Some(open_object_backend(
-                        StoreLocation::Gcs,
+                    location => Some(open_object_backend(
+                        location,
                         Path::new(&config.data_dir).join("cold").as_path(),
                         config.object_store.cold_bucket.as_deref(),
                     )?),

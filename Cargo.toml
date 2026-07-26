@@ -55,5 +55,5 @@ chitchat = "0.10"
 # Cloud-only (compiled behind the `cloud` feature): native object storage for
 # the cold tier + blob store, and Postgres for the comments store. None of
 # these are pulled into the default local build.
-object_store = { version = "0.11", features = ["gcp"] }
+object_store = { version = "0.11", features = ["gcp", "aws"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }

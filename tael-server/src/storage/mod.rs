@@ -84,6 +84,24 @@ pub trait Store: Send + Sync {
     /// returning rows as JSON objects.
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
 
+    /// Read 5-minute downsampled metric aggregates.
+    ///
+    /// Rollups outlive raw points by design (a year against thirty days), so
+    /// they are the only way to answer a long-range trend question once raw
+    /// retention has passed. Without a read path they were being written and
+    /// expired but never queried, which made the downsampling pure cost.
+    ///
+    /// Default: unsupported — only the tiered engine keeps rollups.
+    fn query_metric_rollups(
+        &self,
+        _name: Option<&str>,
+        _service: Option<&str>,
+        _last_seconds: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<models::MetricRollup>> {
+        anyhow::bail!("metric rollups are not supported by this storage backend")
+    }
+
     /// Describe how a trace query would execute: which tiers are consulted,
     /// which access path is taken, and how many rows are examined to produce
     /// the result.

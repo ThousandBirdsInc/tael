@@ -427,6 +427,35 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn metric_rollups(
+        &self,
+        name: Option<&str>,
+        service: Option<&str>,
+        last: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(n) = name {
+            params.push(("name", n.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics/rollups", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http
@@ -807,28 +836,21 @@ async fn sse_read_loop(
         .error_for_status()?;
 
     let mut buffer = String::new();
-    loop {
-        match response.chunk().await? {
-            Some(chunk) => {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+    while let Some(chunk) = response.chunk().await? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event_block = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
 
-                    for line in event_block.lines() {
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if !data.is_empty() {
-                                if tx.send(data.to_string()).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
+            for line in event_block.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() && tx.send(data.to_string()).is_err() {
+                        return Ok(());
                     }
                 }
             }
-            None => break,
         }
     }
 

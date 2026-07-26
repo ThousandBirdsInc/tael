@@ -222,18 +222,17 @@ pub async fn score(
             .ok_or_else(|| anyhow::anyhow!("score line {} must be a JSON object", idx + 1))?;
         obj.entry("run_id".to_string())
             .or_insert_with(|| Value::String(run_id.to_string()));
-        if !obj.contains_key("rationale_sha256") {
-            if let Some(rationale) = obj
+        if !obj.contains_key("rationale_sha256")
+            && let Some(rationale) = obj
                 .remove("rationale")
                 .and_then(|v| v.as_str().map(str::to_string))
-            {
-                let blob = client.put_blob(&rationale).await?;
-                if let Some(hash) = blob.get("sha256").and_then(|v| v.as_str()) {
-                    obj.insert(
-                        "rationale_sha256".to_string(),
-                        Value::String(hash.to_string()),
-                    );
-                }
+        {
+            let blob = client.put_blob(&rationale).await?;
+            if let Some(hash) = blob.get("sha256").and_then(|v| v.as_str()) {
+                obj.insert(
+                    "rationale_sha256".to_string(),
+                    Value::String(hash.to_string()),
+                );
             }
         }
         let result = client.add_eval_score(&value).await?;
@@ -406,18 +405,17 @@ async fn chidori_run_ref(client: &TaelClient, trace_id: &str) -> Option<(String,
         let Some(attrs) = span.get("attributes").and_then(|v| v.as_object()) else {
             continue;
         };
-        if run_id.is_none() {
-            if let Some(v) = attrs.get("chidori.run_id").and_then(|v| v.as_str()) {
-                run_id = Some(v.to_string());
-            }
+        if run_id.is_none()
+            && let Some(v) = attrs.get("chidori.run_id").and_then(|v| v.as_str())
+        {
+            run_id = Some(v.to_string());
         }
-        if checkpoint.is_none() {
-            if let Some(v) = attrs
+        if checkpoint.is_none()
+            && let Some(v) = attrs
                 .get("chidori.checkpoint_path")
                 .and_then(|v| v.as_str())
-            {
-                checkpoint = Some(v.to_string());
-            }
+        {
+            checkpoint = Some(v.to_string());
         }
         if run_id.is_some() && checkpoint.is_some() {
             break;

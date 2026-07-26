@@ -300,30 +300,30 @@ pub(super) fn log_matches(
     query: &LogQuery,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    if let Some(ref svc) = query.service {
-        if &log.service != svc {
-            return false;
-        }
+    if let Some(ref svc) = query.service
+        && &log.service != svc
+    {
+        return false;
     }
-    if let Some(ref sev) = query.severity {
-        if log.severity != LogSeverity::from_str(sev) {
-            return false;
-        }
+    if let Some(ref sev) = query.severity
+        && log.severity != LogSeverity::from_str(sev)
+    {
+        return false;
     }
-    if let Some(ref needle) = query.body_contains {
-        if !log.body.contains(needle.as_str()) {
-            return false;
-        }
+    if let Some(ref needle) = query.body_contains
+        && !log.body.contains(needle.as_str())
+    {
+        return false;
     }
-    if let Some(ref tid) = query.trace_id {
-        if log.trace_id.as_deref() != Some(tid.as_str()) {
-            return false;
-        }
+    if let Some(ref tid) = query.trace_id
+        && log.trace_id.as_deref() != Some(tid.as_str())
+    {
+        return false;
     }
-    if let Some(c) = cutoff {
-        if log.timestamp < c {
-            return false;
-        }
+    if let Some(c) = cutoff
+        && log.timestamp < c
+    {
+        return false;
     }
     true
 }
@@ -334,25 +334,25 @@ pub(super) fn metric_matches(
     query: &MetricQuery,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    if let Some(ref svc) = query.service {
-        if &m.service != svc {
-            return false;
-        }
+    if let Some(ref svc) = query.service
+        && &m.service != svc
+    {
+        return false;
     }
-    if let Some(ref name) = query.name {
-        if &m.name != name {
-            return false;
-        }
+    if let Some(ref name) = query.name
+        && &m.name != name
+    {
+        return false;
     }
-    if let Some(ref mt) = query.metric_type {
-        if m.metric_type != MetricType::from_str(mt) {
-            return false;
-        }
+    if let Some(ref mt) = query.metric_type
+        && m.metric_type != MetricType::from_str(mt)
+    {
+        return false;
     }
-    if let Some(c) = cutoff {
-        if m.timestamp < c {
-            return false;
-        }
+    if let Some(c) = cutoff
+        && m.timestamp < c
+    {
+        return false;
     }
     true
 }
@@ -382,35 +382,35 @@ pub(super) fn span_matches(
     query: &TraceQuery,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    if let Some(ref svc) = query.service {
-        if &span.service != svc {
-            return false;
-        }
+    if let Some(ref svc) = query.service
+        && &span.service != svc
+    {
+        return false;
     }
-    if let Some(ref op) = query.operation {
-        if !span.operation.contains(op.as_str()) {
-            return false;
-        }
+    if let Some(ref op) = query.operation
+        && !span.operation.contains(op.as_str())
+    {
+        return false;
     }
-    if let Some(min) = query.min_duration_ms {
-        if span.duration_ms < min {
-            return false;
-        }
+    if let Some(min) = query.min_duration_ms
+        && span.duration_ms < min
+    {
+        return false;
     }
-    if let Some(max) = query.max_duration_ms {
-        if span.duration_ms > max {
-            return false;
-        }
+    if let Some(max) = query.max_duration_ms
+        && span.duration_ms > max
+    {
+        return false;
     }
-    if let Some(ref status) = query.status {
-        if span.status.to_string() != *status {
-            return false;
-        }
+    if let Some(ref status) = query.status
+        && span.status.to_string() != *status
+    {
+        return false;
     }
-    if let Some(c) = cutoff {
-        if span.start_time < c {
-            return false;
-        }
+    if let Some(c) = cutoff
+        && span.start_time < c
+    {
+        return false;
     }
     for (k, v) in &query.attributes {
         if span.attributes.get(k).map(|s| s.as_str()) != Some(v.as_str()) {

@@ -81,6 +81,7 @@ pub fn router(
         .route("/api/v1/logs/live", get(live_logs))
         .route("/api/v1/metrics", get(query_metrics))
         .route("/api/v1/metrics/query", get(promql_query))
+        .route("/api/v1/metrics/rollups", get(query_rollups))
         .route("/api/v1/summary", get(query_summary))
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
@@ -384,15 +385,15 @@ fn filter_span_batch(json: &str, service: Option<&str>, status: Option<&str>) ->
     let filtered: Vec<&serde_json::Value> = spans
         .iter()
         .filter(|s| {
-            if let Some(svc) = service {
-                if s["service"].as_str() != Some(svc) {
-                    return false;
-                }
+            if let Some(svc) = service
+                && s["service"].as_str() != Some(svc)
+            {
+                return false;
             }
-            if let Some(st) = status {
-                if s["status"].as_str() != Some(st) {
-                    return false;
-                }
+            if let Some(st) = status
+                && s["status"].as_str() != Some(st)
+            {
+                return false;
             }
             true
         })
@@ -584,15 +585,15 @@ fn filter_log_batch(json: &str, service: Option<&str>, severity: Option<&str>) -
     let filtered: Vec<&serde_json::Value> = logs
         .iter()
         .filter(|l| {
-            if let Some(svc) = service {
-                if l["service"].as_str() != Some(svc) {
-                    return false;
-                }
+            if let Some(svc) = service
+                && l["service"].as_str() != Some(svc)
+            {
+                return false;
             }
-            if let Some(sev) = severity {
-                if l["severity"].as_str() != Some(sev) {
-                    return false;
-                }
+            if let Some(sev) = severity
+                && l["severity"].as_str() != Some(sev)
+            {
+                return false;
             }
             true
         })
@@ -2554,6 +2555,47 @@ async fn diff_suites(
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RollupParams {
+    name: Option<String>,
+    service: Option<String>,
+    last: Option<String>,
+    limit: Option<usize>,
+}
+
+/// 5-minute downsampled metric aggregates.
+///
+/// Rollups are kept on a much longer clock than raw points, so this is the
+/// only surface that can answer a year-scale trend question. Each bucket
+/// carries min/max/avg/sum/count rather than a single value, because a
+/// downsample that kept only the mean would hide exactly the spikes a trend
+/// question is usually about.
+async fn query_rollups(
+    State(state): State<AppState>,
+    Query(params): Query<RollupParams>,
+) -> impl IntoResponse {
+    let last_seconds = params.last.as_deref().and_then(parse_duration_to_seconds);
+    match state.store.query_metric_rollups(
+        params.name.as_deref(),
+        params.service.as_deref(),
+        last_seconds,
+        params.limit.unwrap_or(1000),
+    ) {
+        Ok(rollups) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "rollups": rollups,
+                "count": rollups.len(),
+                "bucket_seconds": 300,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }

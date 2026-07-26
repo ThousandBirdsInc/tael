@@ -130,17 +130,17 @@ impl TraceService for OtlpTraceService {
 
                     let mut attributes = HashMap::new();
                     for attr in &otel_span.attributes {
-                        if let Some(ref value) = attr.value {
-                            if let Some(ref val) = value.value {
-                                let s = match val {
+                        if let Some(ref value) = attr.value
+                            && let Some(ref val) = value.value
+                        {
+                            let s = match val {
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s) => s.clone(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) => i.to_string(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d) => d.to_string(),
                                     opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b) => b.to_string(),
                                     _ => continue,
                                 };
-                                attributes.insert(attr.key.clone(), s);
-                            }
+                            attributes.insert(attr.key.clone(), s);
                         }
                     }
 
@@ -150,8 +150,8 @@ impl TraceService for OtlpTraceService {
                         .map(|e| {
                             let mut event_attrs = HashMap::new();
                             for attr in &e.attributes {
-                                if let Some(ref value) = attr.value {
-                                    if let Some(ref val) = value.value {
+                                if let Some(ref value) = attr.value
+                                    && let Some(ref val) = value.value {
                                         let s = match val {
                                             opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s) => s.clone(),
                                             opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) => i.to_string(),
@@ -159,7 +159,6 @@ impl TraceService for OtlpTraceService {
                                         };
                                         event_attrs.insert(attr.key.clone(), s);
                                     }
-                                }
                             }
                             SpanEvent {
                                 name: e.name.clone(),
@@ -247,12 +246,11 @@ impl TraceService for OtlpTraceService {
         }
 
         // Make any newly indexed payload text searchable.
-        if indexed_any {
-            if let Some(ref idx) = self.search {
-                if let Err(e) = idx.commit() {
-                    tracing::warn!(error = %e, "failed to commit search index");
-                }
-            }
+        if indexed_any
+            && let Some(ref idx) = self.search
+            && let Err(e) = idx.commit()
+        {
+            tracing::warn!(error = %e, "failed to commit search index");
         }
 
         if let Err(e) = self.bus.publish(&spans) {

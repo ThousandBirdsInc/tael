@@ -379,42 +379,42 @@ pub fn print_summary(value: &Value) {
     println!("{t}");
     println!();
 
-    if let Some(svcs) = value["top_services"].as_array() {
-        if !svcs.is_empty() {
-            let mut st = Table::new();
-            st.set_header(vec!["Service", "Spans", "Error Rate", "p95 (ms)"]);
-            for s in svcs {
-                st.add_row(vec![
-                    Cell::new(s["service"].as_str().unwrap_or("-")),
-                    Cell::new(s["span_count"].as_i64().unwrap_or(0).to_string()),
-                    Cell::new(format!(
-                        "{:.2}%",
-                        s["error_rate"].as_f64().unwrap_or(0.0) * 100.0
-                    )),
-                    Cell::new(format!("{:.1}", s["p95_ms"].as_f64().unwrap_or(0.0))),
-                ]);
-            }
-            println!("Top services");
-            println!("{st}");
-            println!();
+    if let Some(svcs) = value["top_services"].as_array()
+        && !svcs.is_empty()
+    {
+        let mut st = Table::new();
+        st.set_header(vec!["Service", "Spans", "Error Rate", "p95 (ms)"]);
+        for s in svcs {
+            st.add_row(vec![
+                Cell::new(s["service"].as_str().unwrap_or("-")),
+                Cell::new(s["span_count"].as_i64().unwrap_or(0).to_string()),
+                Cell::new(format!(
+                    "{:.2}%",
+                    s["error_rate"].as_f64().unwrap_or(0.0) * 100.0
+                )),
+                Cell::new(format!("{:.1}", s["p95_ms"].as_f64().unwrap_or(0.0))),
+            ]);
         }
+        println!("Top services");
+        println!("{st}");
+        println!();
     }
 
-    if let Some(ops) = value["top_error_operations"].as_array() {
-        if !ops.is_empty() {
-            let mut et = Table::new();
-            et.set_header(vec!["Service", "Operation", "Errors"]);
-            for o in ops {
-                et.add_row(vec![
-                    Cell::new(o["service"].as_str().unwrap_or("-")),
-                    Cell::new(o["operation"].as_str().unwrap_or("-")),
-                    Cell::new(o["error_count"].as_i64().unwrap_or(0).to_string()),
-                ]);
-            }
-            println!("Top error operations");
-            println!("{et}");
-            println!();
+    if let Some(ops) = value["top_error_operations"].as_array()
+        && !ops.is_empty()
+    {
+        let mut et = Table::new();
+        et.set_header(vec!["Service", "Operation", "Errors"]);
+        for o in ops {
+            et.add_row(vec![
+                Cell::new(o["service"].as_str().unwrap_or("-")),
+                Cell::new(o["operation"].as_str().unwrap_or("-")),
+                Cell::new(o["error_count"].as_i64().unwrap_or(0).to_string()),
+            ]);
         }
+        println!("Top error operations");
+        println!("{et}");
+        println!();
     }
 
     let logs = &value["logs"];
@@ -727,7 +727,7 @@ pub fn print_eval_cases(value: &Value) {
 pub fn print_eval_scores(value: &Value) {
     let scores = match value
         .get("scores")
-        .or_else(|| value.get("score").and_then(|_| Some(value)))
+        .or_else(|| value.get("score").map(|_| value))
         .and_then(|v| v.as_array())
     {
         Some(v) if !v.is_empty() => v,
@@ -882,4 +882,31 @@ pub fn print_explain(explain: &Value) {
             println!("  note          {note}");
         }
     }
+}
+
+/// Render 5-minute metric rollups. Each bucket keeps min/max/avg rather than a
+/// single value, because a downsample that kept only the mean would hide the
+/// spikes a long-range trend question is usually asking about.
+pub fn print_rollups_table(result: &Value) {
+    let rollups = result["rollups"].as_array().cloned().unwrap_or_default();
+    if rollups.is_empty() {
+        println!("No rollups. They are written when metrics age out of the hot tier.");
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec![
+        "BUCKET", "SERVICE", "METRIC", "MIN", "AVG", "MAX", "COUNT",
+    ]);
+    for r in &rollups {
+        table.add_row(vec![
+            r["bucket_start"].as_str().unwrap_or("-").to_string(),
+            r["service"].as_str().unwrap_or("-").to_string(),
+            r["name"].as_str().unwrap_or("-").to_string(),
+            format!("{:.3}", r["min"].as_f64().unwrap_or(0.0)),
+            format!("{:.3}", r["avg"].as_f64().unwrap_or(0.0)),
+            format!("{:.3}", r["max"].as_f64().unwrap_or(0.0)),
+            r["count"].as_i64().unwrap_or(0).to_string(),
+        ]);
+    }
+    println!("{table}");
 }

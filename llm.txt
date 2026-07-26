@@ -158,6 +158,66 @@ trace IDs so one query reaches every signal:
 
 Requires `tael-backend` storage; under `--storage duckdb` it returns nothing.
 
+### Reliability loop
+
+The failure lifecycle — stumble, issue, signal, experiment, closed — recorded
+as structured trace comments. No dedicated tables; everything here is
+queryable through the comment surface.
+
+```
+tael issue create --from-trace ID --failure-mode tool_error \
+  --impact high --summary "..." [--last-successful-step ...] [--first-failure ...]
+tael issue list [--limit N]
+tael issue examples <issue-id>
+
+tael signal create --from-trace ID --name ignored_tool_errors \
+  [--query ...] [--failure-mode ...] [--summary ...]
+tael signal trend <name>
+
+tael experiment compare <experiment-id> [--signal NAME] [--last 24h]
+
+tael diagnose report --trace-id ID --category missing_context \
+  --severity high [--confidence low|medium|high] --summary "..."
+tael diagnose list
+```
+
+Suggested failure modes: `tool_error`, `context_loss`, `retrieval_miss`,
+`policy_violation`, `timeout`.
+
+`experiment compare` groups by the `tael.experiment.id` and
+`tael.experiment.variant` span attributes, so a variant must be stamped on the
+spans at instrumentation time to be comparable afterward.
+
+Self-diagnostics are **untrusted agent hints**, not facts: an agent reporting
+"the tool was broken" is evidence about the agent's belief, and
+`diagnose report` records it with a `confidence` so a reader can weigh it.
+
+### Golden cases from production traces
+
+```
+tael eval case add --from-trace ID --suite NAME --case-id ID \
+  [--failure-mode ...] [--source-issue-id ...] [--critical-path] \
+  [--expected-behavior "..."] [--author ...]
+tael eval case link --case-id ID --issue-id ID
+tael eval suite inspect <suite> [--limit N]
+```
+
+`case add --from-trace` records provenance: which production failure this case
+protects against. `suite inspect` reports the hygiene gaps that make a suite
+stop being trustworthy — cases with no provenance, no expected behavior,
+duplicate failure modes, and how many cover a critical path.
+
+### Installing the agent skill
+
+```
+tael skill install [--project] [--force]
+tael skill where [--project]
+```
+
+Writes `SKILL.md` into `~/.claude/skills/tael/` (or `./.claude/skills/tael/`
+with `--project`), so a coding agent picks up the debugging playbook without
+being told about it.
+
 ### Human review queue
 
 ```

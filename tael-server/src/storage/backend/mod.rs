@@ -331,6 +331,38 @@ impl Store for TaelBackend {
     }
 
     // ── Core reads: hot tier, unioned with the cold tier ────────────
+    fn query_metric_rollups(
+        &self,
+        name: Option<&str>,
+        service: Option<&str>,
+        last_seconds: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<super::models::MetricRollup>> {
+        let cutoff = last_seconds.map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
+        let mut out: Vec<super::models::MetricRollup> = self
+            .cold
+            .all_rollups()?
+            .into_iter()
+            .filter(|r| name.is_none_or(|n| r.name == n))
+            .filter(|r| service.is_none_or(|s| r.service == s))
+            .filter(|r| cutoff.is_none_or(|c| r.bucket_start >= c))
+            .map(|r| super::models::MetricRollup {
+                bucket_start: r.bucket_start,
+                service: r.service.clone(),
+                name: r.name.clone(),
+                min: r.min,
+                max: r.max,
+                avg: r.avg(),
+                sum: r.sum,
+                count: r.count,
+            })
+            .collect();
+        // Newest first, matching every other query surface.
+        out.sort_by(|a, b| b.bucket_start.cmp(&a.bucket_start));
+        out.truncate(limit);
+        Ok(out)
+    }
+
     fn explain_traces(&self, query: &TraceQuery) -> Result<serde_json::Value> {
         let started = std::time::Instant::now();
         let cutoff = query

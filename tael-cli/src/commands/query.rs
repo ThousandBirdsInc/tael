@@ -129,10 +129,22 @@ pub async fn metrics(
     metric_type: Option<String>,
     last: Option<String>,
     limit: u32,
+    rollups: bool,
 ) -> Result<()> {
     if let Some(q) = query {
         let result = client.promql_query(&q, last.as_deref()).await?;
         output::render(format, &result, output::print_series_table);
+        return Ok(());
+    }
+
+    if rollups {
+        let result = client
+            .metric_rollups(name.as_deref(), service.as_deref(), last.as_deref(), limit)
+            .await?;
+        output::render(format, &result, output::print_rollups_table);
+        if result["rollups"].as_array().is_none_or(|r| r.is_empty()) {
+            return Err(crate::exit::CategorizedError::no_results());
+        }
         return Ok(());
     }
 

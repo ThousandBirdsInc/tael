@@ -30,7 +30,6 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// JSON-RPC error codes used by this server (from the JSON-RPC 2.0 spec).
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
-const INTERNAL_ERROR: i32 = -32603;
 
 /// Run the stdio server until the client closes the connection.
 pub async fn serve(client: TaelClient, server_url: &str) -> Result<()> {
