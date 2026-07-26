@@ -37,6 +37,7 @@ ratatui = "0.29"
 tokio-stream = { version = "0.1", features = ["sync"] }
 walrus-rust = "0.2"
 snap = "1"
+flate2 = "1"
 bytes = "1"
 sha2 = "0.10"
 fjall = "3"

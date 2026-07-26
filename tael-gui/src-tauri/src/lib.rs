@@ -123,7 +123,10 @@ async fn healthz(server: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn query_traces(server: String, request: TraceQueryRequest) -> Result<Value, String> {
-    let mut params = vec![("limit".to_string(), request.limit.unwrap_or(200).to_string())];
+    let mut params = vec![(
+        "limit".to_string(),
+        request.limit.unwrap_or(200).to_string(),
+    )];
     if let Some(service) = request.service {
         params.push(("service".to_string(), service));
     }
@@ -150,7 +153,10 @@ async fn query_traces(server: String, request: TraceQueryRequest) -> Result<Valu
     if let Some(attributes) = request.attributes {
         for attr in attributes {
             if !attr.key.trim().is_empty() {
-                params.push(("attribute".to_string(), format!("{}={}", attr.key, attr.value)));
+                params.push((
+                    "attribute".to_string(),
+                    format!("{}={}", attr.key, attr.value),
+                ));
             }
         }
     }
@@ -170,12 +176,7 @@ async fn get_trace(server: String, trace_id: String) -> Result<Value, String> {
 
 #[tauri::command]
 async fn get_comments(server: String, trace_id: String) -> Result<Value, String> {
-    get_json(
-        &server,
-        &format!("/api/v1/traces/{trace_id}/comments"),
-        &[],
-    )
-    .await
+    get_json(&server, &format!("/api/v1/traces/{trace_id}/comments"), &[]).await
 }
 
 #[tauri::command]
@@ -218,12 +219,7 @@ async fn eval_status(server: String, run_id: String) -> Result<Value, String> {
 
 #[tauri::command]
 async fn eval_cases(server: String, run_id: String) -> Result<Value, String> {
-    get_json(
-        &server,
-        &format!("/api/v1/evals/runs/{run_id}/cases"),
-        &[],
-    )
-    .await
+    get_json(&server, &format!("/api/v1/evals/runs/{run_id}/cases"), &[]).await
 }
 
 #[tauri::command]
@@ -246,8 +242,14 @@ async fn start_live_stream(
                 },
             );
 
-            match sse_read_loop(&target, service.as_deref(), status.as_deref(), &app, &stream_id)
-                .await
+            match sse_read_loop(
+                &target,
+                service.as_deref(),
+                status.as_deref(),
+                &app,
+                &stream_id,
+            )
+            .await
             {
                 Ok(()) => {
                     let _ = app.emit(

@@ -21,6 +21,9 @@ pub use objstore::{
 pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};
 pub use search::SearchIndex;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use anyhow::Result;
 
 use models::{

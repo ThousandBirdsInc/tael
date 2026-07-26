@@ -49,18 +49,30 @@ COPY --from=builder /usr/local/bin/tael /usr/local/bin/tael
 # Bind on all interfaces inside the container (the binary defaults to
 # 127.0.0.1, which is unreachable from the host) and keep WAL + storage on the
 # /data volume so state survives container restarts.
+#
+# TAEL_AUTH=off is deliberate and specific to this image. Binding 0.0.0.0
+# *inside a container* is how you reach the server from the host at all, so the
+# binary's fail-closed rule for off-box listeners would otherwise refuse to
+# start on `docker run` — the container's port mapping, not the bind address,
+# is the real reachability boundary here. Any deployment that publishes these
+# ports beyond localhost should mint keys and drop this:
+#
+#   docker run ... tael auth create-key --name my-agent --role writer
+#   docker run -e TAEL_AUTH=required ...
 ENV TAEL_OTLP_GRPC_ADDR=0.0.0.0:4317 \
+    TAEL_OTLP_HTTP_ADDR=0.0.0.0:4318 \
     TAEL_REST_API_ADDR=0.0.0.0:7701 \
     TAEL_DD_AGENT_ADDR=0.0.0.0:8126 \
+    TAEL_AUTH=off \
     TAEL_DATA_DIR=/data \
     TAEL_WAL_DIR=/data/wal_files
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-# 4317 = OTLP gRPC ingest, 7701 = REST API / CLI surface,
-# 8126 = Datadog trace-agent (dd-trace) intake.
-EXPOSE 4317 7701 8126
+# 4317 = OTLP gRPC ingest, 4318 = OTLP/HTTP ingest,
+# 7701 = REST API / CLI surface, 8126 = Datadog trace-agent (dd-trace) intake.
+EXPOSE 4317 4318 7701 8126
 
 # `server status` prints {"status":"healthy"|"unreachable"} but always exits 0,
 # so grep the JSON for a healthy verdict to drive the container health state.

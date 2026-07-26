@@ -7,6 +7,7 @@
 //! the listeners and storage.
 
 mod api;
+pub mod auth;
 mod cluster;
 mod config;
 mod ingest;
@@ -23,7 +24,10 @@ use tokio::net::TcpListener;
 use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
-pub use config::{DEFAULT_DD_AGENT_ADDR, ServerConfig, StorageBackend, parse_dd_agent_addr};
+pub use config::{
+    DEFAULT_DD_AGENT_ADDR, DEFAULT_OTLP_HTTP_ADDR, ServerConfig, StorageBackend,
+    parse_dd_agent_addr, parse_otlp_http_addr,
+};
 #[cfg(feature = "duckdb")]
 pub use storage::DuckDbStore;
 pub use storage::models::{
@@ -139,6 +143,56 @@ fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>, blob_g
     });
 }
 
+/// Resolve the auth mode for this configuration and open the keystore.
+///
+/// The fail-closed rule lives here: a server reachable from off-box with no
+/// usable keys refuses to start instead of publishing an unauthenticated
+/// telemetry store. The refusal names both ways out (mint a key, or opt out
+/// explicitly) because whichever one an operator wants, guessing the flag is
+/// the last thing they should have to do at that moment.
+fn setup_auth(config: &ServerConfig) -> Result<api::authz::AuthState> {
+    let mut listeners: Vec<&str> = vec![&config.otlp_grpc_addr];
+    // A Unix-socket REST listener is filesystem-scoped, so it doesn't widen
+    // reachability the way a TCP bind does.
+    if config.rest_api_socket.is_none() {
+        listeners.push(&config.rest_api_addr);
+    }
+    if let Some(addr) = &config.otlp_http_addr {
+        listeners.push(addr);
+    }
+    if let Some(addr) = &config.dd_agent_addr {
+        listeners.push(addr);
+    }
+
+    let mode = auth::AuthMode::resolve(config.auth, &listeners);
+    let state = api::authz::AuthState::new(mode, &config.data_dir)?;
+
+    if mode == auth::AuthMode::Required {
+        let keys = auth::KeyStore::load(&config.data_dir)?;
+        if !keys.has_active_keys() {
+            bail!(
+                "refusing to start: this server listens on a non-loopback address \
+                 ({}) but has no API keys, so it would accept telemetry and serve \
+                 queries to anyone who can reach it.\n\n\
+                 Create a key:\n  \
+                 tael auth create-key --name my-agent --role writer --data-dir {}\n\n\
+                 Or accept an unauthenticated listener explicitly (e.g. when the \
+                 port is already firewalled or bound inside a container):\n  \
+                 tael serve --auth off",
+                listeners
+                    .iter()
+                    .find(|a| !a.starts_with("127.0.0.1") && !a.starts_with("localhost"))
+                    .copied()
+                    .unwrap_or("non-loopback"),
+                config.data_dir,
+            );
+        }
+        tracing::info!(keys = keys.keys.len(), "API key auth required");
+    }
+
+    Ok(state)
+}
+
 /// Start the server with the default user-facing output behavior.
 ///
 /// This is the right entrypoint for binaries such as `tael serve`: it installs a
@@ -172,6 +226,10 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     }
 
     configure_walrus_data_dir(&config.wal_dir);
+
+    // Resolve auth before anything binds, so a misconfigured deployment fails
+    // at startup rather than after it is already accepting traffic.
+    let auth_state = Arc::new(setup_auth(&config)?);
 
     // Blob store: local filesystem by default; GCS when configured (opt-in,
     // requires the `cloud` feature — otherwise this fails loudly).
@@ -312,34 +370,43 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         "starting tael server"
     );
 
+    // The OTLP services are shared by both transports: gRPC (:4317) and
+    // HTTP/protobuf (:4318) hand decoded batches to the same implementations,
+    // so there is one ingest path regardless of how a client speaks to it.
+    let otlp_services = ingest::otlp_http::OtlpHttpState {
+        traces: Arc::new(ingest::otlp::OtlpTraceService::new(
+            Arc::clone(&store),
+            Arc::clone(&blobs),
+            search.clone(),
+            Arc::clone(&bus),
+        )),
+        logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
+            Arc::clone(&store),
+            Arc::clone(&blobs),
+            Arc::clone(&log_bus),
+        )),
+        metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(Arc::clone(
+            &store,
+        ))),
+    };
+
     let grpc_handle = tokio::spawn({
-        let store = Arc::clone(&store);
-        let blobs = Arc::clone(&blobs);
-        let bus = Arc::clone(&bus);
-        let log_bus = Arc::clone(&log_bus);
+        let otlp = otlp_services.clone();
+        let grpc_auth = Arc::clone(&auth_state);
         let addr = config.otlp_grpc_addr.parse()?;
         async move {
-            let trace_service = ingest::otlp::OtlpTraceService::new(
-                Arc::clone(&store),
-                Arc::clone(&blobs),
-                search.clone(),
-                bus,
-            );
-            let logs_service = ingest::otlp_logs::OtlpLogsService::new(
-                Arc::clone(&store),
-                Arc::clone(&blobs),
-                log_bus,
-            );
-            let metrics_service = ingest::otlp_metrics::OtlpMetricsService::new(store);
+            let trace_service = ingest::otlp::SharedTraceService(otlp.traces);
+            let logs_service = ingest::otlp_logs::SharedLogsService(otlp.logs);
+            let metrics_service = ingest::otlp_metrics::SharedMetricsService(otlp.metrics);
             TonicServer::builder()
                 .add_service(
-                    opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer::new(trace_service),
+                    opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer::with_interceptor(trace_service, api::authz::grpc_interceptor(Arc::clone(&grpc_auth))),
                 )
                 .add_service(
-                    opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer::new(logs_service),
+                    opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer::with_interceptor(logs_service, api::authz::grpc_interceptor(Arc::clone(&grpc_auth))),
                 )
                 .add_service(
-                    opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer::new(metrics_service),
+                    opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer::with_interceptor(metrics_service, api::authz::grpc_interceptor(Arc::clone(&grpc_auth))),
                 )
                 .serve_with_shutdown(addr, shutdown_signal())
                 .await
@@ -355,8 +422,17 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let cluster = coordinator.clone();
         let addr = config.rest_api_addr.clone();
         let socket = config.rest_api_socket.clone();
+        let otlp = otlp_services.clone();
+        let auth = Arc::clone(&auth_state);
         async move {
-            let app = api::rest::router(store, blobs, bus, log_bus, cluster);
+            // OTLP/HTTP is mounted here as well as on its own listener, so a
+            // deployment that can expose only one port still accepts it.
+            let app = api::rest::router(store, blobs, bus, log_bus, cluster)
+                .merge(ingest::otlp_http::router(otlp))
+                .layer(axum::middleware::from_fn_with_state(
+                    auth,
+                    api::authz::require_auth,
+                ));
             if let Some(socket) = socket {
                 #[cfg(unix)]
                 {
@@ -388,6 +464,49 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
             Ok::<(), anyhow::Error>(())
         }
     });
+
+    // OTLP/HTTP listener on the spec's port, so SDKs defaulting to
+    // `http/protobuf` need no server-side configuration. A bind failure is a
+    // warning rather than fatal: the same routes stay mounted on the REST
+    // listener, reachable via OTEL_EXPORTER_OTLP_ENDPOINT.
+    let otlp_http_requested = config.otlp_http_addr.clone();
+    let otlp_http_listener = match &config.otlp_http_addr {
+        Some(addr) => match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(%addr, "OTLP/HTTP listening");
+                Some(listener)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %addr, error = %e,
+                    "OTLP/HTTP port unavailable (another collector running?); \
+                     OTLP/HTTP intake stays available on the REST listener"
+                );
+                config.otlp_http_addr = None;
+                None
+            }
+        },
+        None => None,
+    };
+    let otlp_http_handle = otlp_http_listener.map(|listener| {
+        tokio::spawn({
+            let state = otlp_services.clone();
+            let auth = Arc::clone(&auth_state);
+            async move {
+                let app = ingest::otlp_http::router(state).layer(
+                    axum::middleware::from_fn_with_state(auth, api::authz::require_auth),
+                );
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+                    .context("OTLP/HTTP server failed")
+            }
+        })
+    });
+    let otlp_http_unavailable = match config.otlp_http_addr {
+        None => otlp_http_requested,
+        Some(_) => None,
+    };
 
     // Dedicated Datadog trace-agent listener on the agent's default port, so
     // dd-trace clients work with no configuration at all. Bound here (not in
@@ -422,8 +541,11 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
             let blobs = Arc::clone(&blobs);
             let bus = Arc::clone(&bus);
             let log_bus = Arc::clone(&log_bus);
+            let auth = Arc::clone(&auth_state);
             async move {
-                let app = api::rest::dd_router(store, blobs, bus, log_bus);
+                let app = api::rest::dd_router(store, blobs, bus, log_bus).layer(
+                    axum::middleware::from_fn_with_state(auth, api::authz::require_auth),
+                );
                 axum::serve(listener, app)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
@@ -439,7 +561,11 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     };
 
     if !options.is_quiet() {
-        print_startup_banner(&config, dd_addr_unavailable.as_deref());
+        print_startup_banner(
+            &config,
+            dd_addr_unavailable.as_deref(),
+            otlp_http_unavailable.as_deref(),
+        );
     }
 
     // All listeners drain on SIGTERM/Ctrl-C; await them so in-flight requests
@@ -447,6 +573,9 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let (grpc_res, rest_res) = tokio::join!(grpc_handle, rest_handle);
     grpc_res?;
     rest_res??;
+    if let Some(otlp_http_handle) = otlp_http_handle {
+        otlp_http_handle.await??;
+    }
     if let Some(dd_handle) = dd_handle {
         dd_handle.await??;
     }
@@ -523,7 +652,11 @@ fn cleanup_unix_socket_path(socket: &str) {
 /// bind failed: the dd-trace endpoints are always mounted on the REST
 /// listener too, so the banner always has a Datadog address to show — it just
 /// notes why the dedicated port isn't it.
-fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>) {
+fn print_startup_banner(
+    config: &ServerConfig,
+    dd_addr_unavailable: Option<&str>,
+    otlp_http_unavailable: Option<&str>,
+) {
     let rest = rest_endpoint_label(config);
     let otlp = &config.otlp_grpc_addr;
     let connect_flag = cli_connect_flag(config);
@@ -531,6 +664,19 @@ fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>
     println!("tael server starting");
     println!("  REST API     {rest}");
     println!("  OTLP gRPC    {otlp}");
+    match &config.otlp_http_addr {
+        Some(addr) => println!("  OTLP HTTP    {addr}"),
+        None => match otlp_http_unavailable {
+            Some(requested) => println!(
+                "  OTLP HTTP    {} ({requested} unavailable — another collector running?)",
+                rest_endpoint_label(config)
+            ),
+            None => println!(
+                "  OTLP HTTP    {} (via REST listener)",
+                rest_endpoint_label(config)
+            ),
+        },
+    }
     match &config.dd_agent_addr {
         Some(addr) => println!("  dd-trace     {addr}"),
         None => match dd_addr_unavailable {
@@ -538,7 +684,10 @@ fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>
                 "  dd-trace     {} ({requested} unavailable — another agent running?)",
                 dd_agent_url(config)
             ),
-            None => println!("  dd-trace     {} (via REST listener)", dd_agent_url(config)),
+            None => println!(
+                "  dd-trace     {} (via REST listener)",
+                dd_agent_url(config)
+            ),
         },
     }
     println!("  data dir     {}", config.data_dir);
@@ -554,6 +703,16 @@ fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>
     println!("  export OTEL_EXPORTER_OTLP_PROTOCOL=grpc");
     println!("  export OTEL_SERVICE_NAME=<your-service>");
     println!();
+    println!("Or over OTLP/HTTP (the default protocol in several SDKs):");
+    match &config.otlp_http_addr {
+        Some(addr) => println!("  export OTEL_EXPORTER_OTLP_ENDPOINT=http://{addr}"),
+        None => println!(
+            "  export OTEL_EXPORTER_OTLP_ENDPOINT={}",
+            rest_endpoint_label(config)
+        ),
+    }
+    println!("  export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf");
+    println!();
     println!("Or a Datadog-instrumented service (dd-trace):");
     match &config.dd_agent_addr {
         // Listening on the agent's default port: dd-trace clients find it
@@ -568,9 +727,7 @@ fn print_startup_banner(config: &ServerConfig, dd_addr_unavailable: Option<&str>
         // still serves the trace-agent endpoints.
         None => {
             if let Some(requested) = dd_addr_unavailable {
-                println!(
-                    "  note: agent port {requested} was unavailable (another agent running?)"
-                );
+                println!("  note: agent port {requested} was unavailable (another agent running?)");
             }
             println!("  export DD_TRACE_AGENT_URL={}", dd_agent_url(config));
         }

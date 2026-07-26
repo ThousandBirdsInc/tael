@@ -1,4 +1,5 @@
 pub mod anomalies;
+pub mod auth;
 pub mod comment;
 pub mod correlate;
 pub mod diagnose;

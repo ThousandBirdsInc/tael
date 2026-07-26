@@ -25,6 +25,20 @@ impl OtlpMetricsService {
     }
 }
 
+/// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
+/// metrics service. See [`super::otlp::SharedTraceService`].
+pub struct SharedMetricsService(pub Arc<OtlpMetricsService>);
+
+#[tonic::async_trait]
+impl MetricsService for SharedMetricsService {
+    async fn export(
+        &self,
+        request: Request<ExportMetricsServiceRequest>,
+    ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        self.0.export(request).await
+    }
+}
+
 #[tonic::async_trait]
 impl MetricsService for OtlpMetricsService {
     async fn export(

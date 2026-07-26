@@ -27,6 +27,20 @@ impl OtlpLogsService {
     }
 }
 
+/// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
+/// logs service. See [`super::otlp::SharedTraceService`].
+pub struct SharedLogsService(pub Arc<OtlpLogsService>);
+
+#[tonic::async_trait]
+impl LogsService for SharedLogsService {
+    async fn export(
+        &self,
+        request: Request<ExportLogsServiceRequest>,
+    ) -> Result<Response<ExportLogsServiceResponse>, Status> {
+        self.0.export(request).await
+    }
+}
+
 #[tonic::async_trait]
 impl LogsService for OtlpLogsService {
     async fn export(

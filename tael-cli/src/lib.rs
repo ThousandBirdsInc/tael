@@ -105,6 +105,11 @@ pub struct GlobalOpts {
     /// listen address to `127.0.0.1:<port>`. Ignored by client commands.
     #[arg(long, global = true)]
     pub port_otel: Option<u16>,
+
+    /// API key for a server running with auth enabled. Falls back to
+    /// TAEL_API_KEY. Sent as `Authorization: Bearer <key>`.
+    #[arg(long, global = true)]
+    pub api_key: Option<String>,
 }
 
 impl Default for GlobalOpts {
@@ -115,6 +120,7 @@ impl Default for GlobalOpts {
             port_rest: None,
             unix_socket: None,
             port_otel: None,
+            api_key: None,
         }
     }
 }
@@ -146,6 +152,10 @@ pub enum Commands {
         /// OTLP gRPC listen address (env: TAEL_OTLP_GRPC_ADDR)
         #[arg(long)]
         otlp_grpc_addr: Option<String>,
+        /// OTLP/HTTP listen address; `off` disables the dedicated listener
+        /// (env: TAEL_OTLP_HTTP_ADDR) [default: 127.0.0.1:4318]
+        #[arg(long)]
+        otlp_http_addr: Option<String>,
         /// REST API listen address (env: TAEL_REST_API_ADDR)
         #[arg(long)]
         rest_api_addr: Option<String>,
@@ -165,6 +175,11 @@ pub enum Commands {
         /// Storage backend: tael-backend (default). duckdb requires installing with --features duckdb.
         #[arg(long)]
         storage: Option<String>,
+        /// Authentication: `off` or `required`. Defaults to off for
+        /// loopback-only listeners and required when any listener is reachable
+        /// off-box (env: TAEL_AUTH)
+        #[arg(long)]
+        auth: Option<String>,
     },
     /// Launch the desktop GUI (requires a build with `--features gui`)
     Gui,
@@ -276,6 +291,44 @@ pub enum Commands {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// Manage API keys (operates on the keystore in the data directory)
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthAction {
+    /// Mint a new API key. The key is printed once and is not recoverable.
+    CreateKey {
+        /// Label for this key, e.g. claude-code-prod
+        #[arg(long)]
+        name: String,
+        /// Role: reader (query), writer (+ push telemetry), admin (+ manage keys)
+        #[arg(long, default_value = "reader")]
+        role: String,
+        /// Tenant this key reads and writes within
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// List API keys and their roles. Never prints key material.
+    List {
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Revoke a key by id. Takes effect without restarting the server.
+    Revoke {
+        /// Key id from `tael auth list`
+        key_id: String,
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
     },
 }
 
@@ -685,12 +738,14 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
     // before constructing one.
     if let Commands::Serve {
         otlp_grpc_addr,
+        otlp_http_addr,
         rest_api_addr,
         rest_api_socket,
         dd_agent_addr,
         data_dir,
         wal_dir,
         storage,
+        auth,
     } = command
     {
         if opts.unix_socket.is_some() && rest_api_socket.is_some() {
@@ -703,6 +758,9 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             config.otlp_grpc_addr = a;
         } else if let Some(p) = opts.port_otel {
             config.otlp_grpc_addr = format!("127.0.0.1:{p}");
+        }
+        if let Some(a) = otlp_http_addr {
+            config.otlp_http_addr = tael_server::parse_otlp_http_addr(Some(a));
         }
         if let Some(socket) = rest_api_socket.or_else(|| opts.unix_socket.clone()) {
             config.rest_api_socket = Some(socket);
@@ -725,7 +783,38 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         if let Some(s) = storage {
             config.storage = tael_server::StorageBackend::parse(&s);
         }
+        if let Some(a) = auth {
+            config.auth = Some(tael_server::auth::AuthMode::parse(&a)?);
+        }
         return tael_server::run(config).await;
+    }
+
+    // Key management works on the keystore file directly, so it must not need
+    // a reachable server — the first key is minted before one can start.
+    if let Commands::Auth { action } = command {
+        let resolve_dir = |explicit: Option<String>| {
+            explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
+        };
+        return match action {
+            AuthAction::CreateKey {
+                name,
+                role,
+                tenant,
+                data_dir,
+            } => commands::auth::create_key(
+                &opts.format,
+                &resolve_dir(data_dir),
+                &name,
+                &role,
+                &tenant,
+            ),
+            AuthAction::List { data_dir } => {
+                commands::auth::list_keys(&opts.format, &resolve_dir(data_dir))
+            }
+            AuthAction::Revoke { key_id, data_dir } => {
+                commands::auth::revoke_key(&opts.format, &resolve_dir(data_dir), &key_id)
+            }
+        };
     }
 
     let server_url = opts.server_url();
@@ -746,11 +835,17 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         );
     }
 
-    let client = client::TaelClient::new(&server_url);
+    // An explicit --api-key wins; otherwise the client picks up TAEL_API_KEY.
+    let client = match &opts.api_key {
+        Some(key) => client::TaelClient::with_api_key(&server_url, Some(key)),
+        None => client::TaelClient::new(&server_url),
+    };
 
     match command {
         // Handled above; the early return means this arm is never reached.
         Commands::Serve { .. } => unreachable!(),
+        // Handled above; the early return means this arm is never reached.
+        Commands::Auth { .. } => unreachable!(),
         // Handled above; the early return / bail means this arm is never reached.
         Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {

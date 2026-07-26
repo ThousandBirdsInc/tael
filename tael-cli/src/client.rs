@@ -10,29 +10,72 @@ pub struct TaelClient {
     http: Client,
 }
 
+/// Finish a client builder, attaching the API key as a default header so every
+/// request — including the SSE live streams — carries it without each call site
+/// remembering to.
+fn build_client(builder: reqwest::ClientBuilder, api_key: Option<&str>) -> Client {
+    let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) => {
+            let mut headers = reqwest::header::HeaderMap::new();
+            match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+                Ok(mut value) => {
+                    value.set_sensitive(true);
+                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                    builder.default_headers(headers)
+                }
+                // A key with non-ASCII bytes can't be a header; sending nothing
+                // yields a clean 401 rather than a panic here.
+                Err(_) => builder,
+            }
+        }
+        None => builder,
+    };
+    builder.build().expect("failed to build HTTP client")
+}
+
 impl TaelClient {
+    /// Connect to a tael server, authenticating with `TAEL_API_KEY` when it is
+    /// set. A server running with auth off ignores the header, so reading the
+    /// environment unconditionally is safe and means embedders inherit
+    /// credentials the same way the CLI does.
     pub fn new(base_url: &str) -> Self {
+        Self::with_api_key(base_url, std::env::var("TAEL_API_KEY").ok().as_deref())
+    }
+
+    /// Connect with an explicit API key, overriding the environment. Backs the
+    /// CLI's `--api-key` flag.
+    pub fn with_api_key(base_url: &str, api_key: Option<&str>) -> Self {
         if let Some(socket_path) = base_url.strip_prefix("unix://") {
-            return Self::new_unix_socket(socket_path)
+            return Self::new_unix_socket_with_key(socket_path, api_key)
                 .expect("failed to build Unix-socket HTTP client");
         }
 
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: Client::new(),
+            http: build_client(Client::builder(), api_key),
         }
     }
 
     #[cfg(unix)]
     pub fn new_unix_socket(socket_path: &str) -> Result<Self> {
+        Self::new_unix_socket_with_key(socket_path, std::env::var("TAEL_API_KEY").ok().as_deref())
+    }
+
+    #[cfg(unix)]
+    fn new_unix_socket_with_key(socket_path: &str, api_key: Option<&str>) -> Result<Self> {
         Ok(Self {
             base_url: "http://tael".to_string(),
-            http: Client::builder().unix_socket(socket_path).build()?,
+            http: build_client(Client::builder().unix_socket(socket_path), api_key),
         })
     }
 
     #[cfg(not(unix))]
     pub fn new_unix_socket(_socket_path: &str) -> Result<Self> {
+        anyhow::bail!("Unix sockets are only supported on Unix platforms");
+    }
+
+    #[cfg(not(unix))]
+    fn new_unix_socket_with_key(_socket_path: &str, _api_key: Option<&str>) -> Result<Self> {
         anyhow::bail!("Unix sockets are only supported on Unix platforms");
     }
 

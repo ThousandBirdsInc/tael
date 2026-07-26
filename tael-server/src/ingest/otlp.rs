@@ -53,6 +53,22 @@ impl OtlpTraceService {
     }
 }
 
+/// Newtype that lets the gRPC listener serve a trace service shared (via `Arc`)
+/// with the OTLP/HTTP listener. `tonic`'s generated server takes ownership of
+/// its service, and the orphan rule blocks implementing [`TraceService`] on
+/// `Arc<OtlpTraceService>` directly, so the wrapper carries the shared handle.
+pub struct SharedTraceService(pub Arc<OtlpTraceService>);
+
+#[tonic::async_trait]
+impl TraceService for SharedTraceService {
+    async fn export(
+        &self,
+        request: Request<ExportTraceServiceRequest>,
+    ) -> Result<Response<ExportTraceServiceResponse>, Status> {
+        self.0.export(request).await
+    }
+}
+
 #[tonic::async_trait]
 impl TraceService for OtlpTraceService {
     async fn export(
