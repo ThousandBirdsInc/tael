@@ -18,4 +18,5 @@ pub mod services;
 pub mod signal;
 pub mod skill;
 pub mod summarize;
+pub mod topology;
 pub mod watch;

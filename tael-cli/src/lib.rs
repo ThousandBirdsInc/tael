@@ -245,6 +245,27 @@ pub enum Commands {
         #[arg(long)]
         service: Option<String>,
     },
+    /// Service dependency graph derived from span parent/child edges
+    Topology {
+        /// Time window (e.g. 1h, 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max spans to examine
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+    /// Compare every summary metric between a window and a baseline window
+    Diff {
+        /// Current window (default 1h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Baseline window (default: 6x current)
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Filter to a single service
+        #[arg(long)]
+        service: Option<String>,
+    },
     /// Pull spans, logs, and metrics for a trace ID
     Correlate {
         /// Trace ID to correlate across signals
@@ -585,6 +606,17 @@ pub enum GetResource {
     Trace {
         /// The trace ID to look up
         trace_id: String,
+    },
+    /// Describe a metric: type, unit, labels, series count, recent points
+    Metric {
+        /// The metric name
+        name: String,
+        /// Time window (e.g. 1h, 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max points to examine
+        #[arg(long, default_value = "500")]
+        limit: u32,
     },
 }
 
@@ -1116,6 +1148,9 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             GetResource::Trace { trace_id } => {
                 commands::get::trace(&client, &opts.format, &trace_id).await?;
             }
+            GetResource::Metric { name, last, limit } => {
+                commands::get::metric(&client, &opts.format, &name, last, limit).await?;
+            }
         },
         Commands::Comment { action } => match action {
             CommentAction::Add {
@@ -1159,6 +1194,16 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             service,
         } => {
             commands::anomalies::run(&client, &opts.format, last, baseline, service).await?;
+        }
+        Commands::Topology { last, limit } => {
+            commands::topology::run(&client, &opts.format, last, limit).await?;
+        }
+        Commands::Diff {
+            last,
+            baseline,
+            service,
+        } => {
+            commands::topology::diff(&client, &opts.format, last, baseline, service).await?;
         }
         Commands::Correlate { trace } => {
             commands::correlate::run(&client, &opts.format, &trace).await?;

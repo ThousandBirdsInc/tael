@@ -284,6 +284,67 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn topology(&self, last: Option<&str>, limit: u32) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/topology", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn diff(
+        &self,
+        last: Option<&str>,
+        baseline: Option<&str>,
+        service: Option<&str>,
+    ) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        if let Some(b) = baseline {
+            params.push(("baseline", b.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/diff", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn get_metric(&self, name: &str, last: Option<&str>, limit: u32) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics/{name}", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http

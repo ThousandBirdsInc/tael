@@ -137,6 +137,99 @@ Score JSONL lines require `case_id`, `metric`, and `value`; `run_id` is filled
 from the command argument when omitted. Optional fields include `suite_id`,
 `trace_id`, `span_id`, `scorer`, `label`, `rationale_sha256`, and `source`.
 
+### Structure and comparison
+
+```
+tael topology --last 1h
+tael diff --last 10m --baseline 1h [--service NAME]
+tael get metric <name> --last 24h
+```
+
+`topology` reconstructs the service dependency graph from span parent/child
+edges — it reflects what the system actually did, not a declared architecture.
+Cross-service edges only; same-service parent/child pairs are internal
+structure. `spans_with_parent_outside_window` counts spans whose parent fell
+outside the window, so a high value means the graph is missing edges and the
+window should be widened.
+
+`diff` is the unopinionated sibling of `anomalies`: every summary metric with
+current, baseline, delta, and ratio, with no threshold applied. The baseline
+window *contains* the current one, so rates compare directly but totals do not
+— the response says so and reports both.
+
+`get metric` describes one metric before you query it: type, unit, label keys,
+series count, value range, and whether the points retained histogram buckets
+(which decides whether `histogram_quantile` will work on it).
+
+### Alerts
+
+```
+tael alert create --name high-errors \
+  --query 'tael:span_error_rate{service="api"} > 0.05' \
+  --for 5m --sink webhook=https://... --sink exec='./page.sh'
+tael alert list
+tael alert delete <name>
+tael alerts [--limit N] [--follow]
+```
+
+Rules evaluate a PromQL-subset expression every 30s and emit an event on state
+transition only — a rule firing for an hour does not re-deliver. `--for`
+requires the condition to hold *continuously*; a dip resets the streak.
+
+These span-derived series exist without any metric instrumentation, each
+labelled by `service` (plus a fleet-wide aggregate under `service="tael"`):
+`tael:span_error_rate`, `tael:span_p95_ms`, `tael:span_p99_ms`,
+`tael:span_count`, `tael:span_error_count`.
+
+`tael alerts --follow` blocks and streams — it is the long-poll primitive for
+waiting on a system rather than polling it.
+
+### Online scoring
+
+```
+tael score rule create --name faithfulness --sample 0.05 \
+  --match service=agent-api --match attribute:gen_ai.system=anthropic \
+  --cmd ./judge.sh
+tael score rule list
+tael score rule delete <name>
+```
+
+Samples matching production traces and runs the scorer once per trace, writing
+results as `tael_eval_score` points tagged `source=online` and `rule=<name>`.
+The scorer sees `TAEL_EVAL_TRACE_ID`, `TAEL_EVAL_SPAN_ID`, `TAEL_EVAL_SERVICE`,
+`TAEL_EVAL_OPERATION`, `TAEL_EVAL_RULE`, `TAEL_EVAL_ONLINE=1`, and must print
+one JSON object per line with `metric` and `value` (optionally `rationale`).
+Same contract as `tael eval run`, so one script works in both places.
+
+Sampling is deterministic in the trace ID, so a given trace is always in or out
+of the sample. `score rule list` reports traces seen vs sampled and the last
+scorer error — a silently broken judge shows up as `failures`, not as missing
+data.
+
+### Config and keys
+
+```
+tael config show [--data-dir DIR]
+tael config init [--force]
+tael auth create-key --name NAME --role reader|writer|admin
+tael auth list
+tael auth revoke <key-id>
+```
+
+Retention defaults to 365 days for every signal; `config init` writes the
+shorter recommended per-signal windows. Precedence is flag > env > file >
+default.
+
+### MCP
+
+```
+tael mcp serve
+```
+
+Serves the query surface over the Model Context Protocol on stdio. Tools map
+1:1 onto these commands and return the same JSON shapes. `SKILL.md` and this
+file are served as the `tael://skill` and `tael://llm-contract` resources.
+
 ### Server
 
 ```
@@ -159,8 +252,55 @@ With `--format json` (default), responses have these top-level shapes:
 - `tael eval status` → `{"run": {...}}`
 - `tael eval cases` → `{"run_id", "cases": [...], "count": N}`
 - `tael eval scores` → `{"run_id", "scores": [...], "count": N}`
+- `tael topology` → `{"services": [...], "edges": [...], "spans_examined", "spans_with_parent_outside_window"}`
+- `tael diff` → `{"current_window_seconds", "baseline_window_seconds", "<metric>": {"current","baseline","delta","ratio"}, "totals", "note"}`
+- `tael get metric` → `{"metric","type","unit","point_count","series_count","services","label_keys","value_min","value_max","histogram_quantile_available","recent_points"}`
+- `tael alert list` → `{"alerts": [...], "count": N}`
+- `tael alerts` → `{"events": [...], "count": N}`
+- `tael score rule list` → `{"rules": [...], "count": N}`
+- `tael config show` → `{"config_file","config_file_exists","storage","retention_days"}`
+- `tael auth list` → `{"keystore","count","keys": [...]}`
 
 Errors are returned as `{"error": "..."}` with a non-2xx HTTP status.
+
+### Exit codes
+
+Every command exits with a category code, so a caller can branch without
+parsing output:
+
+```
+0  success
+1  unclassified failure
+2  query succeeded but matched nothing
+3  malformed query, filter, or argument
+4  server unreachable
+5  authentication or authorization failure
+6  a --exit-on condition tripped (tael watch)
+```
+
+Code 2 is not an error — the command still printed a well-formed empty
+response. Failures also print `{"error", "category", "exit_code"}` on stderr.
+
+### Blocking on a condition
+
+```
+tael watch --last 1m --interval 10 \
+  --exit-on 'error_rate>0.05' --exit-on 'p95_ms>2x' [--max-ticks N]
+```
+
+Polls and prints deltas until a condition holds, then exits 6 with a verdict
+naming what tripped. Thresholds are absolute (`error_rate>0.05`) or relative to
+the first sample (`p95_ms>2x`), which is what you want when starting mid-incident
+with no known-good baseline. Fields resolve flat (`error_rate`) or dotted
+(`traces.error_rate`). Without `--exit-on` it polls forever, as before.
+
+### Explaining a query
+
+`tael query traces --explain` adds an `explain` object: `access_path`,
+`tiers_consulted`, `rows_scanned`, `rows_returned`, `limit_reached`,
+`effective_filters`, `elapsed_ms`, and `notes` describing the mistakes that
+actually produce confusing results (silently hitting the row limit,
+exact-match attribute filters, an unbounded window).
 
 ## PromQL subset (`GET /api/v1/metrics/query?query=...&last=...`)
 
@@ -296,7 +436,20 @@ attribute filtering yet.
 
 - All timestamps returned are UTC ISO 8601.
 - Default limits: traces/logs 100, metrics 500. Raise with `limit=`.
-- The server is single-node DuckDB. Treat queries scanning > ~1M rows
-  as slow; prefer narrow `last=` windows.
-- Auth is off by default; the server binds to `127.0.0.1` only unless
-  reconfigured.
+- The default storage engine is `tael-backend` (an LSM hot tier over a
+  Parquet cold tier), not DuckDB. DuckDB is a legacy backend behind
+  `--features duckdb`.
+- `tael query sql` requires a build with the `duckdb` feature. On a default
+  install it returns an error; use the filter commands, the PromQL subset,
+  and `summarize`/`diff`/`topology` instead.
+- `query_traces` has no secondary indexes: it walks the time index
+  newest-first and deserializes every span until the limit fills, so a
+  low-selectivity filter over a large window is the slow case. Prefer narrow
+  `last=` windows. `summarize` is a full scan of its window — roughly 65ms
+  per 10k spans — so bound it on a busy server.
+- Auth is off by default when every listener is loopback. A server bound to
+  a non-loopback address requires API keys and refuses to start without them
+  (override with `--auth off`). Authenticate with
+  `Authorization: Bearer <key>`; the CLI reads `TAEL_API_KEY` or `--api-key`.
+- OTLP ingest accepts gRPC on :4317 and HTTP/protobuf on :4318. OTLP/JSON is
+  not supported.

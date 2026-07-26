@@ -285,6 +285,53 @@ fn tool_definitions() -> Vec<Value> {
             json!({ "trace_id": s("The trace ID") }),
             vec!["trace_id"],
         ),
+        tool(
+            "topology",
+            "Service dependency graph reconstructed from span parent/child \
+             edges, with call counts and error rates per edge. Use it to find \
+             which downstream dependency an error rate is coming from.",
+            json!({
+                "last": s("Time window, e.g. 1h, 24h"),
+                "limit": n("Max spans to examine (default 50000)"),
+            }),
+            vec![],
+        ),
+        tool(
+            "diff",
+            "Compare every summary metric between a window and a baseline \
+             window, reporting current, baseline, delta, and ratio with no \
+             threshold applied. Use for a specific change; use anomalies to \
+             ask whether anything is wrong at all.",
+            json!({
+                "last": s("Current window (default 1h)"),
+                "baseline": s("Baseline window (default 6x current)"),
+                "service": s("Restrict to one service"),
+            }),
+            vec![],
+        ),
+        tool(
+            "get_metric",
+            "Describe one metric before querying it: type, unit, label keys, \
+             series count, value range, and whether its points retained \
+             histogram buckets (which decides if histogram_quantile works).",
+            json!({
+                "name": s("The metric name"),
+                "last": s("Time window, e.g. 1h, 24h"),
+            }),
+            vec!["name"],
+        ),
+        tool(
+            "list_alerts",
+            "Alert rules and their current state (ok, pending, firing).",
+            json!({}),
+            vec![],
+        ),
+        tool(
+            "alert_events",
+            "Recent alert state transitions, newest first.",
+            json!({ "limit": n("Max events to return (default 50)") }),
+            vec![],
+        ),
         tool("eval_runs", "List recent eval runs.", json!({}), vec![]),
         tool(
             "eval_status",
@@ -402,6 +449,38 @@ async fn call_tool(client: &TaelClient, params: &Value) -> Result<Value, RpcErro
                 .await
         }
         "get_comments" => client.get_comments(&required("trace_id")?).await,
+        "topology" => {
+            client
+                .topology(
+                    str_arg("last").as_deref(),
+                    num_arg("limit").unwrap_or(50_000.0) as u32,
+                )
+                .await
+        }
+        "diff" => {
+            client
+                .diff(
+                    str_arg("last").as_deref(),
+                    str_arg("baseline").as_deref(),
+                    str_arg("service").as_deref(),
+                )
+                .await
+        }
+        "get_metric" => {
+            client
+                .get_metric(
+                    &required("name")?,
+                    str_arg("last").as_deref(),
+                    num_arg("limit").unwrap_or(500.0) as u32,
+                )
+                .await
+        }
+        "list_alerts" => client.list_alerts().await,
+        "alert_events" => {
+            client
+                .alert_events(num_arg("limit").unwrap_or(50.0) as u32)
+                .await
+        }
         "eval_runs" => client.eval_runs().await,
         "eval_status" => client.eval_status(&required("run_id")?).await,
         "eval_compare" => {

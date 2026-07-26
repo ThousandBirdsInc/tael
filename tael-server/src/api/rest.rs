@@ -80,6 +80,9 @@ pub fn router(
         .route("/api/v1/summary", get(query_summary))
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
+        .route("/api/v1/topology", get(query_topology))
+        .route("/api/v1/diff", get(query_diff))
+        .route("/api/v1/metrics/{name}", get(get_metric))
         .route("/api/v1/sql", get(query_sql))
         .route("/api/v1/alerts", get(list_alerts).post(create_alert))
         .route("/api/v1/alerts/{name}", axum::routing::delete(delete_alert))
@@ -2043,4 +2046,311 @@ async fn delete_score_rule(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+// ── Topology, diff, and metric inspection (DESIGN.md M3) ────────────
+
+#[derive(Debug, Deserialize)]
+struct TopologyParams {
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Service dependency graph derived from span parent/child edges.
+///
+/// An edge exists when a span in service A is the parent of a span in service
+/// B. This is reconstructed from the spans themselves rather than declared
+/// anywhere, so it reflects what the system actually did rather than what an
+/// architecture diagram claims.
+async fn query_topology(
+    State(state): State<AppState>,
+    Query(params): Query<TopologyParams>,
+) -> impl IntoResponse {
+    let query = TraceQuery {
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(params.limit.unwrap_or(50_000)),
+        ..Default::default()
+    };
+
+    let spans = match state.store.query_traces(&query) {
+        Ok(spans) => spans,
+        Err(e) => {
+            tracing::error!(error = %e, "topology query failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    // span_id -> (service, is_error) so a child can find its parent's service.
+    let by_id: HashMap<&str, &Span> = spans.iter().map(|s| (s.span_id.as_str(), s)).collect();
+
+    #[derive(Default)]
+    struct Edge {
+        calls: i64,
+        errors: i64,
+        total_ms: f64,
+    }
+    let mut edges: BTreeMap<(String, String), Edge> = BTreeMap::new();
+    let mut nodes: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    // Spans whose parent is outside the queried window, which would otherwise
+    // look like roots and overstate entry points.
+    let mut dangling = 0usize;
+
+    for span in &spans {
+        let node = nodes.entry(span.service.clone()).or_insert((0, 0));
+        node.0 += 1;
+        if span.status == SpanStatus::Error {
+            node.1 += 1;
+        }
+
+        let Some(parent_id) = span.parent_span_id.as_deref() else {
+            continue;
+        };
+        let Some(parent) = by_id.get(parent_id) else {
+            dangling += 1;
+            continue;
+        };
+        // Only cross-service edges are dependencies; a span calling another
+        // span inside the same service is internal structure.
+        if parent.service == span.service {
+            continue;
+        }
+        let edge = edges
+            .entry((parent.service.clone(), span.service.clone()))
+            .or_default();
+        edge.calls += 1;
+        edge.total_ms += span.duration_ms;
+        if span.status == SpanStatus::Error {
+            edge.errors += 1;
+        }
+    }
+
+    let node_list: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|(name, (span_count, error_count))| {
+            serde_json::json!({
+                "service": name,
+                "span_count": span_count,
+                "error_count": error_count,
+                "error_rate": if *span_count > 0 {
+                    *error_count as f64 / *span_count as f64
+                } else {
+                    0.0
+                },
+            })
+        })
+        .collect();
+
+    let edge_list: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|((from, to), e)| {
+            serde_json::json!({
+                "from": from,
+                "to": to,
+                "calls": e.calls,
+                "errors": e.errors,
+                "error_rate": if e.calls > 0 { e.errors as f64 / e.calls as f64 } else { 0.0 },
+                "avg_duration_ms": if e.calls > 0 { e.total_ms / e.calls as f64 } else { 0.0 },
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "services": node_list,
+            "edges": edge_list,
+            "spans_examined": spans.len(),
+            "spans_with_parent_outside_window": dangling,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffParams {
+    last: Option<String>,
+    baseline: Option<String>,
+    service: Option<String>,
+}
+
+/// Compare two windows across every summary metric.
+///
+/// `anomalies` is the opinionated version of this — it applies fixed thresholds
+/// and reports only what it judges regressed. `diff` reports every delta and
+/// leaves the judgement to the caller, which is what an agent investigating a
+/// specific change actually wants.
+async fn query_diff(
+    State(state): State<AppState>,
+    Query(params): Query<DiffParams>,
+) -> impl IntoResponse {
+    let current_seconds = params
+        .last
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(3600);
+    let baseline_seconds = params
+        .baseline
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(current_seconds * 6);
+
+    let service = params.service.as_deref();
+    let current = match state.store.query_summary(current_seconds, service) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let baseline = match state.store.query_summary(baseline_seconds, service) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    // The baseline window contains the current one, so raw counts are not
+    // comparable — rates are. Counts are still reported, labeled as totals.
+    let per_second = |count: i64, seconds: i64| {
+        if seconds > 0 {
+            count as f64 / seconds as f64
+        } else {
+            0.0
+        }
+    };
+    let delta = |current: f64, baseline: f64| {
+        serde_json::json!({
+            "current": current,
+            "baseline": baseline,
+            "delta": current - baseline,
+            "ratio": if baseline.abs() > f64::EPSILON { current / baseline } else { f64::NAN },
+        })
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "current_window_seconds": current_seconds,
+            "baseline_window_seconds": baseline_seconds,
+            "service_filter": service,
+            "note": "the baseline window contains the current one, so rates \
+                     compare directly but totals do not",
+            "spans_per_second": delta(
+                per_second(current.traces.span_count, current_seconds),
+                per_second(baseline.traces.span_count, baseline_seconds),
+            ),
+            "error_rate": delta(current.traces.error_rate, baseline.traces.error_rate),
+            "p50_ms": delta(current.traces.p50_ms, baseline.traces.p50_ms),
+            "p95_ms": delta(current.traces.p95_ms, baseline.traces.p95_ms),
+            "p99_ms": delta(current.traces.p99_ms, baseline.traces.p99_ms),
+            "avg_ms": delta(current.traces.avg_ms, baseline.traces.avg_ms),
+            "log_errors_per_second": delta(
+                per_second(current.logs.error, current_seconds),
+                per_second(baseline.logs.error, baseline_seconds),
+            ),
+            "totals": {
+                "current_span_count": current.traces.span_count,
+                "baseline_span_count": baseline.traces.span_count,
+                "current_error_count": current.traces.error_count,
+                "baseline_error_count": baseline.traces.error_count,
+            },
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricDetailParams {
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Everything known about one metric: its type, unit, label keys, series
+/// count, value range, and recent points. Answers "what is this metric and can
+/// I query it" without guessing at a filter that returns nothing.
+async fn get_metric(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<MetricDetailParams>,
+) -> impl IntoResponse {
+    let query = MetricQuery {
+        service: None,
+        name: Some(name.clone()),
+        metric_type: None,
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(params.limit.unwrap_or(500)),
+    };
+
+    let points = match state.store.query_metrics(&query) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    if points.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("no points found for metric `{name}`"),
+                "metric": name,
+            })),
+        );
+    }
+
+    let mut label_keys: HashSet<&str> = HashSet::new();
+    let mut services: HashSet<&str> = HashSet::new();
+    let mut series: HashSet<String> = HashSet::new();
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut with_histogram = 0usize;
+
+    for p in &points {
+        services.insert(p.service.as_str());
+        for k in p.attributes.keys() {
+            label_keys.insert(k.as_str());
+        }
+        let mut key: Vec<_> = p.attributes.iter().collect();
+        key.sort();
+        series.insert(format!("{}|{:?}", p.service, key));
+        min = min.min(p.value);
+        max = max.max(p.value);
+        if p.histogram.is_some() {
+            with_histogram += 1;
+        }
+    }
+
+    let mut sorted_labels: Vec<&str> = label_keys.into_iter().collect();
+    sorted_labels.sort_unstable();
+    let mut sorted_services: Vec<&str> = services.into_iter().collect();
+    sorted_services.sort_unstable();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "metric": name,
+            "type": points[0].metric_type.to_string(),
+            "unit": points[0].unit,
+            "point_count": points.len(),
+            "series_count": series.len(),
+            "services": sorted_services,
+            "label_keys": sorted_labels,
+            "value_min": min,
+            "value_max": max,
+            "latest_timestamp": points.first().map(|p| p.timestamp),
+            // Quantiles are only answerable for points that retained buckets.
+            "points_with_histogram_buckets": with_histogram,
+            "histogram_quantile_available": with_histogram > 0,
+            "recent_points": points.iter().take(20).collect::<Vec<_>>(),
+        })),
+    )
 }

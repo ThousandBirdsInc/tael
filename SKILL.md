@@ -166,6 +166,67 @@ bucket layout on the point. Dotted OTel metric names work as written.
 
 When filter mode suffices, prefer it. PromQL here is a small subset and easy to misuse.
 
+### 5b. Map the system, or compare two windows
+
+```bash
+tael --format json topology --last 1h
+tael --format json diff --last 10m --baseline 6h --service api
+```
+
+`topology` reconstructs the service graph from span parent/child edges — use it
+when you don't know what calls what, or to find which downstream dependency an
+error rate is coming from. `diff` reports every summary metric's current,
+baseline, delta, and ratio with no threshold applied; `anomalies` is the same
+comparison with an opinion attached. Reach for `diff` when investigating a
+*specific* change ("did the deploy at 14:00 do this"), and `anomalies` when
+asking "is anything wrong".
+
+Before querying an unfamiliar metric, describe it:
+
+```bash
+tael --format json get metric http.server.duration --last 24h
+```
+
+That reports its type, unit, label keys, and whether the points retained
+histogram buckets — i.e. whether `histogram_quantile` will work on it.
+
+### 5c. Block until something happens, or alert on it
+
+```bash
+# Wait for a condition, then exit 6. This is how to watch a deploy.
+tael watch --last 1m --interval 10 --exit-on 'error_rate>0.05' --exit-on 'p95_ms>2x'
+
+# Or make it standing, delivered to a webhook or command.
+tael alert create --name high-errors \
+  --query 'tael:span_error_rate{service="api"} > 0.05' --for 5m \
+  --sink exec='./page.sh'
+tael alerts --follow
+```
+
+Prefer `watch --exit-on` for a bounded wait inside one task, and an alert rule
+for a standing condition. Thresholds can be absolute (`error_rate>0.05`) or
+relative to the first sample (`p95_ms>2x`) — use the relative form when you're
+starting mid-incident and don't know what healthy looks like.
+
+These span-derived series need no metric instrumentation, each labelled by
+`service` with a fleet-wide aggregate under `service="tael"`:
+`tael:span_error_rate`, `tael:span_p95_ms`, `tael:span_p99_ms`,
+`tael:span_count`, `tael:span_error_count`.
+
+### 5d. Score production traffic continuously
+
+```bash
+tael score rule create --name faithfulness --sample 0.05 \
+  --match service=agent-api --cmd ./judge.sh
+tael score rule list
+```
+
+Samples matching traces and runs a scorer against each, writing
+`tael_eval_score` points tagged `source=online`. The scorer contract matches
+`tael eval run`, so the same script grades golden cases offline and production
+traffic online. Check `failures` and `last_error` in `score rule list` — a
+broken judge shows up there, not as missing data.
+
 ### 6. Watch an ongoing change
 
 When the user is mid-deploy, mid-migration, or otherwise wants to know whether something is getting worse over the next few minutes, use `watch`. It polls `summarize` on an interval and prints signed deltas (span count, error count, error rate, p95, log errors, metric volume) per tick:
@@ -322,18 +383,25 @@ tael live --eval-run <run_id>
 
 As an agent, prefer the JSON eval commands over the TUI unless the user explicitly asks for an interactive view.
 
-### SQL escape hatch (advanced)
+### SQL escape hatch (advanced, and not on a default install)
 
-When the structured commands can't express the cut you need — a `GROUP BY` the
-CLI doesn't offer, a join across signals, an aggregate over attributes — drop to
-read-only SQL over the telemetry tables (`spans`, `logs`, `metrics`,
-`trace_comments`):
+**Check this before reaching for it.** `tael query sql` requires a server built
+with `--features duckdb`. On a default install — which is what `cargo install
+tael-cli`, `cargo binstall`, and the Docker image all produce — it returns
+`{"error": "SQL queries require a build with the duckdb feature"}` and exits 3.
+
+Where it is available, it runs read-only SQL over the telemetry tables
+(`spans`, `logs`, `metrics`, `trace_comments`):
 
 ```bash
 tael --format json query sql "SELECT service, COUNT(*) AS n FROM spans WHERE status = 'error' GROUP BY service ORDER BY n DESC"
 ```
 
-Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected. Reach for this only after the purpose-built commands above; they're faster to write and harder to get wrong.
+Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected.
+
+On a default install, cover the same ground with `summarize` (aggregates by
+service and operation), `diff` (window comparison), `topology` (cross-service
+call counts and error rates), and the PromQL subset with `sum by (...)`.
 
 ## Instrumenting apps to export to tael
 
@@ -469,7 +537,7 @@ get trace        → {"trace_id", "span_count", "spans": [...]}
 query logs       → {"logs": [...], "count": N}
 query metrics    → {"metrics": [...], "count": N}                  (filter mode)
 query metrics    → {"query", "series": [...], "count": N}          (--query mode)
-query sql        → {"rows": [...], "count": N}
+query sql        → {"rows": [...], "count": N}   (needs a --features duckdb build)
 comment list     → {"comments": [...], "count": N}
 summarize        → {"window_seconds", "traces", "top_services", "top_error_operations", "logs", "metrics"}
 anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}
@@ -487,8 +555,31 @@ issue examples   → {"issue_id", "examples": [...], "count": N}
 signal trend     → {"signal", "definitions", "matches", "buckets", "count": N}
 experiment compare → {"experiment_id", "variants": [...], "count": N}
 diagnose list    → {"diagnostics": [...], "count": N}
+topology         → {"services": [...], "edges": [...], "spans_examined", "spans_with_parent_outside_window"}
+diff             → {"current_window_seconds", "baseline_window_seconds", "<metric>": {"current","baseline","delta","ratio"}, "totals", "note"}
+get metric       → {"metric", "type", "unit", "point_count", "series_count", "services", "label_keys", "value_min", "value_max", "histogram_quantile_available", "recent_points"}
+alert list       → {"alerts": [...], "count": N}
+alerts           → {"events": [...], "count": N}
+score rule list  → {"rules": [...], "count": N}
+config show      → {"config_file", "config_file_exists", "storage", "retention_days"}
+auth list        → {"keystore", "count", "keys": [...]}
 <error>          → {"error": "..."}   (with non-2xx HTTP status)
 ```
+
+### Exit codes
+
+Branch on the exit code instead of parsing output:
+
+```
+0  success                       3  malformed query or argument
+1  unclassified failure          4  server unreachable
+2  matched nothing               5  auth failure
+                                 6  a --exit-on condition tripped
+```
+
+Code 2 is not an error — the command printed a well-formed empty response.
+`tael query traces --status error` exiting 2 means "no errors", which is a
+useful thing to be able to test directly.
 
 ## Working with results
 
