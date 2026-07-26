@@ -993,6 +993,7 @@ async fn eval_add_score(
         value: payload.value,
         unit: "score".to_string(),
         attributes: attrs,
+        histogram: None,
     };
 
     match state.store.insert_metrics(std::slice::from_ref(&point)) {
@@ -1771,6 +1772,7 @@ mod tests {
                 value: 1.0,
                 unit: "score".to_string(),
                 attributes: score_attrs,
+                histogram: None,
             }])
             .unwrap();
 

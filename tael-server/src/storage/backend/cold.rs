@@ -610,6 +610,10 @@ fn metric_schema() -> Arc<Schema> {
         Field::new("value", DataType::Float64, false),
         Field::new("unit", DataType::Utf8, false),
         Field::new("attributes_json", DataType::Utf8, false),
+        // Bucket layout for histogram points; null for every other type.
+        // Stored as JSON alongside `attributes_json` rather than as a nested
+        // list column so the SQL surface can read it without a struct decoder.
+        Field::new("histogram_json", DataType::Utf8, true),
     ]))
 }
 
@@ -646,6 +650,16 @@ fn metrics_to_batch(metrics: &[&MetricPoint]) -> Result<RecordBatch> {
             metrics
                 .iter()
                 .map(|m| serde_json::to_string(&m.attributes).unwrap_or_else(|_| "{}".into()))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics
+                .iter()
+                .map(|m| {
+                    m.histogram
+                        .as_ref()
+                        .and_then(|h| serde_json::to_string(h).ok())
+                })
                 .collect::<Vec<_>>(),
         )),
     ];
@@ -748,6 +762,17 @@ fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
     let value = col!(4, Float64Array);
     let unit = col!(5, StringArray);
     let attrs = col!(6, StringArray);
+    // Parquet files written before histogram buckets were retained have no
+    // such column; those points simply read back without a distribution.
+    let histograms = (batch.num_columns() > 7)
+        .then(|| {
+            batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("bad histogram column")
+        })
+        .transpose()?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -759,6 +784,9 @@ fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
             value: value.value(i),
             unit: unit.value(i).to_string(),
             attributes: serde_json::from_str(attrs.value(i)).unwrap_or_default(),
+            histogram: histograms
+                .filter(|h| !h.is_null(i))
+                .and_then(|h| serde_json::from_str(h.value(i)).ok()),
         });
     }
     Ok(out)
@@ -823,6 +851,7 @@ mod tests {
             value: v,
             unit: "1".into(),
             attributes: std::collections::HashMap::new(),
+            histogram: None,
         };
         // Three points in the same 5m bucket (0,60,120s) + one in the next (360s).
         cold.write_downsampled(&[mk(0, 10.0), mk(60, 30.0), mk(120, 20.0), mk(360, 5.0)])

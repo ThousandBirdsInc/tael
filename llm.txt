@@ -189,7 +189,7 @@ PromQL. Stick to the grammar below.
 - Offset modifier: `metric offset 1h`
 - Subqueries: `rate(metric[5m:1m])`
 - Range queries / `/api/v1/query_range` — all evaluation is **instant**
-- `histogram_quantile`, `topk`, `bottomk`, `quantile`, `stddev`, `stdvar`
+- `topk`, `bottomk`, `quantile`, `stddev`, `stdvar`
 - Scalar literals, `vector()`, `time()`, `timestamp()`
 - `@` modifier, `absent()`, label_replace/label_join
 - Nested binary ops or arithmetic inside aggregators
@@ -205,11 +205,38 @@ for SLO math.
 
 ### Histogram metrics
 
-OTLP Histogram and ExponentialHistogram data points are stored as a
-single row with `value = sum` and `metric_type = "histogram"`. Bucket
-boundaries, counts, and min/max are dropped. You cannot compute
-percentiles from stored histograms. If you need p95/p99, aggregate at
-the client before export.
+OTLP Histogram and ExponentialHistogram data points retain their bucket
+layout in a `histogram` object on the point:
+
+    {"bounds": [10.0, 50.0, 100.0], "counts": [2, 5, 2, 1],
+     "count": 10, "sum": 420.0, "min": 3.0, "max": 250.0,
+     "temporality": "cumulative"}
+
+`counts` is per-bucket (not cumulative) and always has one more entry
+than `bounds`; the last entry counts observations above the final bound.
+Exponential histograms are converted to explicit bounds at ingest, so
+there is one shape to query regardless of how the client encoded it.
+
+Query percentiles with the PromQL subset:
+
+    histogram_quantile(0.95, http.server.duration)
+    histogram_quantile(0.99, http.server.duration) by (service)
+
+Unlike Prometheus, the second argument is the metric selector itself —
+there are no `le`-labelled `_bucket` series to rate over.
+
+Caveats:
+- The result interpolates linearly within the containing bucket, so it
+  is bucket-resolution accurate, not exact.
+- A quantile falling in the open-ended top bucket reports the producer's
+  `max` (or the last bound when `max` is absent).
+- `temporality` decides how points combine over the lookback window:
+  `delta` points are summed, `cumulative` points already contain every
+  earlier observation so only the newest is used.
+- Points with no bucket layout (pre-retention rows, remote-write data,
+  the legacy DuckDB backend) produce **no series** rather than a zero.
+- Merging across a `by (...)` grouping requires identical bounds;
+  mismatched layouts are skipped, not approximated.
 
 ## Prometheus remote-write (`POST /api/v1/write`)
 
@@ -220,7 +247,10 @@ the client before export.
   is stored with `metric_type = "unknown"`. Queries filtering by
   `--type gauge` etc. will not match remote-write data.
 - `NaN` samples (Prometheus "stale" markers) are dropped on ingest.
-- No metadata handling, no exemplars, no native histograms.
+- No metadata handling, no exemplars, no native histograms. Remote-write
+  flattens histograms into `_bucket`/`_sum`/`_count` series before the
+  wire, so there is no bucket layout to retain and `histogram_quantile`
+  does not apply to remote-write data.
 
 ## Datadog trace-agent intake (`/v0.3|/v0.4|/v0.5/traces`, `GET /info`)
 

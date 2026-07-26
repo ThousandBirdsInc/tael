@@ -1032,6 +1032,7 @@ mod tests {
             value: 42.0,
             unit: "1".into(),
             attributes: HashMap::new(),
+            histogram: None,
         }])
         .unwrap();
         let metrics = b
@@ -1103,6 +1104,7 @@ mod tests {
             value: 7.0,
             unit: "1".into(),
             attributes: HashMap::new(),
+            histogram: None,
         }])
         .unwrap();
 

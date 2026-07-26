@@ -111,6 +111,10 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
                 value: sample.value,
                 unit: String::new(),
                 attributes: attributes.clone(),
+                // Remote-write v1 flattens histograms into `_bucket`/`_sum`/
+                // `_count` series before they reach the wire, so there is no
+                // bucket layout left to capture on the point itself.
+                histogram: None,
             });
         }
     }

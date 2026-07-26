@@ -152,11 +152,16 @@ Returns `{"query", "series": [...], "count": N}`. Supported syntax:
 - Bare selectors: `metric{label="v",other!="x"}`
 - `rate(sel[5m])`
 - Aggregators: `sum|avg|min|max|count(expr)` with optional `by (lbl)`
+- `histogram_quantile(0.95, metric{...})`, optionally `... by (lbl)`
+
+Note `histogram_quantile` takes the **metric selector directly**, not a fan of
+`le`-labelled bucket series as in Prometheus — tael keeps each point's whole
+bucket layout on the point. Dotted OTel metric names work as written.
 
 **Not supported** — do not generate these, they'll fail:
 - Binary ops (`a/b`, `a+b`), comparisons, `and/or/unless`
 - `without (...)`, regex matchers (`=~`/`!~`), offset, subqueries
-- `histogram_quantile`, `topk`, `quantile`, `stddev`
+- `topk`, `bottomk`, `quantile`, `stddev`
 - Range queries / `/query_range` — all evaluation is instant
 
 When filter mode suffices, prefer it. PromQL here is a small subset and easy to misuse.
@@ -421,7 +426,7 @@ Avoid: PII unless you've cleared it, full request/response bodies (truncate or h
 - **Don't ship a second observability stack alongside tael** (app logging to a file + OTel to tael). Pick OTel and route everything through it.
 - **Don't skip `service.name`.** Without it, the service field in tael becomes `"unknown"` and you can't filter by service.
 - **Don't instrument hot loops with a span per iteration.** Wrap the whole batch in one span and record counts, totals, and min/max as attributes.
-- **Don't use histogram metrics for latency in tael.** Bucket data is dropped on ingest (see caveats below), so percentiles won't work. Record latency as span duration — tael queries spans natively — and use metrics for rates and gauges only.
+- **Prefer span duration over histogram metrics for latency.** tael retains histogram buckets, so `histogram_quantile` works — but a span carries the attributes that explain *why* a request was slow, and a histogram bucket doesn't. Use histograms for aggregate distributions, spans for anything you'll need to investigate.
 - **Don't strip "noisy" attributes to reduce cardinality.** Tael does not charge per cardinality. The attribute you remove today is the one you'll need tomorrow.
 
 ### Verifying the integration worked
@@ -441,7 +446,7 @@ If the service doesn't appear, the usual culprits are: wrong endpoint, wrong pro
 
 ## Caveats you must know before using the data
 
-**Histograms lose bucket data.** OTLP Histogram and ExponentialHistogram points are stored with `value = sum` and buckets dropped. You **cannot compute p95/p99 from stored histograms.** If the user asks for percentiles, say so explicitly — don't fabricate them.
+**Histogram quantiles are bucket-resolution estimates.** OTLP Histogram and ExponentialHistogram points retain their bucket layout, so `histogram_quantile(0.95, metric)` works. The answer interpolates within the containing bucket — a histogram doesn't keep individual observations — so it is an estimate, not an exact percentile. A quantile landing in the open-ended top bucket reports the producer's `max`. Points ingested before bucket retention, and anything from Prometheus remote-write, have no bucket layout and are skipped rather than reported as zero.
 
 **Prometheus remote-write loses type info.** Metrics ingested via `/api/v1/write` are all stored with `metric_type = "unknown"`. Filtering `--type gauge` won't match them.
 
