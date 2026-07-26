@@ -112,22 +112,43 @@ impl ColdTier {
     /// under each signal and deletes the expired ones individually (a crash
     /// mid-drop leaves a harmless partial partition that a re-run finishes).
     pub fn drop_partitions_before(&self, cutoff_date: &str) -> Result<usize> {
+        self.drop_partitions_per_signal(&[
+            (SPANS, cutoff_date),
+            (LOGS, cutoff_date),
+            (METRICS, cutoff_date),
+        ])
+    }
+
+    /// Drop expired partitions with a **per-signal** cutoff date.
+    ///
+    /// Signals age at different rates: span payloads are large and investigated
+    /// within days, while 5-minute metric rollups are tiny and wanted for a
+    /// year. A single shared cutoff forces the shortest useful window on
+    /// everything, so each root gets its own.
+    pub fn drop_partitions_per_signal(&self, cutoffs: &[(&str, &str)]) -> Result<usize> {
         use std::collections::HashSet;
         let mut dropped: HashSet<String> = HashSet::new();
-        for root in [SPANS, LOGS, METRICS] {
+        for (root, cutoff_date) in cutoffs {
             for key in self.backend.list(root)? {
                 // Keys look like `spans/date=YYYY-MM-DD/hour=HH/…`; the date is
                 // zero-padded fixed-width, so a lexicographic compare is correct.
-                if let Some(date) = parse_date_segment(&key) {
-                    if date < cutoff_date {
-                        self.backend.delete(&key)?;
-                        dropped.insert(format!("{root}/date={date}"));
-                    }
+                if let Some(date) = parse_date_segment(&key)
+                    && date < *cutoff_date
+                {
+                    self.backend.delete(&key)?;
+                    dropped.insert(format!("{root}/date={date}"));
                 }
             }
         }
         Ok(dropped.len())
     }
+
+    /// The object-namespace roots, so callers can name signals without
+    /// duplicating the key strings.
+    pub const SPANS_ROOT: &'static str = SPANS;
+    pub const LOGS_ROOT: &'static str = LOGS;
+    pub const METRICS_ROOT: &'static str = METRICS;
+    pub const METRICS_5M_ROOT: &'static str = METRICS_5M;
 
     /// Read all spans for a trace from the cold tier.
     pub fn get_trace(&self, trace_id: &str) -> Result<Vec<Span>> {

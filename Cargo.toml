@@ -38,6 +38,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 walrus-rust = "0.2"
 snap = "1"
 flate2 = "1"
+toml = "0.8"
 bytes = "1"
 sha2 = "0.10"
 fjall = "3"

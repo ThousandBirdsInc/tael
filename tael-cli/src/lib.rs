@@ -182,6 +182,10 @@ pub enum Commands {
         /// off-box (env: TAEL_AUTH)
         #[arg(long)]
         auth: Option<String>,
+        /// TOML config file with retention and compaction policy. Defaults to
+        /// config.toml beside the data directory (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
     },
     /// Launch the desktop GUI (requires a build with `--features gui`)
     Gui,
@@ -309,10 +313,40 @@ pub enum Commands {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Inspect or scaffold the retention and compaction config
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Expose tael's query surface to an AI agent over the Model Context Protocol
     Mcp {
         #[command(subcommand)]
         action: McpAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show the retention/compaction policy actually in effect
+    Show {
+        /// Config file path (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
+        /// Data directory the config sits beside (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Write a commented config file with the recommended retention windows
+    Init {
+        /// Config file path (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
+        /// Data directory the config sits beside (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Overwrite an existing config file
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -774,6 +808,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         wal_dir,
         storage,
         auth,
+        config: config_path,
     } = command
     {
         if opts.unix_socket.is_some() && rest_api_socket.is_some() {
@@ -814,7 +849,33 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         if let Some(a) = auth {
             config.auth = Some(tael_server::auth::AuthMode::parse(&a)?);
         }
+        if let Some(p) = config_path {
+            config.config_path = Some(p);
+        }
         return tael_server::run(config).await;
+    }
+
+    // Config inspection reads the same files the server does, so it works
+    // whether or not one is running.
+    if let Commands::Config { action } = command {
+        let resolve_dir = |explicit: Option<String>| {
+            explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
+        };
+        return match action {
+            ConfigAction::Show { config, data_dir } => {
+                commands::config::show(&opts.format, config.as_deref(), &resolve_dir(data_dir))
+            }
+            ConfigAction::Init {
+                config,
+                data_dir,
+                force,
+            } => commands::config::init(
+                &opts.format,
+                config.as_deref(),
+                &resolve_dir(data_dir),
+                force,
+            ),
+        };
     }
 
     // Key management works on the keystore file directly, so it must not need
@@ -874,6 +935,8 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Serve { .. } => unreachable!(),
         // Handled above; the early return means this arm is never reached.
         Commands::Auth { .. } => unreachable!(),
+        // Handled above; the early return means this arm is never reached.
+        Commands::Config { .. } => unreachable!(),
         // Handled above; the early return / bail means this arm is never reached.
         Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {

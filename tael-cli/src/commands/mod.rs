@@ -2,6 +2,7 @@ pub mod anomalies;
 pub mod auth;
 pub mod comment;
 pub mod condition;
+pub mod config;
 pub mod correlate;
 pub mod diagnose;
 pub mod eval;

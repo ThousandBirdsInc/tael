@@ -35,6 +35,7 @@ uuid.workspace = true
 walrus-rust.workspace = true
 snap.workspace = true
 flate2.workspace = true
+toml.workspace = true
 rand.workspace = true
 bytes.workspace = true
 sha2.workspace = true
@@ -67,6 +68,11 @@ harness = false
 
 [[bench]]
 name = "blob_store"
+harness = false
+
+# The default storage engine, so this runs on the default feature set.
+[[bench]]
+name = "tael_backend"
 harness = false
 
 [[bench]]

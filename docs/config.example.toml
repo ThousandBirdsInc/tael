@@ -1,0 +1,25 @@
+# tael configuration.
+#
+# Precedence, highest first: command-line flag, environment variable, this
+# file, built-in default. Durations accept h, d, or w.
+
+[storage]
+# How long signals stay in the LSM hot tier before rolling into Parquet.
+hot_tier_hours = 24
+# How often the maintenance pass runs.
+compact_interval_secs = 3600
+
+[retention]
+# Span metadata. Large and high-cardinality; a week covers most investigations.
+traces = "7d"
+# LLM prompt/completion payloads. These dominate storage, and an investigation
+# usually needs the span long after it needs the payload — so they can expire
+# well before the spans that reference them.
+llm_payloads = "3d"
+# Verbose but searchable.
+logs = "14d"
+# Raw metric points.
+metrics_raw = "30d"
+# 5-minute rollups. Deliberately much longer than metrics_raw: they exist so
+# year-scale trends survive at a fraction of the size.
+metrics_rollups = "365d"

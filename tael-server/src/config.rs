@@ -67,6 +67,10 @@ pub struct ServerConfig {
     /// decide from its listen addresses: off for loopback-only, required for
     /// anything reachable off-box. See [`crate::auth::AuthMode::resolve`].
     pub auth: Option<crate::auth::AuthMode>,
+    /// Path to a TOML config file (`--config`, `TAEL_CONFIG`). `None` looks for
+    /// `config.toml` beside the data directory and proceeds without one if it
+    /// is absent.
+    pub config_path: Option<String>,
 }
 
 /// Object-storage selection for the cold (Parquet) tier and the blob store.
@@ -202,6 +206,7 @@ impl ServerConfig {
             // An unparseable TAEL_AUTH is ignored here rather than panicking in
             // a `from_env`; the server logs and falls back to the address-based
             // default.
+            config_path: non_empty_env("TAEL_CONFIG"),
             auth: non_empty_env("TAEL_AUTH").and_then(|s| match crate::auth::AuthMode::parse(&s) {
                 Ok(mode) => Some(mode),
                 Err(e) => {

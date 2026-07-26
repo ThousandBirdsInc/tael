@@ -13,6 +13,7 @@ mod config;
 mod ingest;
 mod log_bus;
 mod promql;
+pub mod retention;
 mod span_bus;
 mod storage;
 
@@ -82,38 +83,31 @@ impl ServerRunOptions {
     }
 }
 
-/// Periodically roll spans older than the hot-tier window into the cold tier.
-/// Runs the (blocking) compaction off the async executor. The window
-/// (`retention.traces.hot_tier`, default 24h) and interval are env-tunable
-/// (`TAEL_HOT_TIER_HOURS`, `TAEL_COMPACT_INTERVAL_SECS`) until retention config
-/// lands (Phase 7); a 0-hour window compacts everything (used in tests).
-fn spawn_span_compactor(backend: Arc<TaelBackend>, blobs: Arc<BlobStore>, blob_gc_enabled: bool) {
-    let window_hours: i64 = std::env::var("TAEL_HOT_TIER_HOURS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(24);
-    let interval_secs: u64 = std::env::var("TAEL_COMPACT_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3600);
-    // Span metadata retention (`retention.traces.metadata`, default 365d).
-    let retention_days: i64 = std::env::var("TAEL_TRACE_RETENTION_DAYS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(365);
+/// Periodically roll aged signals into the cold tier and drop expired
+/// partitions, following the resolved [`RetentionPolicy`]. Runs the (blocking)
+/// compaction off the async executor. A 0-hour hot-tier window compacts
+/// everything, which is what the tests rely on.
+fn spawn_span_compactor(
+    backend: Arc<TaelBackend>,
+    blobs: Arc<BlobStore>,
+    blob_gc_enabled: bool,
+    policy: retention::RetentionPolicy,
+) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(policy.compact_interval_secs));
         loop {
             tick.tick().await;
             let backend = Arc::clone(&backend);
             let blobs = Arc::clone(&blobs);
+            let policy = policy.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let now = chrono::Utc::now();
-                let hot_cutoff = now - chrono::Duration::hours(window_hours);
-                let mut compacted = backend.compact_spans(hot_cutoff)?;
-                compacted += backend.compact_logs_metrics(hot_cutoff)?;
-                let dropped =
-                    backend.enforce_span_retention(now - chrono::Duration::days(retention_days))?;
+                // One clock for the whole pass, so signals don't drift apart
+                // across a long compaction.
+                let cutoffs = policy.cutoffs(chrono::Utc::now());
+                let mut compacted = backend.compact_spans(cutoffs.hot_tier)?;
+                compacted += backend.compact_logs_metrics(cutoffs.hot_tier)?;
+                let dropped = backend.enforce_retention(&cutoffs)?;
                 // Payload blob GC: drop blobs no live row references (e.g. rows
                 // just removed by retention). Runs after partition drops. Skipped
                 // when this node doesn't own GC over a shared blob store (the
@@ -227,9 +221,20 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
 
     configure_walrus_data_dir(&config.wal_dir);
 
-    // Resolve auth before anything binds, so a misconfigured deployment fails
-    // at startup rather than after it is already accepting traffic.
+    // Resolve auth and retention before anything binds, so a misconfigured
+    // deployment fails at startup rather than after it is already accepting
+    // traffic.
     let auth_state = Arc::new(setup_auth(&config)?);
+    let retention_policy =
+        retention::RetentionPolicy::resolve(config.config_path.as_deref(), &config.data_dir)?;
+    tracing::info!(
+        traces_days = retention_policy.traces,
+        logs_days = retention_policy.logs,
+        metrics_days = retention_policy.metrics_raw,
+        rollups_days = retention_policy.metrics_rollups,
+        hot_tier_hours = retention_policy.hot_tier_hours,
+        "retention policy resolved"
+    );
 
     // Blob store: local filesystem by default; GCS when configured (opt-in,
     // requires the `cloud` feature — otherwise this fails loudly).
@@ -351,7 +356,12 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                          (set TAEL_BLOB_GC_ROLE=coordinator on exactly one node)"
                     );
                 }
-                spawn_span_compactor(Arc::clone(&backend), Arc::clone(&blobs), blob_gc_enabled);
+                spawn_span_compactor(
+                    Arc::clone(&backend),
+                    Arc::clone(&blobs),
+                    blob_gc_enabled,
+                    retention_policy.clone(),
+                );
                 backend as Arc<dyn Store>
             }
         }

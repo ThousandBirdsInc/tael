@@ -212,6 +212,34 @@ impl TaelBackend {
         Ok(dropped)
     }
 
+    /// Drop expired cold partitions using a per-signal policy.
+    ///
+    /// Metric rollups are included here and deliberately outlive raw points:
+    /// they exist so year-scale trends survive at a fraction of the size, which
+    /// only works if they are on a longer clock than the data they summarize.
+    pub fn enforce_retention(&self, cutoffs: &crate::retention::RetentionCutoffs) -> Result<usize> {
+        let date = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d").to_string();
+        let (traces, logs, metrics, rollups) = (
+            date(cutoffs.traces),
+            date(cutoffs.logs),
+            date(cutoffs.metrics_raw),
+            date(cutoffs.metrics_rollups),
+        );
+        let dropped = self.cold.drop_partitions_per_signal(&[
+            (ColdTier::SPANS_ROOT, &traces),
+            (ColdTier::LOGS_ROOT, &logs),
+            (ColdTier::METRICS_ROOT, &metrics),
+            (ColdTier::METRICS_5M_ROOT, &rollups),
+        ])?;
+        if dropped > 0 {
+            tracing::info!(
+                partitions = dropped,
+                "tael-backend: dropped expired cold partitions"
+            );
+        }
+        Ok(dropped)
+    }
+
     /// Apply a batch to every projection. Used by both the live write path and
     /// WAL replay.
     fn apply_spans(&self, spans: &[Span]) -> Result<()> {
