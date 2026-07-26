@@ -98,6 +98,8 @@ pub fn make_metric(i: usize) -> MetricPoint {
             ("endpoint", "/health".to_string()),
             ("code", "200".to_string()),
         ]),
+        // Scalar point: bucket layout only applies to histogram types.
+        histogram: None,
     }
 }
 
