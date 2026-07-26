@@ -441,6 +441,7 @@ mod tests {
                     scores,
                     suites,
                     path.clone(),
+                    false,
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();
@@ -505,6 +506,7 @@ mod tests {
                     scores,
                     suites,
                     data_dir.clone(),
+                    false,
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();

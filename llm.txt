@@ -335,6 +335,24 @@ of the sample. `score rule list` reports traces seen vs sampled and the last
 scorer error — a silently broken judge shows up as `failures`, not as missing
 data.
 
+### Multi-tenancy
+
+Off by default. `TAEL_MULTI_TENANT=1` scopes reads to the calling key's tenant
+(`tael auth create-key --tenant team-a`) and stamps writes with it.
+
+**This is authorization, not isolation.** The storage engine keys nothing by
+tenant — all tenants share one hot tier, one cold tier, and one blob store —
+so the guarantee is that the API will not hand tenant A's records to tenant B,
+not that they are stored apart. Two consequences follow:
+
+- `tael query sql` is admin-only while tenancy is on, because a SQL query
+  cannot be scoped per row without rewriting it. It is refused rather than
+  silently returning every tenant's data.
+- Admin keys read across all tenants by design.
+
+Records written before tenancy was enabled read as the `default` tenant, so
+turning it on does not make existing history invisible.
+
 ### Config and keys
 
 ```

@@ -105,6 +105,7 @@ pub fn source_queries() -> (crate::storage::models::TraceQuery, LogQuery, Metric
             metric_type: None,
             last_seconds: None,
             limit: Some(ROW_LIMIT),
+            tenant: None,
         },
     )
 }

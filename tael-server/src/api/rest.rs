@@ -45,6 +45,8 @@ struct AppState {
     suites: Arc<crate::suites::SuiteStore>,
     /// Data directory, for the stores that read files directly.
     data_dir: String,
+    /// Whether reads and writes are scoped by the caller's tenant.
+    multi_tenant: bool,
 }
 
 pub fn router(
@@ -57,6 +59,7 @@ pub fn router(
     scores: Arc<crate::scoring::ScoreRuleStore>,
     suites: Arc<crate::suites::SuiteStore>,
     data_dir: String,
+    multi_tenant: bool,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -70,6 +73,7 @@ pub fn router(
         scores,
         suites,
         data_dir,
+        multi_tenant,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -182,6 +186,7 @@ pub fn dd_router(
                 .unwrap_or_else(|_| unreachable!("empty-path suite store cannot fail to open")),
         ),
         data_dir: String::new(),
+        multi_tenant: false,
     };
     dd_routes()
         .route("/healthz", get(healthz))
@@ -261,7 +266,9 @@ async fn query_traces(
     State(state): State<AppState>,
     Query(params): Query<TraceQueryParams>,
     RawQuery(raw): RawQuery,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
     let attribute_filters = match parse_attribute_params(raw.as_deref()) {
         Ok(f) => f,
         // A malformed regex is the caller's mistake and must say so; silently
@@ -285,6 +292,7 @@ async fn query_traces(
         attributes_contains: attribute_filters.contains,
         attributes_regex: attribute_filters.regex,
         text: params.text,
+        tenant: crate::tenancy::read_scope(state.multi_tenant, principal.as_ref()),
     };
 
     match state.store.query_traces(&query) {
@@ -543,6 +551,7 @@ async fn query_logs(
         trace_id: params.trace_id,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        tenant: None,
     };
 
     match state.store.query_logs(&query) {
@@ -635,6 +644,7 @@ async fn query_metrics(
         metric_type: params.metric_type,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        tenant: None,
     };
 
     match state.store.query_metrics(&query) {
@@ -807,7 +817,20 @@ struct SqlParams {
 async fn query_sql(
     State(state): State<AppState>,
     Query(params): Query<SqlParams>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    // SQL runs against tables the query layer cannot filter per row without
+    // rewriting arbitrary user queries, so under tenancy it is admin-only.
+    // Refusing beats silently handing every tenant's rows to a `SELECT *`.
+    if !crate::tenancy::may_use_sql(state.multi_tenant, principal.as_ref()) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "SQL is restricted to admin keys while multi-tenancy is enabled,                           because a SQL query cannot be scoped to one tenant. Use the                           structured query commands, which are scoped.",
+            })),
+        );
+    }
     match state.store.query_sql(&params.q) {
         Ok(rows) => (
             StatusCode::OK,
@@ -1734,6 +1757,7 @@ mod tests {
             scores: Arc::new(crate::scoring::ScoreRuleStore::open(path).unwrap()),
             suites: Arc::new(crate::suites::SuiteStore::open(path).unwrap()),
             data_dir: path.to_string(),
+            multi_tenant: false,
         }
     }
 
@@ -2356,6 +2380,7 @@ async fn get_metric(
         metric_type: None,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: Some(params.limit.unwrap_or(500)),
+        tenant: None,
     };
 
     let points = match state.store.query_metrics(&query) {

@@ -201,6 +201,10 @@ pub struct TraceQuery {
     /// (which doesn't retain payload text).
     #[serde(default)]
     pub text: Option<String>,
+    /// Restrict to one tenant. Set by the API layer from the caller's
+    /// credentials, never by the caller — see [`crate::tenancy`].
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 /// Per-service rollup returned by `Store::list_services`.
@@ -479,6 +483,9 @@ pub struct MetricQuery {
     pub metric_type: Option<String>,
     pub last_seconds: Option<i64>,
     pub limit: Option<u32>,
+    /// Restrict to one tenant; set by the API layer, not the caller.
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 // ── Summary models ──────────────────────────────────────────────────
@@ -581,6 +588,9 @@ pub struct LogQuery {
     pub trace_id: Option<String>,
     pub last_seconds: Option<i64>,
     pub limit: Option<u32>,
+    /// Restrict to one tenant; set by the API layer, not the caller.
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 #[cfg(test)]

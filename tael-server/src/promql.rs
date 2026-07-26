@@ -648,6 +648,7 @@ fn fetch_points(
         last_seconds: Some(lookback_seconds),
         // Pull a generous batch — we filter in-memory by label matchers.
         limit: Some(10_000),
+        tenant: None,
     };
     let raw = store.query_metrics(&query)?;
     Ok(raw

@@ -31,6 +31,7 @@ mod span_bus;
 pub mod sql;
 mod storage;
 pub mod suites;
+pub mod tenancy;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -631,11 +632,21 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let scores = Arc::clone(&score_rules);
         let suites = Arc::clone(&suite_store);
         let data_dir = config.data_dir.clone();
+        let multi_tenant = config.multi_tenant;
         async move {
             // OTLP/HTTP is mounted here as well as on its own listener, so a
             // deployment that can expose only one port still accepts it.
             let app = api::rest::router(
-                store, blobs, bus, log_bus, cluster, alerts, scores, suites, data_dir,
+                store,
+                blobs,
+                bus,
+                log_bus,
+                cluster,
+                alerts,
+                scores,
+                suites,
+                data_dir,
+                multi_tenant,
             )
             .merge(ingest::otlp_http::router(otlp))
             .layer(axum::middleware::from_fn_with_state(

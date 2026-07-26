@@ -300,6 +300,11 @@ pub(super) fn log_matches(
     query: &LogQuery,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
+    if let Some(tenant) = &query.tenant
+        && crate::tenancy::owner_of(&log.attributes) != tenant.as_str()
+    {
+        return false;
+    }
     if let Some(ref svc) = query.service
         && &log.service != svc
     {
@@ -334,6 +339,11 @@ pub(super) fn metric_matches(
     query: &MetricQuery,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
+    if let Some(tenant) = &query.tenant
+        && crate::tenancy::owner_of(&m.attributes) != tenant.as_str()
+    {
+        return false;
+    }
     if let Some(ref svc) = query.service
         && &m.service != svc
     {
@@ -416,6 +426,11 @@ pub(super) fn span_matches(
         if span.attributes.get(k).map(|s| s.as_str()) != Some(v.as_str()) {
             return false;
         }
+    }
+    if let Some(tenant) = &query.tenant
+        && crate::tenancy::owner_of(&span.attributes) != tenant.as_str()
+    {
+        return false;
     }
     for (k, needle) in &query.attributes_contains {
         match span.attributes.get(k) {

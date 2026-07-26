@@ -71,6 +71,11 @@ pub struct ServerConfig {
     /// `config.toml` beside the data directory and proceeds without one if it
     /// is absent.
     pub config_path: Option<String>,
+    /// Scope reads and writes by the caller's tenant (`TAEL_MULTI_TENANT`).
+    /// Off by default — a single-tenant deployment should pay nothing for a
+    /// feature it does not use. See [`crate::tenancy`] for what this does and
+    /// does not guarantee.
+    pub multi_tenant: bool,
 }
 
 /// Object-storage selection for the cold (Parquet) tier and the blob store.
@@ -207,6 +212,14 @@ impl ServerConfig {
             // a `from_env`; the server logs and falls back to the address-based
             // default.
             config_path: non_empty_env("TAEL_CONFIG"),
+            multi_tenant: std::env::var("TAEL_MULTI_TENANT")
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes"
+                    )
+                })
+                .unwrap_or(false),
             auth: non_empty_env("TAEL_AUTH").and_then(|s| match crate::auth::AuthMode::parse(&s) {
                 Ok(mode) => Some(mode),
                 Err(e) => {

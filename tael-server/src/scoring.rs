@@ -108,6 +108,7 @@ impl TraceMatcher {
             attributes_contains: Vec::new(),
             attributes_regex: Vec::new(),
             text: None,
+            tenant: None,
         }
     }
 }
