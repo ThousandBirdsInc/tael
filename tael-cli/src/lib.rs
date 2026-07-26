@@ -314,6 +314,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ExperimentAction,
     },
+    /// Queue questions for a human and read their answers
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Record and list untrusted agent self diagnostics
     Diagnose {
         #[command(subcommand)]
@@ -892,6 +897,57 @@ pub enum ExperimentAction {
 }
 
 #[derive(Subcommand)]
+pub enum ReviewAction {
+    /// File a question about a trace for a human to answer
+    Request {
+        /// Trace the question is about
+        #[arg(long)]
+        trace_id: String,
+        /// The question, e.g. "was this refusal correct?"
+        #[arg(long)]
+        question: String,
+        /// Constrain the answer to these values, repeatable
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Optional span the question is about
+        #[arg(long)]
+        span_id: Option<String>,
+        /// Eval case this review informs; the answer flows back to it
+        #[arg(long)]
+        case_id: Option<String>,
+        /// Who is asking
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// List review requests
+    List {
+        /// Filter by state: open, answered, or all (default open)
+        #[arg(long, default_value = "open")]
+        state: String,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+    /// Answer a queued question
+    Submit {
+        /// Review id from `tael review list`
+        review_id: String,
+        /// The answer
+        #[arg(long)]
+        answer: String,
+        /// Optional free-text note
+        #[arg(long)]
+        note: Option<String>,
+        /// Who answered
+        #[arg(long)]
+        author: Option<String>,
+        /// Maximum comments to scan when locating the request
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DiagnoseAction {
     /// Record an untrusted self diagnostic on a trace
     Report {
@@ -1423,6 +1479,49 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             } => {
                 commands::experiment::compare(&client, &opts.format, &experiment_id, signal, last)
                     .await?;
+            }
+        },
+        Commands::Review { action } => match action {
+            ReviewAction::Request {
+                trace_id,
+                question,
+                options,
+                span_id,
+                case_id,
+                author,
+            } => {
+                commands::review::request(
+                    &client,
+                    &opts.format,
+                    &trace_id,
+                    &question,
+                    &options,
+                    span_id.as_deref(),
+                    case_id.as_deref(),
+                    author.as_deref(),
+                )
+                .await?;
+            }
+            ReviewAction::List { state, limit } => {
+                commands::review::list(&client, &opts.format, Some(&state), limit).await?;
+            }
+            ReviewAction::Submit {
+                review_id,
+                answer,
+                note,
+                author,
+                limit,
+            } => {
+                commands::review::submit(
+                    &client,
+                    &opts.format,
+                    &review_id,
+                    &answer,
+                    note.as_deref(),
+                    limit,
+                    author.as_deref(),
+                )
+                .await?;
             }
         },
         Commands::Diagnose { action } => match action {

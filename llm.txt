@@ -158,6 +158,26 @@ trace IDs so one query reaches every signal:
 
 Requires `tael-backend` storage; under `--storage duckdb` it returns nothing.
 
+### Human review queue
+
+```
+tael review request --trace-id ID --question "was this refusal correct?" \
+  --option yes --option no [--case-id CASE] [--span-id SPAN]
+tael review list [--state open|answered|all]
+tael review submit <review-id> --answer no [--note "..."]
+```
+
+Inverted from a conventional review queue: the agent triages and files only
+the residue it cannot decide, so human attention goes to judgement calls
+rather than to every trace. Requests and answers are structured trace
+comments (`kind: review_request` / `review_answer`), so the queue is
+queryable through the existing comment surface with no new tables.
+
+A request's state is derived, not mutated — comments are append-only, so an
+answer is a separate comment referencing the request id. An answer outside a
+request's declared `--option` set is rejected. Linking `--case-id` lets an
+answer flow back into an eval suite as durable expected behavior.
+
 ### Eval case suites
 
 ```

@@ -12,6 +12,7 @@ pub mod get;
 pub mod issue;
 pub mod query;
 pub mod reliability;
+pub mod review;
 pub mod score;
 pub mod server;
 pub mod services;
