@@ -17,6 +17,7 @@ pub mod score;
 pub mod server;
 pub mod services;
 pub mod signal;
+pub mod similar;
 pub mod skill;
 pub mod suite;
 pub mod summarize;

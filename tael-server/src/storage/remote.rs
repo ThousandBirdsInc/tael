@@ -432,7 +432,15 @@ mod tests {
                 let scores = Arc::new(crate::scoring::ScoreRuleStore::open(&path).unwrap());
                 let suites = Arc::new(crate::suites::SuiteStore::open(&path).unwrap());
                 let app = crate::api::rest::router(
-                    store, blobs, bus, log_bus, None, alerts, scores, suites,
+                    store,
+                    blobs,
+                    bus,
+                    log_bus,
+                    None,
+                    alerts,
+                    scores,
+                    suites,
+                    path.clone(),
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();
@@ -488,7 +496,15 @@ mod tests {
                 let scores = Arc::new(crate::scoring::ScoreRuleStore::open(&data_dir).unwrap());
                 let suites = Arc::new(crate::suites::SuiteStore::open(&data_dir).unwrap());
                 let app = crate::api::rest::router(
-                    store, blobs, bus, log_bus, None, alerts, scores, suites,
+                    store,
+                    blobs,
+                    bus,
+                    log_bus,
+                    None,
+                    alerts,
+                    scores,
+                    suites,
+                    data_dir.clone(),
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 tx.send(listener.local_addr().unwrap()).unwrap();

@@ -227,6 +227,29 @@ Samples matching traces and runs a scorer against each, writing
 traffic online. Check `failures` and `last_error` in `score rule list` — a
 broken judge shows up there, not as missing data.
 
+### 5e. Ask whether a failure has happened before
+
+```bash
+tael embed --cmd './embed.sh' --last 24h   # one-time, costs per trace
+tael --format json similar <trace-id> --limit 5
+tael --format json cluster --k 5
+```
+
+Text search only finds traces sharing a literal term; these find traces that
+are the *same problem*. Use `similar` when you have one failing trace and want
+to know if it is recurring, and `cluster` when you want to know what the
+distinct failure modes even are.
+
+The clustering playbook: cluster, read each exemplar with `tael get trace`,
+name what it is, then `tael issue create --from-trace <exemplar>` for the ones
+worth tracking and `tael eval case add --from-trace` to protect against
+regressions. Cohesion below ~0.7 means the grouping is weak — say so rather
+than reporting a shaky cluster as a finding.
+
+Embeddings require an embedding command you supply; tael never calls a model
+provider. If `similar` reports no embedding for a trace, run `tael embed`
+first.
+
 ### 6. Watch an ongoing change
 
 When the user is mid-deploy, mid-migration, or otherwise wants to know whether something is getting worse over the next few minutes, use `watch`. It polls `summarize` on an interval and prints signed deltas (span count, error count, error rate, p95, log errors, metric volume) per tick:

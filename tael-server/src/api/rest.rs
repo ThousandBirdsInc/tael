@@ -43,6 +43,8 @@ struct AppState {
     scores: Arc<crate::scoring::ScoreRuleStore>,
     /// Server-managed eval case suites.
     suites: Arc<crate::suites::SuiteStore>,
+    /// Data directory, for the stores that read files directly.
+    data_dir: String,
 }
 
 pub fn router(
@@ -54,6 +56,7 @@ pub fn router(
     alerts: Arc<crate::alerts::AlertStore>,
     scores: Arc<crate::scoring::ScoreRuleStore>,
     suites: Arc<crate::suites::SuiteStore>,
+    data_dir: String,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -66,6 +69,7 @@ pub fn router(
         alerts,
         scores,
         suites,
+        data_dir,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -86,6 +90,9 @@ pub fn router(
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
         .route("/api/v1/topology", get(query_topology))
+        .route("/api/v1/similar/{trace_id}", get(similar_traces))
+        .route("/api/v1/cluster", get(cluster_traces))
+        .route("/api/v1/embed", post(build_embeddings))
         .route("/api/v1/diff", get(query_diff))
         .route("/api/v1/metrics/{name}", get(get_metric))
         .route("/api/v1/sql", get(query_sql))
@@ -174,6 +181,7 @@ pub fn dd_router(
             crate::suites::SuiteStore::open("")
                 .unwrap_or_else(|_| unreachable!("empty-path suite store cannot fail to open")),
         ),
+        data_dir: String::new(),
     };
     dd_routes()
         .route("/healthz", get(healthz))
@@ -1725,6 +1733,7 @@ mod tests {
             alerts: Arc::new(crate::alerts::AlertStore::open(path).unwrap()),
             scores: Arc::new(crate::scoring::ScoreRuleStore::open(path).unwrap()),
             suites: Arc::new(crate::suites::SuiteStore::open(path).unwrap()),
+            data_dir: path.to_string(),
         }
     }
 
@@ -2596,6 +2605,218 @@ async fn query_rollups(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ── Similarity and clustering ───────────────────────────────────────
+
+/// The text an embedding represents for one trace.
+///
+/// Built from the operations, error types, and LLM payload hashes rather than
+/// raw attributes: a trace's identity for "have I seen this before" is what it
+/// tried to do and how it failed, not the request ids and timestamps that make
+/// every trace superficially unique.
+fn trace_signature(spans: &[Span]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for span in spans {
+        parts.push(format!("{} {}", span.service, span.operation));
+        if span.status == SpanStatus::Error {
+            parts.push(format!("error {}", span.operation));
+        }
+        for key in ["error.type", "exception.type", "rpc.grpc.status_code"] {
+            if let Some(v) = span.attributes.get(key) {
+                parts.push(format!("{key}={v}"));
+            }
+        }
+        if let Some(llm) = &span.llm {
+            parts.push(format!("llm {} {}", llm.provider, llm.model));
+            if let Some(reason) = &llm.finish_reason {
+                parts.push(format!("finish={reason}"));
+            }
+        }
+    }
+    parts.sort();
+    parts.dedup();
+    parts.join(" ")
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedBody {
+    /// Command that reads text on stdin and prints a JSON array of numbers.
+    embed_cmd: String,
+    #[serde(default)]
+    last: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Build embeddings for recent traces.
+///
+/// Explicit rather than automatic on ingest: embedding costs money per trace
+/// and most deployments will never want it, so it happens when asked.
+async fn build_embeddings(
+    State(state): State<AppState>,
+    Json(body): Json<EmbedBody>,
+) -> impl IntoResponse {
+    let query = TraceQuery {
+        last_seconds: body.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(body.limit.unwrap_or(1000)),
+        ..Default::default()
+    };
+    let spans = match state.store.query_traces(&query) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let mut by_trace: BTreeMap<String, Vec<Span>> = BTreeMap::new();
+    for span in spans {
+        by_trace
+            .entry(span.trace_id.clone())
+            .or_default()
+            .push(span);
+    }
+
+    let mut store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let (mut embedded, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let mut last_error: Option<String> = None;
+    for (trace_id, spans) in &by_trace {
+        // Already embedded traces are skipped: a trace is immutable once
+        // written, so re-embedding it would only spend money to get the same
+        // vector back.
+        if store.embeddings.contains_key(trace_id) {
+            skipped += 1;
+            continue;
+        }
+        let signature = trace_signature(spans);
+        if signature.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        match crate::similarity::embed(&body.embed_cmd, &signature).await {
+            Ok(vector) => {
+                store.embeddings.insert(trace_id.clone(), vector);
+                embedded += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    if let Err(e) = store.save(&state.data_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "embedded": embedded,
+            "skipped": skipped,
+            "failed": failed,
+            "total_embeddings": store.embeddings.len(),
+            "last_error": last_error,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SimilarParams {
+    limit: Option<usize>,
+    min_similarity: Option<f32>,
+}
+
+async fn similar_traces(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+    Query(params): Query<SimilarParams>,
+) -> impl IntoResponse {
+    let store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let Some(query) = store.get(&trace_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("trace `{trace_id}` has no embedding"),
+                "hint": "run `tael embed --cmd <embedder>` first",
+            })),
+        );
+    };
+
+    let neighbors = crate::similarity::nearest(
+        &query,
+        &store.to_vec(),
+        params.limit.unwrap_or(10),
+        params.min_similarity.unwrap_or(0.0),
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "trace_id": trace_id,
+            "neighbors": neighbors,
+            "count": neighbors.len(),
+            "corpus_size": store.embeddings.len(),
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterParams {
+    k: Option<usize>,
+}
+
+async fn cluster_traces(
+    State(state): State<AppState>,
+    Query(params): Query<ClusterParams>,
+) -> impl IntoResponse {
+    let store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let embeddings = store.to_vec();
+    match crate::similarity::cluster(&embeddings, params.k.unwrap_or(5), 50) {
+        Ok(clusters) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "clusters": clusters,
+                "count": clusters.len(),
+                "corpus_size": embeddings.len(),
+                "note": "cohesion below ~0.7 means the grouping is weak; read the exemplars before acting on it",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }

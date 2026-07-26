@@ -456,6 +456,53 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn build_embeddings(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/embed", self.base_url))
+            // Embedding a batch runs one subprocess per trace, so the default
+            // client timeout is far too short.
+            .timeout(Duration::from_secs(1800))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn similar_traces(
+        &self,
+        trace_id: &str,
+        limit: u32,
+        min_similarity: f32,
+    ) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/similar/{trace_id}", self.base_url))
+            .query(&[
+                ("limit", limit.to_string()),
+                ("min_similarity", min_similarity.to_string()),
+            ])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn cluster_traces(&self, k: usize) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/cluster", self.base_url))
+            .query(&[("k", k.to_string())])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http

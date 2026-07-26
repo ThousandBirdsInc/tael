@@ -250,6 +250,36 @@ pub enum Commands {
         #[arg(long)]
         service: Option<String>,
     },
+    /// Build embeddings for recent traces using your own embedding command
+    Embed {
+        /// Command that reads trace text on stdin and prints a JSON array of
+        /// numbers. tael never calls a model provider itself.
+        #[arg(long)]
+        cmd: String,
+        /// Time window of traces to embed (e.g. 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max traces to embed in this pass
+        #[arg(long, default_value = "1000")]
+        limit: u32,
+    },
+    /// Find traces similar to one you already have — "has this happened before?"
+    Similar {
+        /// The trace to compare against
+        trace_id: String,
+        /// Max neighbors to return
+        #[arg(long, default_value = "10")]
+        limit: u32,
+        /// Drop neighbors below this cosine similarity
+        #[arg(long, default_value = "0.0")]
+        min_similarity: f32,
+    },
+    /// Group embedded traces into clusters of similar failures
+    Cluster {
+        /// Number of clusters
+        #[arg(long, default_value = "5")]
+        k: usize,
+    },
     /// Service dependency graph derived from span parent/child edges
     Topology {
         /// Time window (e.g. 1h, 24h)
@@ -1296,6 +1326,20 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             service,
         } => {
             commands::anomalies::run(&client, &opts.format, last, baseline, service).await?;
+        }
+        Commands::Embed { cmd, last, limit } => {
+            commands::similar::embed(&client, &opts.format, &cmd, last.as_deref(), limit).await?;
+        }
+        Commands::Similar {
+            trace_id,
+            limit,
+            min_similarity,
+        } => {
+            commands::similar::similar(&client, &opts.format, &trace_id, limit, min_similarity)
+                .await?;
+        }
+        Commands::Cluster { k } => {
+            commands::similar::cluster(&client, &opts.format, k).await?;
         }
         Commands::Topology { last, limit } => {
             commands::topology::run(&client, &opts.format, last, limit).await?;

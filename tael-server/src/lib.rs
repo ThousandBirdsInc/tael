@@ -25,6 +25,7 @@ mod log_bus;
 mod promql;
 pub mod retention;
 pub mod scoring;
+pub mod similarity;
 mod span_bus;
 #[cfg(feature = "sql")]
 pub mod sql;
@@ -629,16 +630,18 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let alerts = Arc::clone(&alert_store);
         let scores = Arc::clone(&score_rules);
         let suites = Arc::clone(&suite_store);
+        let data_dir = config.data_dir.clone();
         async move {
             // OTLP/HTTP is mounted here as well as on its own listener, so a
             // deployment that can expose only one port still accepts it.
-            let app =
-                api::rest::router(store, blobs, bus, log_bus, cluster, alerts, scores, suites)
-                    .merge(ingest::otlp_http::router(otlp))
-                    .layer(axum::middleware::from_fn_with_state(
-                        auth,
-                        api::authz::require_auth,
-                    ));
+            let app = api::rest::router(
+                store, blobs, bus, log_bus, cluster, alerts, scores, suites, data_dir,
+            )
+            .merge(ingest::otlp_http::router(otlp))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                api::authz::require_auth,
+            ));
             if let Some(socket) = socket {
                 #[cfg(unix)]
                 {
