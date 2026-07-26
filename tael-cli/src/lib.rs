@@ -767,6 +767,38 @@ pub enum EvalSuiteAction {
         #[arg(long, default_value = "50000")]
         limit: u32,
     },
+    /// Upload a JSONL case file as the suite's working set (a whole-set replace)
+    Push {
+        /// Suite name
+        suite: String,
+        /// JSONL case file. Each line needs `case_id` or `id`.
+        cases: String,
+    },
+    /// Write a suite back out as canonical JSONL
+    Pull {
+        /// Suite name, or suite@snapshot to pull a frozen version
+        suite: String,
+        /// Write here instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Freeze the working set as an immutable snapshot
+    Snapshot {
+        /// Suite name
+        suite: String,
+        /// Note recorded with the snapshot
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List server-managed suites
+    List,
+    /// Compare two suite references (suite or suite@snapshot)
+    Diff {
+        /// Left side
+        from: String,
+        /// Right side
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1309,6 +1341,22 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             EvalAction::Suite { action } => match action {
                 EvalSuiteAction::Inspect { suite, limit } => {
                     commands::eval::suite_inspect(&client, &opts.format, &suite, limit).await?;
+                }
+                EvalSuiteAction::Push { suite, cases } => {
+                    commands::suite::push(&client, &opts.format, &suite, &cases).await?;
+                }
+                EvalSuiteAction::Pull { suite, out } => {
+                    commands::suite::pull(&client, &opts.format, &suite, out.as_deref()).await?;
+                }
+                EvalSuiteAction::Snapshot { suite, note } => {
+                    commands::suite::snapshot(&client, &opts.format, &suite, note.as_deref())
+                        .await?;
+                }
+                EvalSuiteAction::List => {
+                    commands::suite::list(&client, &opts.format).await?;
+                }
+                EvalSuiteAction::Diff { from, to } => {
+                    commands::suite::diff(&client, &opts.format, &from, &to).await?;
                 }
             },
         },

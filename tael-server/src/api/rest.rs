@@ -41,6 +41,8 @@ struct AppState {
     alerts: Arc<crate::alerts::AlertStore>,
     /// Online scoring rules.
     scores: Arc<crate::scoring::ScoreRuleStore>,
+    /// Server-managed eval case suites.
+    suites: Arc<crate::suites::SuiteStore>,
 }
 
 pub fn router(
@@ -51,6 +53,7 @@ pub fn router(
     cluster: Option<Arc<ClusterCoordinator>>,
     alerts: Arc<crate::alerts::AlertStore>,
     scores: Arc<crate::scoring::ScoreRuleStore>,
+    suites: Arc<crate::suites::SuiteStore>,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -62,6 +65,7 @@ pub fn router(
         wal_fencer,
         alerts,
         scores,
+        suites,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -101,6 +105,16 @@ pub fn router(
         .route("/api/v1/evals/runs/{run_id}/cases", get(eval_cases))
         .route("/api/v1/evals/runs/{run_id}/scores", get(eval_scores))
         .route("/api/v1/evals/runs/{run_id}/compare", get(eval_compare))
+        .route("/api/v1/evals/suites", get(list_suites))
+        .route(
+            "/api/v1/evals/suites/{name}",
+            get(get_suite).post(push_suite),
+        )
+        .route(
+            "/api/v1/evals/suites/{name}/snapshots",
+            post(snapshot_suite),
+        )
+        .route("/api/v1/evals/suites/diff", get(diff_suites))
         .route("/api/v1/evals/scores", post(eval_add_score))
         .route("/api/v1/evals/runner-spans", post(eval_add_runner_span))
         .route("/api/v1/blobs", post(put_blob))
@@ -154,6 +168,10 @@ pub fn dd_router(
         scores: Arc::new(
             crate::scoring::ScoreRuleStore::open("")
                 .unwrap_or_else(|_| unreachable!("empty-path score store cannot fail to open")),
+        ),
+        suites: Arc::new(
+            crate::suites::SuiteStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path suite store cannot fail to open")),
         ),
     };
     dd_routes()
@@ -1705,6 +1723,7 @@ mod tests {
             wal_fencer: fencer,
             alerts: Arc::new(crate::alerts::AlertStore::open(path).unwrap()),
             scores: Arc::new(crate::scoring::ScoreRuleStore::open(path).unwrap()),
+            suites: Arc::new(crate::suites::SuiteStore::open(path).unwrap()),
         }
     }
 
@@ -2395,4 +2414,147 @@ async fn get_metric(
             "recent_points": points.iter().take(20).collect::<Vec<_>>(),
         })),
     )
+}
+
+// ── Eval case suites ────────────────────────────────────────────────
+
+async fn list_suites(State(state): State<AppState>) -> impl IntoResponse {
+    let suites: Vec<serde_json::Value> = state
+        .suites
+        .list()
+        .into_iter()
+        .map(|(name, suite)| {
+            serde_json::json!({
+                "name": name,
+                "case_count": suite.cases.len(),
+                "snapshot_count": suite.snapshots.len(),
+                "updated_at": suite.updated_at,
+                "latest_snapshot": suite.snapshots.last().map(|s| s.id.clone()),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "suites": suites, "count": suites.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SuiteReadParams {
+    /// Optional snapshot id; absent reads the working set.
+    snapshot: Option<String>,
+}
+
+async fn get_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<SuiteReadParams>,
+) -> impl IntoResponse {
+    let reference = match &params.snapshot {
+        Some(id) => format!("{name}@{id}"),
+        None => name.clone(),
+    };
+    match state.suites.resolve(&reference) {
+        Ok((suite, snapshot, cases)) => {
+            let snapshots = state
+                .suites
+                .get(&suite)
+                .map(|s| s.snapshots)
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "suite": suite,
+                    "snapshot": snapshot,
+                    "cases": cases,
+                    "count": cases.len(),
+                    "snapshots": snapshots,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PushSuiteBody {
+    cases: Vec<crate::suites::CaseRef>,
+}
+
+async fn push_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PushSuiteBody>,
+) -> impl IntoResponse {
+    match state.suites.push(&name, body.cases) {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "suite": name, "case_count": count })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SnapshotBody {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn snapshot_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<SnapshotBody>>,
+) -> impl IntoResponse {
+    let note = body.and_then(|Json(b)| b.note);
+    match state.suites.snapshot(&name, note) {
+        Ok(snapshot) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "suite": name,
+                "snapshot": snapshot.id,
+                "case_count": snapshot.case_count(),
+                "created_at": snapshot.created_at,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SuiteDiffParams {
+    from: String,
+    to: String,
+}
+
+async fn diff_suites(
+    State(state): State<AppState>,
+    Query(params): Query<SuiteDiffParams>,
+) -> impl IntoResponse {
+    match state.suites.diff(&params.from, &params.to) {
+        Ok(diff) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "from": params.from,
+                "to": params.to,
+                "added": diff.added,
+                "removed": diff.removed,
+                "changed": diff.changed,
+                "unchanged": diff.unchanged,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }

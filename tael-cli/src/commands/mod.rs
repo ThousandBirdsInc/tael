@@ -17,6 +17,7 @@ pub mod server;
 pub mod services;
 pub mod signal;
 pub mod skill;
+pub mod suite;
 pub mod summarize;
 pub mod topology;
 pub mod watch;

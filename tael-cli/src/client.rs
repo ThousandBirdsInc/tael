@@ -347,6 +347,86 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn list_suites(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn get_suite(&self, name: &str, snapshot: Option<&str>) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = snapshot {
+            params.push(("snapshot", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites/{name}", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn push_suite(&self, name: &str, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/evals/suites/{name}", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn snapshot_suite(&self, name: &str, note: Option<&str>) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/v1/evals/suites/{name}/snapshots",
+                self.base_url
+            ))
+            .json(&serde_json::json!({ "note": note }))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn diff_suites(&self, from: &str, to: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites/diff", self.base_url))
+            .query(&[("from", from), ("to", to)])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Fetch a content-addressed blob as text (case bodies, LLM payloads).
+    pub async fn get_blob(&self, sha256: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/blobs/{sha256}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http

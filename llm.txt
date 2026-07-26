@@ -158,6 +158,34 @@ trace IDs so one query reaches every signal:
 
 Requires `tael-backend` storage; under `--storage duckdb` it returns nothing.
 
+### Eval case suites
+
+```
+tael eval suite push <name> cases.jsonl     # whole-set replace
+tael eval suite pull <name>[@<snapshot>] [--out FILE]
+tael eval suite snapshot <name> [--note "..."]
+tael eval suite list
+tael eval suite diff <ref> <ref>            # ref = name or name@snapshot
+```
+
+The server becomes the system of record while JSONL stays the interchange
+format, so suites can still live in git. A case is stored as a
+content-addressed blob and a snapshot is an ordered list of hashes, so
+unchanged cases are shared rather than copied and diffing is a set operation.
+
+`push` replaces the working set — a case omitted from the file is removed,
+because a merge-only push makes deleting a stale case impossible.
+
+A snapshot id is derived from content, so re-snapshotting an unchanged suite
+returns the same id instead of accumulating duplicates. Pin a run to a
+snapshot (`name@snap_...`) so two experiments provably compared the same data.
+
+`pull` emits canonical JSONL (object keys sorted), so a push/pull round trip
+is byte-stable and reformatting a file is not mistaken for editing every case.
+
+`diff` reports an edited case as `changed`, not as an add plus a remove — it
+is still the same case.
+
 ### Structure and comparison
 
 ```

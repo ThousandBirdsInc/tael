@@ -18,6 +18,7 @@ pub mod retention;
 pub mod scoring;
 mod span_bus;
 mod storage;
+pub mod suites;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -542,6 +543,7 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let log_bus = Arc::new(LogBus::new()?);
     let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
     let score_rules = Arc::new(scoring::ScoreRuleStore::open(&config.data_dir)?);
+    let suite_store = Arc::new(suites::SuiteStore::open(&config.data_dir)?);
     spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
     // Evaluate more often than the compaction pass: an alert is only useful if
     // it fires close to when the condition started.
@@ -615,15 +617,17 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let auth = Arc::clone(&auth_state);
         let alerts = Arc::clone(&alert_store);
         let scores = Arc::clone(&score_rules);
+        let suites = Arc::clone(&suite_store);
         async move {
             // OTLP/HTTP is mounted here as well as on its own listener, so a
             // deployment that can expose only one port still accepts it.
-            let app = api::rest::router(store, blobs, bus, log_bus, cluster, alerts, scores)
-                .merge(ingest::otlp_http::router(otlp))
-                .layer(axum::middleware::from_fn_with_state(
-                    auth,
-                    api::authz::require_auth,
-                ));
+            let app =
+                api::rest::router(store, blobs, bus, log_bus, cluster, alerts, scores, suites)
+                    .merge(ingest::otlp_http::router(otlp))
+                    .layer(axum::middleware::from_fn_with_state(
+                        auth,
+                        api::authz::require_auth,
+                    ));
             if let Some(socket) = socket {
                 #[cfg(unix)]
                 {
