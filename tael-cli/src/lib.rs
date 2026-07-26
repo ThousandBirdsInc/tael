@@ -536,8 +536,10 @@ pub enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "100")]
         limit: u32,
-        /// Filter by span attribute, repeatable. Format: key=value
-        /// (e.g. --attribute http.method=GET --attribute http.status_code=500)
+        /// Filter by span attribute, repeatable and ANDed. Three operators:
+        /// key=value (exact), key~=value (contains), key=~pattern (regex).
+        /// e.g. --attribute http.method=GET --attribute 'http.url~=/checkout'
+        /// --attribute 'gen_ai.request.model=~claude-.*'
         #[arg(long = "attribute")]
         attribute: Vec<String>,
         /// Full-text search over LLM prompt/completion payloads

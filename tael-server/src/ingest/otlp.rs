@@ -209,6 +209,18 @@ impl TraceService for OtlpTraceService {
                         map_span_kind(otel_span.kind())
                     };
 
+                    // Attribute values are indexed too, because the structured
+                    // filters are exact-match: an agent that doesn't already
+                    // know a URL or model string can't filter for it, but can
+                    // search for it.
+                    if let Some(ref idx) = self.search
+                        && let Err(e) = idx.index_span_attributes(&trace_id, &span_id, &attributes)
+                    {
+                        tracing::warn!(error = %e, "failed to index span attributes");
+                    } else if self.search.is_some() && !attributes.is_empty() {
+                        indexed_any = true;
+                    }
+
                     spans.push(Span {
                         trace_id,
                         span_id,

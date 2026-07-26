@@ -182,10 +182,20 @@ pub struct TraceQuery {
     pub status: Option<String>,
     pub last_seconds: Option<i64>,
     pub limit: Option<u32>,
-    /// Equality filters on span attributes. Each entry is ANDed.
+    /// Filters on span attributes. Each entry is ANDed.
     /// Keys with characters outside `[A-Za-z0-9._\-:/]` are rejected at the storage layer.
     #[serde(default)]
     pub attributes: Vec<(String, String)>,
+    /// Substring filters on span attribute values (`--attribute k~=v`). Exact
+    /// matching alone forces callers to already know a value they are usually
+    /// trying to discover — a URL with an ID in it, a model name with a date
+    /// suffix — so a contains form is the difference between the filter being
+    /// usable and not.
+    #[serde(default)]
+    pub attributes_contains: Vec<(String, String)>,
+    /// Regex filters on span attribute values (`--attribute 'k=~pattern'`).
+    #[serde(default)]
+    pub attributes_regex: Vec<(String, String)>,
     /// Full-text query over LLM prompt/completion payloads (Tantivy syntax).
     /// Only honored by the `tael-backend` storage engine; ignored by DuckDB
     /// (which doesn't retain payload text).

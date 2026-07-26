@@ -105,6 +105,8 @@ impl TraceMatcher {
             last_seconds: Some(last_seconds),
             limit: Some(limit),
             attributes: self.attributes.clone(),
+            attributes_contains: Vec::new(),
+            attributes_regex: Vec::new(),
             text: None,
         }
     }

@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 
 use crate::log_bus::LogBus;
 use crate::storage::models::{LogRecord, LogSeverity};
-use crate::storage::{BlobStore, Store};
+use crate::storage::{BlobStore, SearchIndex, Store};
 
 /// Log bodies larger than this are offloaded to the blob store (stack traces,
 /// dumped payloads). Tuned against real corpora later (design Open Q #7).
@@ -18,12 +18,25 @@ const LOG_BODY_BLOB_THRESHOLD: usize = 8 * 1024;
 pub struct OtlpLogsService {
     store: Arc<dyn Store>,
     blobs: Arc<BlobStore>,
+    /// Full-text index shared with span ingest, so one `--text` query reaches
+    /// log bodies and LLM payloads alike.
+    search: Option<Arc<SearchIndex>>,
     bus: Arc<LogBus>,
 }
 
 impl OtlpLogsService {
-    pub fn new(store: Arc<dyn Store>, blobs: Arc<BlobStore>, bus: Arc<LogBus>) -> Self {
-        Self { store, blobs, bus }
+    pub fn new(
+        store: Arc<dyn Store>,
+        blobs: Arc<BlobStore>,
+        search: Option<Arc<SearchIndex>>,
+        bus: Arc<LogBus>,
+    ) -> Self {
+        Self {
+            store,
+            blobs,
+            search,
+            bus,
+        }
     }
 }
 
@@ -49,6 +62,9 @@ impl LogsService for OtlpLogsService {
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
         let req = request.into_inner();
         let mut logs = Vec::new();
+        // Bodies moved to the blob store, kept here so the search index still
+        // sees their text.
+        let mut searchable: Vec<(Option<String>, String)> = Vec::new();
 
         for resource_logs in &req.resource_logs {
             let service_name = resource_logs
@@ -126,9 +142,14 @@ impl LogsService for OtlpLogsService {
 
                     // Offload oversized bodies to the blob store, keeping only
                     // the hash inline. Dedups repeated stack traces for free.
+                    // The full text is kept for the search index, which would
+                    // otherwise never see the very bodies most worth searching.
                     let (body, body_sha256) = if body.len() > LOG_BODY_BLOB_THRESHOLD {
                         match self.blobs.put(body.as_bytes()) {
-                            Ok(hash) => (String::new(), Some(hash)),
+                            Ok(hash) => {
+                                searchable.push((trace_id.clone(), body));
+                                (String::new(), Some(hash))
+                            }
                             Err(e) => {
                                 tracing::warn!(error = %e, "failed to store log body blob");
                                 (body, None)
@@ -151,6 +172,30 @@ impl LogsService for OtlpLogsService {
                         body_sha256,
                     });
                 }
+            }
+        }
+
+        // Index bodies for full-text search. Only logs carrying a trace ID are
+        // indexed: search resolves to traces, and a log with no trace has
+        // nothing to resolve to.
+        if let Some(ref idx) = self.search {
+            let mut indexed_any = false;
+            let inline = logs.iter().filter_map(|log| {
+                let trace_id = log.trace_id.clone()?;
+                (!log.body.trim().is_empty()).then(|| (trace_id, log.body.clone()))
+            });
+            for (trace_id, body) in inline.chain(
+                searchable
+                    .iter()
+                    .filter_map(|(tid, body)| tid.clone().map(|t| (t, body.clone()))),
+            ) {
+                match idx.index_log_body(&trace_id, &body) {
+                    Ok(()) => indexed_any = true,
+                    Err(e) => tracing::warn!(error = %e, "failed to index log body"),
+                }
+            }
+            if indexed_any && let Err(e) = idx.commit() {
+                tracing::warn!(error = %e, "failed to commit log search index");
             }
         }
 

@@ -241,6 +241,7 @@ mod tests {
             logs: Arc::new(OtlpLogsService::new(
                 Arc::clone(&store),
                 blobs,
+                Some(engine.backend.search_index()),
                 Arc::new(LogBus::new().unwrap()),
             )),
             metrics: Arc::new(OtlpMetricsService::new(store)),

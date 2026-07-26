@@ -522,9 +522,9 @@ If the service doesn't appear, the usual culprits are: wrong endpoint, wrong pro
 
 **Log body search is substring, not regex.** `--body-contains "5\d\d"` will not do what you think.
 
-**Attribute filtering is exact-match only.** `--attribute key=value` filters spans by attribute (repeatable, ANDed), but matches the whole value exactly — no substring or regex on attribute values. For partial matches, pull a broader set and filter the JSON yourself.
+**Attribute filtering has three operators.** `--attribute k=v` matches the whole value exactly, `--attribute 'k~=v'` matches a substring, and `--attribute 'k=~pattern'` matches a regex. All are repeatable and ANDed. Reach for the substring form whenever you don't already know the exact value — a URL with an ID in it, a model name with a date suffix. An invalid regex is rejected up front (exit 3) rather than silently matching nothing. Quote the spec so the shell doesn't eat the operator.
 
-**`--text` search needs the tael-backend storage.** Full-text payload search is served by the default engine's index; under `--storage duckdb` it returns nothing. (LLM prompt/completion text is the only thing indexed — not span attributes or log bodies yet.)
+**`--text` search needs the tael-backend storage.** Full-text search is served by the default engine's index; under `--storage duckdb` it returns nothing. Three kinds of text are indexed, all resolving to trace IDs so one query reaches every signal: LLM prompt/completion payloads, log bodies (only for logs carrying a trace ID), and span attribute values as `key=value` text. That last one is why `--text PaymentDeclined` finds a trace whose `error.type` attribute holds it. Attribute text is truncated at 4 KB per span, so an attribute carrying a whole request body is only partly searchable.
 
 **Single-node engine.** tael runs as one node: reads scan the in-memory/LSM hot tier for recent data and Parquet for older data. Keep `--last` windows narrow (minutes to hours) when the server is busy — wide scans over millions of rows are slow.
 

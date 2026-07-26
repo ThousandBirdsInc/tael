@@ -36,6 +36,7 @@ walrus-rust.workspace = true
 snap.workspace = true
 flate2.workspace = true
 toml.workspace = true
+regex.workspace = true
 rand.workspace = true
 bytes.workspace = true
 sha2.workspace = true

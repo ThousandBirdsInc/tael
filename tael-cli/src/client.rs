@@ -143,8 +143,10 @@ impl TaelClient {
         if let Some(l) = last {
             params.push(("last", l.to_string()));
         }
-        for (k, v) in attributes {
-            params.push(("attribute", format!("{k}={v}")));
+        for (key, op_and_value) in attributes {
+            // `op_and_value` already carries its operator (`=`, `~=`, `=~`),
+            // so it is concatenated rather than joined with another `=`.
+            params.push(("attribute", format!("{key}{op_and_value}")));
         }
         if let Some(t) = text {
             params.push(("text", t.to_string()));

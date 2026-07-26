@@ -59,17 +59,36 @@ pub async fn traces(
     Ok(())
 }
 
+/// Validate `--attribute` specs and split them into (key, operator+value)
+/// pairs for the wire.
+///
+/// Three operators are accepted, and the two-character forms must be tried
+/// before the one-character form or the operator ends up inside the key:
+/// `k=v` (exact), `k~=v` (contains), `k=~pattern` (regex). The operator is
+/// preserved in the value half so the server sees the original spec; this
+/// function's job is to reject a malformed one here, with the offending text
+/// in hand, rather than at the far end of an HTTP round trip.
 fn parse_attribute_args(args: &[String]) -> Result<Vec<(String, String)>> {
     args.iter()
         .map(|raw| {
-            let (k, v) = raw
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("--attribute expects key=value, got {raw:?}"))?;
-            let k = k.trim();
-            if k.is_empty() {
+            let (key, rest) = if let Some((k, v)) = raw.split_once("~=") {
+                (k, format!("~={v}"))
+            } else if let Some((k, v)) = raw.split_once("=~") {
+                (k, format!("=~{v}"))
+            } else {
+                let (k, v) = raw.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--attribute expects key=value, key~=value (contains), \
+                         or key=~pattern (regex); got {raw:?}"
+                    )
+                })?;
+                (k, format!("={v}"))
+            };
+            let key = key.trim();
+            if key.is_empty() {
                 anyhow::bail!("--attribute key cannot be empty (got {raw:?})");
             }
-            Ok((k.to_string(), v.to_string()))
+            Ok((key.to_string(), rest))
         })
         .collect()
 }

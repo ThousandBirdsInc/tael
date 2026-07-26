@@ -137,6 +137,27 @@ Score JSONL lines require `case_id`, `metric`, and `value`; `run_id` is filled
 from the command argument when omitted. Optional fields include `suite_id`,
 `trace_id`, `span_id`, `scorer`, `label`, `rationale_sha256`, and `source`.
 
+### Attribute filters and text search
+
+```
+tael query traces --attribute http.method=GET            # exact
+tael query traces --attribute 'http.route~=/users'       # substring
+tael query traces --attribute 'gen_ai.request.model=~claude-.*'   # regex
+tael query traces --text PaymentDeclined
+```
+
+Attribute filters are repeatable and ANDed. An invalid regex is rejected with
+a 400 (CLI exit 3) rather than silently matching nothing.
+
+`--text` searches a Tantivy index over three kinds of text, all resolving to
+trace IDs so one query reaches every signal:
+- LLM prompt/completion payloads
+- log bodies (only for logs carrying a trace ID)
+- span attribute values, flattened to `key=value` text and truncated at 4 KB
+  per span
+
+Requires `tael-backend` storage; under `--storage duckdb` it returns nothing.
+
 ### Structure and comparison
 
 ```

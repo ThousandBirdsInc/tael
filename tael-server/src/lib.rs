@@ -571,6 +571,7 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
             Arc::clone(&store),
             Arc::clone(&blobs),
+            search.clone(),
             Arc::clone(&log_bus),
         )),
         metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(Arc::clone(

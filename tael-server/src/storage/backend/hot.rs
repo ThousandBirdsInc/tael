@@ -417,5 +417,23 @@ pub(super) fn span_matches(
             return false;
         }
     }
+    for (k, needle) in &query.attributes_contains {
+        match span.attributes.get(k) {
+            Some(value) if value.contains(needle.as_str()) => {}
+            _ => return false,
+        }
+    }
+    for (k, pattern) in &query.attributes_regex {
+        // An unparseable pattern matches nothing rather than everything. The
+        // API layer rejects it up front with a message; this is the guard for
+        // any path that skips that check.
+        let Ok(re) = regex::Regex::new(pattern) else {
+            return false;
+        };
+        match span.attributes.get(k) {
+            Some(value) if re.is_match(value) => {}
+            _ => return false,
+        }
+    }
     true
 }

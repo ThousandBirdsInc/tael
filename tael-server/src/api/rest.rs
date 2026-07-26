@@ -235,6 +235,17 @@ async fn query_traces(
     Query(params): Query<TraceQueryParams>,
     RawQuery(raw): RawQuery,
 ) -> impl IntoResponse {
+    let attribute_filters = match parse_attribute_params(raw.as_deref()) {
+        Ok(f) => f,
+        // A malformed regex is the caller's mistake and must say so; silently
+        // matching nothing would look like "no such traces".
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
     let query = TraceQuery {
         service: params.service,
         operation: params.operation,
@@ -243,7 +254,9 @@ async fn query_traces(
         status: params.status,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
-        attributes: parse_attribute_params(raw.as_deref()),
+        attributes: attribute_filters.exact,
+        attributes_contains: attribute_filters.contains,
+        attributes_regex: attribute_filters.regex,
         text: params.text,
     };
 
@@ -271,24 +284,53 @@ async fn query_traces(
     }
 }
 
-/// Pull repeated `attribute=key=value` pairs out of a raw query string.
+/// Span attribute filters, split by match kind.
+#[derive(Debug, Default)]
+struct AttributeFilters {
+    exact: Vec<(String, String)>,
+    contains: Vec<(String, String)>,
+    regex: Vec<(String, String)>,
+}
+
+/// Pull repeated `attribute=key<op>value` pairs out of a raw query string.
+///
 /// `serde_urlencoded` (axum's default Query parser) keeps only the last value
-/// for duplicate keys, so we re-parse the raw string to collect all of them.
-fn parse_attribute_params(raw: Option<&str>) -> Vec<(String, String)> {
+/// for duplicate keys, so the raw string is re-parsed to collect all of them.
+/// Three operators are recognized, longest first so `~=` is not read as `=`:
+/// `k~=v` (contains), `k=~v` (regex), `k=v` (exact).
+fn parse_attribute_params(raw: Option<&str>) -> anyhow::Result<AttributeFilters> {
+    let mut filters = AttributeFilters::default();
     let Some(raw) = raw else {
-        return Vec::new();
+        return Ok(filters);
     };
-    form_urlencoded::parse(raw.as_bytes())
-        .filter(|(k, _)| k == "attribute")
-        .filter_map(|(_, v)| {
-            let (key, value) = v.split_once('=')?;
-            let key = key.trim();
-            if key.is_empty() {
-                return None;
+    for (_, spec) in form_urlencoded::parse(raw.as_bytes()).filter(|(k, _)| k == "attribute") {
+        // `=~` must be tried before `=`, and `~=` before both, or the operator
+        // character ends up inside the key or value.
+        let parsed = if let Some((k, v)) = spec.split_once("~=") {
+            Some((k, v, 'c'))
+        } else if let Some((k, v)) = spec.split_once("=~") {
+            Some((k, v, 'r'))
+        } else {
+            spec.split_once('=').map(|(k, v)| (k, v, 'e'))
+        };
+        let Some((key, value, kind)) = parsed else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        match kind {
+            'c' => filters.contains.push((key.to_string(), value.to_string())),
+            'r' => {
+                regex::Regex::new(value)
+                    .map_err(|e| anyhow::anyhow!("invalid regex for attribute `{key}`: {e}"))?;
+                filters.regex.push((key.to_string(), value.to_string()));
             }
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
+            _ => filters.exact.push((key.to_string(), value.to_string())),
+        }
+    }
+    Ok(filters)
 }
 
 #[derive(Debug, Deserialize)]
