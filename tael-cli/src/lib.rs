@@ -44,6 +44,7 @@
 
 pub mod client;
 pub mod commands;
+pub mod exit;
 pub mod output;
 pub mod tui;
 
@@ -256,6 +257,16 @@ pub enum Commands {
         /// Poll interval in seconds
         #[arg(long, default_value = "10")]
         interval: u64,
+        /// Stop and exit 6 when this condition becomes true. Repeatable (any
+        /// match stops). Format: <field><op><value>, where value is a number
+        /// or a multiple of the first sample.
+        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, span_count<1
+        #[arg(long = "exit-on")]
+        exit_on: Vec<String>,
+        /// Give up after this many ticks and exit 0. Without it, `watch` polls
+        /// until a condition trips or the process is interrupted.
+        #[arg(long)]
+        max_ticks: Option<u64>,
     },
     /// Collect, score, report, and compare trace-native evals
     Eval {
@@ -365,6 +376,10 @@ pub enum QuerySignal {
         /// (tael-backend storage only; e.g. --text "rate limit")
         #[arg(long)]
         text: Option<String>,
+        /// Also report how the query executed: access path, tiers consulted,
+        /// rows scanned vs returned, and hints about surprising results
+        #[arg(long)]
+        explain: bool,
     },
     /// Search and filter metrics
     Metrics {
@@ -859,6 +874,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 limit,
                 attribute,
                 text,
+                explain,
             } => {
                 commands::query::traces(
                     &client,
@@ -872,6 +888,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     limit,
                     attribute,
                     text,
+                    explain,
                 )
                 .await?;
             }
@@ -974,8 +991,19 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             last,
             service,
             interval,
+            exit_on,
+            max_ticks,
         } => {
-            commands::watch::run(&client, &opts.format, last, service, interval).await?;
+            commands::watch::run(
+                &client,
+                &opts.format,
+                last,
+                service,
+                interval,
+                exit_on,
+                max_ticks,
+            )
+            .await?;
         }
         Commands::Eval { action } => match action {
             EvalAction::Run {

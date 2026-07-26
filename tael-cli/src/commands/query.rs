@@ -28,6 +28,7 @@ pub async fn traces(
     limit: u32,
     attribute: Vec<String>,
     text: Option<String>,
+    explain: bool,
 ) -> Result<()> {
     let min_ms = min_duration.as_deref().and_then(parse_duration_ms);
     let max_ms = max_duration.as_deref().and_then(parse_duration_ms);
@@ -44,10 +45,17 @@ pub async fn traces(
             limit,
             &attributes,
             text.as_deref(),
+            explain,
         )
         .await?;
 
     output::render(format, &result, output::print_spans_table);
+    if explain && matches!(format, OutputFormat::Table) {
+        output::print_explain(&result["explain"]);
+    }
+    if result["spans"].as_array().is_none_or(|s| s.is_empty()) {
+        return Err(crate::exit::CategorizedError::no_results());
+    }
     Ok(())
 }
 
@@ -126,5 +134,15 @@ pub async fn metrics(
 pub async fn sql(client: &TaelClient, format: &OutputFormat, query: &str) -> Result<()> {
     let result = client.query_sql(query).await?;
     output::render(format, &result, output::print_sql_rows);
+    // The SQL endpoint reports rejections in the body rather than by status,
+    // so the error has to be lifted here for the exit code to reflect it.
+    if let Some(error) = result["error"].as_str() {
+        return Err(
+            crate::exit::CategorizedError::new(crate::exit::ExitCategory::BadQuery, error).into(),
+        );
+    }
+    if result["rows"].as_array().is_none_or(|r| r.is_empty()) {
+        return Err(crate::exit::CategorizedError::no_results());
+    }
     Ok(())
 }

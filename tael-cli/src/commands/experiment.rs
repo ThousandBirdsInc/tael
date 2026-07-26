@@ -36,6 +36,7 @@ pub async fn compare(
             50_000,
             &[],
             None,
+            false,
         )
         .await?;
     let mut variants: BTreeMap<String, VariantStats> = BTreeMap::new();

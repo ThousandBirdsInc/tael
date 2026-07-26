@@ -811,3 +811,75 @@ pub fn render(format: &OutputFormat, value: &Value, table_fn: fn(&Value)) {
         OutputFormat::Table => table_fn(value),
     }
 }
+
+/// Render the terminal verdict of a `tael watch --exit-on` run: which
+/// condition tripped, and on what values.
+pub fn print_watch_verdict(verdict: &Value) {
+    match verdict["verdict"].as_str().unwrap_or("") {
+        "condition_met" => {
+            println!();
+            println!(
+                "Condition met after {} tick(s):",
+                verdict["ticks"].as_i64().unwrap_or(0)
+            );
+            for trip in verdict["tripped"].as_array().into_iter().flatten() {
+                println!(
+                    "  {} — {} was {} (threshold {})",
+                    trip["condition"].as_str().unwrap_or("?"),
+                    trip["field"].as_str().unwrap_or("?"),
+                    trip["actual"].as_f64().unwrap_or(0.0),
+                    trip["threshold"].as_f64().unwrap_or(0.0),
+                );
+            }
+        }
+        "max_ticks_reached" => {
+            println!();
+            println!(
+                "Reached --max-ticks ({}) with no condition met.",
+                verdict["ticks"].as_i64().unwrap_or(0)
+            );
+        }
+        other => println!("{other}"),
+    }
+}
+
+/// Render a query `explain` block for humans. The JSON form is the contract for
+/// agents; this is the same information laid out for a terminal.
+pub fn print_explain(explain: &Value) {
+    if explain.is_null() {
+        return;
+    }
+    println!();
+    if explain["supported"].as_bool() == Some(false) {
+        println!(
+            "explain: unavailable — {}",
+            explain["reason"].as_str().unwrap_or("unsupported backend")
+        );
+        return;
+    }
+    println!("explain:");
+    println!(
+        "  access path   {}",
+        explain["access_path"].as_str().unwrap_or("?")
+    );
+    let tiers: Vec<&str> = explain["tiers_consulted"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    println!("  tiers         {}", tiers.join(" -> "));
+    println!(
+        "  rows          {} scanned, {} returned (limit {})",
+        explain["rows_scanned"].as_u64().unwrap_or(0),
+        explain["rows_returned"].as_u64().unwrap_or(0),
+        explain["limit"].as_u64().unwrap_or(0),
+    );
+    println!(
+        "  elapsed       {:.2}ms",
+        explain["elapsed_ms"].as_f64().unwrap_or(0.0)
+    );
+    for note in explain["notes"].as_array().into_iter().flatten() {
+        if let Some(note) = note.as_str() {
+            println!("  note          {note}");
+        }
+    }
+}

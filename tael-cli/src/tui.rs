@@ -459,6 +459,7 @@ impl App {
                 200,
                 &[],
                 None,
+                false,
             )
             .await
         {

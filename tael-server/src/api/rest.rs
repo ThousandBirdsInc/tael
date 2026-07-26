@@ -177,6 +177,9 @@ struct TraceQueryParams {
     last: Option<String>,
     limit: Option<u32>,
     text: Option<String>,
+    /// When true, the response also carries an `explain` object describing how
+    /// the query executed. Off by default so the common path stays one scan.
+    explain: Option<bool>,
 }
 
 fn parse_duration_to_seconds(s: &str) -> Option<i64> {
@@ -212,10 +215,19 @@ async fn query_traces(
     };
 
     match state.store.query_traces(&query) {
-        Ok(spans) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "spans": spans })),
-        ),
+        Ok(spans) => {
+            let mut body = serde_json::json!({ "spans": spans });
+            if params.explain.unwrap_or(false) {
+                // An explain failure must not fail the query itself — the
+                // caller still wants its results.
+                let explain = state
+                    .store
+                    .explain_traces(&query)
+                    .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+                body["explain"] = explain;
+            }
+            (StatusCode::OK, axum::Json(body))
+        }
         Err(e) => {
             tracing::error!(error = %e, "query_traces failed");
             (

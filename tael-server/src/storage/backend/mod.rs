@@ -303,6 +303,74 @@ impl Store for TaelBackend {
     }
 
     // ── Core reads: hot tier, unioned with the cold tier ────────────
+    fn explain_traces(&self, query: &TraceQuery) -> Result<serde_json::Value> {
+        let started = std::time::Instant::now();
+        let cutoff = query
+            .last_seconds
+            .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
+        let limit = query.limit.unwrap_or(100) as usize;
+
+        // Mirror the real access paths so the counts describe what a query
+        // actually does, not an idealized plan.
+        let (path, tiers, scanned, text_matches) = if let Some(ref text) = query.text {
+            let trace_ids = self.search.search_trace_ids(text, 1000)?;
+            let mut scanned = 0usize;
+            for tid in &trace_ids {
+                scanned += self.get_trace(tid)?.len();
+            }
+            (
+                "full_text_index",
+                vec!["search", "hot", "cold"],
+                scanned,
+                Some(trace_ids.len()),
+            )
+        } else {
+            let hot_rows = self.hot.query_traces(query)?.len();
+            if hot_rows >= limit {
+                // The hot tier filled the limit, so cold was never opened.
+                ("hot_scan", vec!["hot"], hot_rows, None)
+            } else {
+                let cold_rows = self
+                    .cold
+                    .all_spans()?
+                    .into_iter()
+                    .filter(|s| hot::span_matches(s, query, cutoff))
+                    .count();
+                (
+                    "hot_then_cold_scan",
+                    vec!["hot", "cold"],
+                    hot_rows + cold_rows,
+                    None,
+                )
+            }
+        };
+
+        let returned = self.query_traces(query)?.len();
+        Ok(serde_json::json!({
+            "supported": true,
+            "engine": "tael-backend",
+            "access_path": path,
+            "tiers_consulted": tiers,
+            "rows_scanned": scanned,
+            "rows_returned": returned,
+            "limit": limit,
+            "limit_reached": returned >= limit,
+            "text_index_trace_matches": text_matches,
+            "effective_filters": {
+                "service": query.service,
+                "operation": query.operation,
+                "status": query.status,
+                "min_duration_ms": query.min_duration_ms,
+                "max_duration_ms": query.max_duration_ms,
+                "last_seconds": query.last_seconds,
+                "attributes": query.attributes,
+                "text": query.text,
+            },
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "notes": explain_notes(query, returned, limit),
+        }))
+    }
+
     fn query_traces(&self, query: &TraceQuery) -> Result<Vec<Span>> {
         // Full-text payload filter: restrict to traces whose LLM prompts/
         // completions match, then apply the rest of the query over those spans.
@@ -1171,4 +1239,39 @@ mod tests {
         assert_eq!(b2.get_trace("t1").unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(format!("wal_files/{key}"));
     }
+}
+
+/// Human-readable hints for an `explain` result.
+///
+/// These target the mistakes that actually produce confusing query results:
+/// silently hitting the row limit, filtering on an attribute value that only
+/// matches exactly, or asking for payload text on data that has none.
+fn explain_notes(query: &TraceQuery, returned: usize, limit: usize) -> Vec<String> {
+    let mut notes = Vec::new();
+    if returned >= limit {
+        notes.push(format!(
+            "result hit the limit of {limit}; there may be more matches — raise --limit or narrow the window"
+        ));
+    }
+    if returned == 0 && !query.attributes.is_empty() {
+        notes.push(
+            "no matches with attribute filters applied; attribute matching is exact — \
+             check the value, or drop the filter to confirm the spans exist"
+                .to_string(),
+        );
+    }
+    if query.text.is_some() {
+        notes.push(
+            "--text searches indexed LLM prompt/completion payloads and log bodies only, \
+             not span attributes"
+                .to_string(),
+        );
+    }
+    if query.last_seconds.is_none() {
+        notes.push(
+            "no time window given; the scan covers all retained data — pass --last to bound it"
+                .to_string(),
+        );
+    }
+    notes
 }

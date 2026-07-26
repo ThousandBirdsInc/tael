@@ -84,6 +84,24 @@ pub trait Store: Send + Sync {
     /// returning rows as JSON objects.
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
 
+    /// Describe how a trace query would execute: which tiers are consulted,
+    /// which access path is taken, and how many rows are examined to produce
+    /// the result.
+    ///
+    /// This is the agent's substitute for a query-planner UI. An agent that
+    /// gets an unexpectedly empty or slow answer needs to know *why* — a
+    /// filter that matched nothing looks identical to a filter the engine
+    /// ignored, unless the engine says which it was.
+    ///
+    /// The default reports that the backend can't introspect itself rather
+    /// than inventing plausible-looking numbers.
+    fn explain_traces(&self, _query: &TraceQuery) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "supported": false,
+            "reason": "this storage backend does not report query execution details",
+        }))
+    }
+
     // ── Lifecycle / operability (default no-ops) ────────────────────
     /// Readiness probe — `Ok(())` when this store can serve requests. Backs the
     /// REST `/readyz` endpoint (`docs/tael-server-scaling-ha.md` §5.4). The

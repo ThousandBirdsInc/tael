@@ -119,8 +119,12 @@ impl TaelClient {
         limit: u32,
         attributes: &[(String, String)],
         text: Option<&str>,
+        explain: bool,
     ) -> Result<Value> {
         let mut params = vec![("limit", limit.to_string())];
+        if explain {
+            params.push(("explain", "true".to_string()));
+        }
         if let Some(s) = service {
             params.push(("service", s.to_string()));
         }
