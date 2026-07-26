@@ -29,10 +29,8 @@ the same single binary, and treats an AI agent as the primary operator.
 
 ## Implementation status
 
-Tracked against the phases below. Everything marked done ships with tests and
-was verified end to end against a running server.
-
-**Done**
+**All phases implemented.** Everything below ships with tests and was verified
+end to end against a running server.
 
 | Item | What landed |
 |---|---|
@@ -45,29 +43,47 @@ was verified end to end against a running server.
 | B2 exit codes | Category codes 0–6, `watch --exit-on` with absolute and baseline-relative thresholds, `query traces --explain` |
 | B3 search | Substring (`k~=v`) and regex (`k=~v`) attribute matchers; the text index now covers log bodies and span attribute values, not just LLM payloads |
 | B4 M3 commands | `topology`, `diff`, `get metric` |
+| B5 SQL | DataFusion over the default engine behind `--features sql`, same tables and column names as the DuckDB backend plus flattened LLM token/cost columns; in-memory, bounded, read-only |
 | C1 case suites | `eval suite push/pull/snapshot/list/diff`, content-addressed cases, content-derived immutable snapshot ids, byte-stable canonical JSONL round trip |
 | C2 online scoring | `score rule create/list/delete`, deterministic per-trace sampling, per-rule scored memory, scorer contract identical to `eval run`, progress and last-error reporting |
 | C3 alerting | Rules with `for` semantics, span-derived series needing no instrumentation, webhook/exec/SSE sinks, transition-only delivery; PromQL gained top-level scalar comparison |
 | C4 review | `review request/list/submit`, comment-backed, append-only with derived state, option validation, eval-case linkage |
+| C5 clustering | `tael embed/similar/cluster`, user-supplied embedder, deterministic k-means, cohesion reported so a weak grouping can be called weak |
+| D1 tenancy | Reads scoped and writes stamped by the caller's tenant; SQL admin-only under tenancy since it cannot be row-scoped. **Authorization, not isolation** — storage is not partitioned by tenant, and the docs say so |
+| D2 object storage | S3 alongside GCS for the cold tier and blob store; the blob-GC single-owner guard now covers any shared store |
+| D3 packaging | `install.sh` fetching prebuilt binaries, Homebrew formula in-repo |
+| D4 CI + contract | CI runs fmt, clippy at `-D warnings`, tests, and a build of each optional feature. A test walks the clap tree and fails when a command is missing from SKILL.md and llm.txt — it immediately found eleven that had shipped undocumented |
 
-**Not done**
+### Deviations from the plan, and why
 
-| Item | Note |
-|---|---|
-| B5 SQL on the default backend | Discovered during this work: `tael query sql` needs a `--features duckdb` build and errors on a default install, while SKILL.md taught it as the general aggregation escape hatch. The docs now say so plainly and point at the alternatives, but the capability gap is real and unclosed. |
-| C4 review in the TUI/GUI | The CLI loop works; the Review tab described in the plan is not built. |
-| C5 clustering | `tael similar` / `tael cluster` and the embedding index are untouched. |
-| D1 multi-tenancy | Keys carry a tenant claim and storage is tenant-partitioned, but no read/write path filters on it yet. |
-| D2 S3 cold tier + HA hardening | GCS still the only object backend; the HA failover test is unwritten. |
-| D3 packaging | No Homebrew tap, no `install.sh`, Windows client unchanged. |
-| D4 CI contract check | Docs were refreshed by hand; the generated-reference check that would keep them from drifting again is not in CI. |
+**Retention defaults were not shortened.** DESIGN.md proposes 7d/14d/30d, but
+everything was previously retained for a year; adopting the shorter windows as
+defaults would delete a year of history the first time an existing server
+restarted after upgrade. The recommended windows ship as a file
+`tael config init` writes.
 
-**Findings worth acting on separately.** The A5 benchmarks turned up three
-things the roadmap did not anticipate: unbatched ingest is 367 spans/s because
-the WAL fsync barrier dominates below ~1000 records per call, `query_traces`
-has no secondary indexes so cost scales inversely with filter selectivity, and
-`query_summary` takes 65ms per 10k spans — which puts a million-span hot tier
-into multi-second territory for the command SKILL.md tells agents to run first.
+**SQL is opt-in, not default.** Closing the gap was the goal, but DataFusion
+roughly doubles the binary (448 MB to 983 MB in debug) and tael's pitch is one
+small binary. Two features now provide SQL where one did before, and the
+default build's error names both plus the structured alternatives.
+
+**Tenancy is authorization, not isolation.** Physical isolation needs a
+storage key-schema change. What shipped is enforced at the query layer and
+documented as such rather than sold as more than it is.
+
+### Findings that were not in the plan
+
+The benchmarks turned up three things worth their own work: unbatched ingest
+is 367 spans/s because the WAL fsync barrier dominates below ~1000 records per
+call; `query_traces` has no secondary indexes, so cost scales inversely with
+filter selectivity; and `query_summary` takes 65ms per 10k spans, which puts a
+million-span hot tier into multi-second territory for the command SKILL.md
+tells agents to run first.
+
+Two defects surfaced along the way: the PromQL lexer rejected dotted
+OpenTelemetry metric names, making the subset unusable for semconv metrics;
+and the 5-minute metric rollups were written and expired but never readable,
+which made downsampling pure cost until `query metrics --rollups` landed.
 
 ## Thesis guardrails (won't build)
 
