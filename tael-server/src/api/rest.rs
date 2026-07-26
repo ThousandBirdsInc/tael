@@ -39,6 +39,8 @@ struct AppState {
     wal_fencer: Option<Arc<EpochFencer>>,
     /// Alert rules and their live event feed.
     alerts: Arc<crate::alerts::AlertStore>,
+    /// Online scoring rules.
+    scores: Arc<crate::scoring::ScoreRuleStore>,
 }
 
 pub fn router(
@@ -48,6 +50,7 @@ pub fn router(
     log_bus: Arc<LogBus>,
     cluster: Option<Arc<ClusterCoordinator>>,
     alerts: Arc<crate::alerts::AlertStore>,
+    scores: Arc<crate::scoring::ScoreRuleStore>,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -58,6 +61,7 @@ pub fn router(
         cluster,
         wal_fencer,
         alerts,
+        scores,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -81,6 +85,14 @@ pub fn router(
         .route("/api/v1/alerts/{name}", axum::routing::delete(delete_alert))
         .route("/api/v1/alerts/events", get(alert_events))
         .route("/api/v1/alerts/live", get(live_alerts))
+        .route(
+            "/api/v1/scores/rules",
+            get(list_score_rules).post(create_score_rule),
+        )
+        .route(
+            "/api/v1/scores/rules/{name}",
+            axum::routing::delete(delete_score_rule),
+        )
         .route("/api/v1/evals/runs", get(eval_runs))
         .route("/api/v1/evals/runs/{run_id}", get(eval_run))
         .route("/api/v1/evals/runs/{run_id}/cases", get(eval_cases))
@@ -135,6 +147,10 @@ pub fn dd_router(
         alerts: Arc::new(
             crate::alerts::AlertStore::open("")
                 .unwrap_or_else(|_| unreachable!("empty-path alert store cannot fail to open")),
+        ),
+        scores: Arc::new(
+            crate::scoring::ScoreRuleStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path score store cannot fail to open")),
         ),
     };
     dd_routes()
@@ -1643,6 +1659,7 @@ mod tests {
             cluster: None,
             wal_fencer: fencer,
             alerts: Arc::new(crate::alerts::AlertStore::open(path).unwrap()),
+            scores: Arc::new(crate::scoring::ScoreRuleStore::open(path).unwrap()),
         }
     }
 
@@ -1940,4 +1957,90 @@ async fn live_alerts(
     let stream = BroadcastStream::new(rx)
         .filter_map(|result| result.ok().map(|json| Ok(Event::default().data(json))));
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ── Online scoring ──────────────────────────────────────────────────
+
+/// Score rules with their progress. `traces_seen` versus `traces_sampled`
+/// makes the effective sample rate visible, and `failures`/`last_error` mean a
+/// silently broken judge is diagnosable rather than just absent from the data.
+async fn list_score_rules(State(state): State<AppState>) -> impl IntoResponse {
+    let status = state.scores.status();
+    let rules: Vec<serde_json::Value> = state
+        .scores
+        .list()
+        .into_iter()
+        .map(|rule| {
+            let progress = status.get(&rule.name).cloned().unwrap_or_default();
+            serde_json::json!({
+                "name": rule.name,
+                "sample": rule.sample,
+                "matcher": rule.matcher,
+                "command": rule.command,
+                "description": rule.description,
+                "created_at": rule.created_at,
+                "status": progress,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "rules": rules, "count": rules.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateScoreRulePayload {
+    name: String,
+    #[serde(default)]
+    sample: Option<f64>,
+    #[serde(default)]
+    matcher: crate::scoring::TraceMatcher,
+    command: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn create_score_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateScoreRulePayload>,
+) -> impl IntoResponse {
+    let rule = crate::scoring::ScoreRule {
+        name: payload.name,
+        // A rule with no explicit rate scores a small slice rather than
+        // everything: the expensive default is the wrong one for a judge that
+        // may call a model per trace.
+        sample: payload.sample.unwrap_or(0.05),
+        matcher: payload.matcher,
+        command: payload.command,
+        description: payload.description,
+        created_at: Utc::now(),
+    };
+    match state.scores.create(rule.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "created": rule.name, "sample": rule.sample })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn delete_score_rule(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.scores.delete(&name) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": name }))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no score rule named `{name}`") })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }

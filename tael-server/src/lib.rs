@@ -15,6 +15,7 @@ mod ingest;
 mod log_bus;
 mod promql;
 pub mod retention;
+pub mod scoring;
 mod span_bus;
 mod storage;
 
@@ -203,6 +204,109 @@ fn spawn_alert_evaluator(
             }
         }
     });
+}
+
+/// Sample production traces and run each score rule's scorer against them.
+///
+/// Scoring runs off the ingest path entirely: a slow or hanging judge delays
+/// only its own results, never a write. Results land as ordinary
+/// `tael_eval_score` points, so they trend, alert, and compare exactly like
+/// offline eval scores.
+fn spawn_online_scorer(
+    store: Arc<dyn Store>,
+    rules: Arc<scoring::ScoreRuleStore>,
+    interval_secs: u64,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // Only consider traces from roughly the last pass, so a rule added
+        // today does not immediately score a month of history.
+        let window_seconds = (interval_secs * 2) as i64;
+        loop {
+            tick.tick().await;
+            for rule in rules.list() {
+                let candidates = {
+                    let store = Arc::clone(&store);
+                    let rules = Arc::clone(&rules);
+                    let rule = rule.clone();
+                    tokio::task::spawn_blocking(move || {
+                        rules.select_candidates(store.as_ref(), &rule, window_seconds)
+                    })
+                    .await
+                };
+                let candidates = match candidates {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
+                        tracing::warn!(rule = %rule.name, error = %e, "selecting score candidates failed");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(rule = %rule.name, error = %e, "score selection panicked");
+                        continue;
+                    }
+                };
+
+                for span in candidates {
+                    match scoring::run_scorer(&rule, &span).await {
+                        Ok(scores) => {
+                            let written = record_online_scores(&store, &rule, &span, &scores);
+                            rules.mark_scored(&rule.name, &span.trace_id, written);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                rule = %rule.name, trace = %span.trace_id, error = %e,
+                                "scorer failed"
+                            );
+                            rules.mark_failed(&rule.name, &span.trace_id, e.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Write a scorer's output as `tael_eval_score` metric points.
+///
+/// The points carry the rule name, sample rate, and source trace so a score can
+/// always be traced back to the traffic that produced it — a number with no
+/// provenance is not evidence.
+fn record_online_scores(
+    store: &Arc<dyn Store>,
+    rule: &scoring::ScoreRule,
+    span: &storage::models::Span,
+    scores: &[scoring::ScoreLine],
+) -> u64 {
+    let points: Vec<MetricPoint> = scores
+        .iter()
+        .map(|score| {
+            let mut attributes = std::collections::HashMap::new();
+            attributes.insert("rule".to_string(), rule.name.clone());
+            attributes.insert("metric".to_string(), score.metric.clone());
+            attributes.insert("trace_id".to_string(), span.trace_id.clone());
+            attributes.insert("source".to_string(), "online".to_string());
+            attributes.insert("sample".to_string(), rule.sample.to_string());
+            attributes.insert("case_id".to_string(), span.trace_id.clone());
+            MetricPoint {
+                timestamp: chrono::Utc::now(),
+                service: span.service.clone(),
+                name: "tael_eval_score".to_string(),
+                metric_type: MetricType::Gauge,
+                value: score.value,
+                unit: "score".to_string(),
+                attributes,
+                histogram: None,
+            }
+        })
+        .collect();
+
+    match store.insert_metrics(&points) {
+        Ok(()) => points.len() as u64,
+        Err(e) => {
+            tracing::warn!(rule = %rule.name, error = %e, "writing online scores failed");
+            0
+        }
+    }
 }
 
 /// Resolve the auth mode for this configuration and open the keystore.
@@ -437,6 +541,8 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let bus = Arc::new(SpanBus::new()?);
     let log_bus = Arc::new(LogBus::new()?);
     let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
+    let score_rules = Arc::new(scoring::ScoreRuleStore::open(&config.data_dir)?);
+    spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
     // Evaluate more often than the compaction pass: an alert is only useful if
     // it fires close to when the condition started.
     spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
@@ -507,10 +613,11 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         let otlp = otlp_services.clone();
         let auth = Arc::clone(&auth_state);
         let alerts = Arc::clone(&alert_store);
+        let scores = Arc::clone(&score_rules);
         async move {
             // OTLP/HTTP is mounted here as well as on its own listener, so a
             // deployment that can expose only one port still accepts it.
-            let app = api::rest::router(store, blobs, bus, log_bus, cluster, alerts)
+            let app = api::rest::router(store, blobs, bus, log_bus, cluster, alerts, scores)
                 .merge(ingest::otlp_http::router(otlp))
                 .layer(axum::middleware::from_fn_with_state(
                     auth,

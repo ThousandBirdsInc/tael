@@ -249,6 +249,41 @@ impl TaelClient {
         rx
     }
 
+    pub async fn create_score_rule(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/scores/rules", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_score_rules(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/scores/rules", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn delete_score_rule(&self, name: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/v1/scores/rules/{name}", self.base_url))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn query_sql(&self, query: &str) -> Result<Value> {
         let resp = self
             .http

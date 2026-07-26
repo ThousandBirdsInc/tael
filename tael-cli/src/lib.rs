@@ -313,6 +313,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Score sampled production traffic with a scorer command
+    Score {
+        #[command(subcommand)]
+        action: ScoreAction,
+    },
     /// Manage alert rules
     Alert {
         #[command(subcommand)]
@@ -336,6 +341,50 @@ pub enum Commands {
     Mcp {
         #[command(subcommand)]
         action: McpAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScoreAction {
+    /// Manage online scoring rules
+    Rule {
+        #[command(subcommand)]
+        action: ScoreRuleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScoreRuleAction {
+    /// Create a rule that scores sampled production traces
+    Create {
+        /// Rule name (unique)
+        #[arg(long)]
+        name: String,
+        /// Fraction of matching traces to score, 0.0-1.0. Keep it low for a
+        /// judge that calls a model per trace; a few percent trends fine.
+        #[arg(long, default_value = "0.05")]
+        sample: f64,
+        /// Which traces to score, repeatable. Same vocabulary as
+        /// `tael query traces`: service=, operation=, status=,
+        /// min_duration_ms=, attribute:<key>=
+        #[arg(long = "match")]
+        matches: Vec<String>,
+        /// Scorer command. Receives TAEL_EVAL_TRACE_ID, TAEL_EVAL_SPAN_ID,
+        /// TAEL_EVAL_SERVICE, TAEL_EVAL_OPERATION, TAEL_EVAL_RULE, and
+        /// TAEL_EVAL_ONLINE=1. Must print one JSON object per line with
+        /// `metric` and `value` (optionally `rationale`).
+        #[arg(long)]
+        cmd: String,
+        /// Human-readable note
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List score rules and their progress
+    List,
+    /// Delete a score rule
+    Delete {
+        /// Rule name
+        name: String,
     },
 }
 
@@ -1317,6 +1366,32 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             McpAction::Serve => {
                 mcp::serve(client, &server_url).await?;
             }
+        },
+        Commands::Score { action } => match action {
+            ScoreAction::Rule { action } => match action {
+                ScoreRuleAction::Create {
+                    name,
+                    sample,
+                    matches,
+                    cmd,
+                    description,
+                } => {
+                    commands::score::create(
+                        &client,
+                        &opts.format,
+                        &name,
+                        sample,
+                        &matches,
+                        &cmd,
+                        description.as_deref(),
+                    )
+                    .await?;
+                }
+                ScoreRuleAction::List => commands::score::list(&client, &opts.format).await?,
+                ScoreRuleAction::Delete { name } => {
+                    commands::score::delete(&client, &opts.format, &name).await?
+                }
+            },
         },
         Commands::Alert { action } => match action {
             AlertAction::Create {
