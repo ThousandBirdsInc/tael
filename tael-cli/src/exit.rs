@@ -151,7 +151,6 @@ pub fn finish(result: anyhow::Result<()>) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
 
     #[test]
     fn codes_are_stable() {

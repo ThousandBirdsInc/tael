@@ -45,6 +45,7 @@
 pub mod client;
 pub mod commands;
 pub mod exit;
+pub mod mcp;
 pub mod output;
 pub mod tui;
 
@@ -308,6 +309,18 @@ pub enum Commands {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Expose tael's query surface to an AI agent over the Model Context Protocol
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// Serve MCP over stdio. Configure this as an MCP server in your agent:
+    /// {"command": "tael", "args": ["mcp", "serve"]}
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -1184,6 +1197,11 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Server { action } => match action {
             ServerAction::Status => {
                 commands::server::status(&client, &opts.format).await?;
+            }
+        },
+        Commands::Mcp { action } => match action {
+            McpAction::Serve => {
+                mcp::serve(client, &server_url).await?;
             }
         },
         Commands::Skill { action } => match action {

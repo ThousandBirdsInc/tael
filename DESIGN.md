@@ -295,7 +295,7 @@ This lets agents like Claude Code call observability tools without shelling out.
 
 ### M4: Scale + Polish
 - [ ] ClickHouse storage backend
-- [ ] MCP server integration
+- [x] MCP server integration (`tael mcp serve`)
 - [ ] Retention policies and downsampling
 - [ ] Auth (API keys)
 - [ ] Packaging (Homebrew, Docker)
