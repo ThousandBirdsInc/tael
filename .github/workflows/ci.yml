@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless on a fresh runner and cost disk, which
+  # is the constraint here — the dependency tree is large.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy -p tael-server -p tael-cli -p tael-test -- -D warnings
+
+      # The default feature set is what `cargo install tael-cli` produces, so
+      # it is what CI must prove works.
+      - name: Test (default features)
+        run: cargo test -p tael-server -p tael-cli -p tael-test
+
+      # Optional features are not exercised by the default run, and a broken
+      # one is only discovered at install time otherwise.
+      - name: Build (sql feature)
+        run: cargo build -p tael-cli --features sql
+
+      - name: Test (sql feature)
+        run: "cargo test -p tael-server --features sql sql::"
+
+      - name: Build (cloud feature)
+        run: cargo build -p tael-server --features cloud
+
+      - name: Build benchmarks
+        run: cargo build -p tael-server --benches
+
+  # The desktop GUI is behind an optional feature and needs GTK/WebKit system
+  # libraries, so the main job cannot build it — which meant nothing built it at
+  # all, and it accumulated a clippy failure nobody saw. Its own job, with its
+  # own dependencies, so that stops being possible.
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+
+      # The bundled front-end is committed (that is how the app ships without a
+      # build step), so a stale build is a real defect: type-check the source
+      # and rebuild to prove the committed assets can be regenerated.
+      #
+      # `working-directory` rather than `npm --prefix`: the latter picks the
+      # package to install but still runs the command in the checkout root,
+      # where tsc finds no tsconfig.json and prints its help instead.
+      - name: Front-end install
+        run: npm ci
+        working-directory: tael-gui
+
+      - name: Front-end types
+        run: npx tsc --noEmit
+        working-directory: tael-gui
+
+      - name: Front-end build
+        run: npx vite build
+        working-directory: tael-gui
+
+      - name: Clippy
+        run: cargo clippy -p tael-gui --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p tael-gui
+
+  # Kept separate so a docs-only drift failure is obvious in the checks list
+  # rather than buried in the test job's output.
+  agent-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # SKILL.md and llm.txt are the interface an agent reads. A command that
+      # neither mentions is undiscoverable, and a stale claim in them changes
+      # how an agent reasons. This walks the real clap tree and fails on drift.
+      - name: Agent contract matches the CLI
+        run: cargo test -p tael-cli --test docs_contract
+
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: sh -n install.sh
+      - name: POSIX lint
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --shell=sh install.sh

@@ -519,11 +519,16 @@ beat later because of the series layout + downsampling.
 - [x] `tael get trace` resolves payload hashes; logs resolve body blobs (via `GET /api/v1/blobs/{sha256}`)
 
 ### B2: Hot tier + WAL
-- [x] Tagged WAL append/fsync/ack + crash replay routing by signal (walrus-rust)
-- [x] LSM hot tier (`fjall`), per-signal keyspaces:
-  - [x] spans `trace_id\0span_id` + `be(start_ns)…` time index
-  - [x] logs `be(ts)+seq`
-  - [x] metrics `name\0be(ts)+seq` (series-dictionary/labels_hash deferred to cold tier)
+- [x] Tagged WAL append/ack + crash replay routing by signal (walrus-rust);
+      the read cursor advances in checkpoints, not per write
+- [x] LSM hot tier (`fjall`), per-signal keyspaces, MessagePack values:
+  - [x] spans `trace_id\0span_id`, plus three time-ordered indexes carrying a
+        covering header (service, operation, duration, status): `be(start_ns)…`,
+        `service\0be(start_ns)…`, and an error-only index
+  - [x] logs `be(ts)+content_hash`
+  - [x] metrics `name\0be(ts)+content_hash` (series-dictionary/labels_hash deferred to cold tier)
+  - [x] every key a pure function of its record, so WAL replay overwrites
+        rather than duplicating
 - [x] `Store` core reads served from hot tier (traces/get/services/logs/metrics)
 
 ### B3: Cold tier + query

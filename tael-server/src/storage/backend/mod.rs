@@ -9,6 +9,7 @@
 //! `duckdb` Cargo feature, but the default backend is self-contained so the
 //! default CLI install does not compile or link DuckDB.
 
+mod codec;
 mod cold;
 mod hot;
 mod wal;
@@ -212,6 +213,34 @@ impl TaelBackend {
         Ok(dropped)
     }
 
+    /// Drop expired cold partitions using a per-signal policy.
+    ///
+    /// Metric rollups are included here and deliberately outlive raw points:
+    /// they exist so year-scale trends survive at a fraction of the size, which
+    /// only works if they are on a longer clock than the data they summarize.
+    pub fn enforce_retention(&self, cutoffs: &crate::retention::RetentionCutoffs) -> Result<usize> {
+        let date = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d").to_string();
+        let (traces, logs, metrics, rollups) = (
+            date(cutoffs.traces),
+            date(cutoffs.logs),
+            date(cutoffs.metrics_raw),
+            date(cutoffs.metrics_rollups),
+        );
+        let dropped = self.cold.drop_partitions_per_signal(&[
+            (ColdTier::SPANS_ROOT, &traces),
+            (ColdTier::LOGS_ROOT, &logs),
+            (ColdTier::METRICS_ROOT, &metrics),
+            (ColdTier::METRICS_5M_ROOT, &rollups),
+        ])?;
+        if dropped > 0 {
+            tracing::info!(
+                partitions = dropped,
+                "tael-backend: dropped expired cold partitions"
+            );
+        }
+        Ok(dropped)
+    }
+
     /// Apply a batch to every projection. Used by both the live write path and
     /// WAL replay.
     fn apply_spans(&self, spans: &[Span]) -> Result<()> {
@@ -248,6 +277,26 @@ impl TaelBackend {
         }
     }
 
+    /// Redeem a WAL ticket once its record is in the projection, and checkpoint
+    /// if enough have accumulated.
+    ///
+    /// The checkpoint runs on whichever writer happens to trip the threshold,
+    /// which costs that one call the drain (a few ms per thousand records)
+    /// while every other write pays nothing. A background thread would smooth
+    /// that out, but it would need a self-reference the `Arc<dyn Store>` this
+    /// is held behind does not give us, and the tail it removes is small.
+    fn applied(&self, ticket: wal::WalTicket) -> Result<()> {
+        if self.wal.mark_applied(ticket) {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    /// Flush the hot tier durably and let the WAL forget everything applied.
+    pub fn checkpoint(&self) -> Result<usize> {
+        self.wal.checkpoint(|| self.hot.flush())
+    }
+
     /// Re-apply any WAL records left unconsumed by a crash, then advance past
     /// them (they are consumed by `drain`).
     fn replay(&self) -> Result<()> {
@@ -282,27 +331,142 @@ impl TaelBackend {
 impl Store for TaelBackend {
     // ── Writes: WAL → apply (hot + projection) → mark applied ───────
     fn insert_spans(&self, spans: &[Span]) -> Result<()> {
-        self.wal.append_spans(spans)?;
+        let ticket = self.wal.append_spans(spans)?;
         self.apply_spans(spans)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     fn insert_logs(&self, logs: &[LogRecord]) -> Result<()> {
-        self.wal.append_logs(logs)?;
+        let ticket = self.wal.append_logs(logs)?;
         self.apply_logs(logs)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     fn insert_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
-        self.wal.append_metrics(metrics)?;
+        let ticket = self.wal.append_metrics(metrics)?;
         self.apply_metrics(metrics)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     // ── Core reads: hot tier, unioned with the cold tier ────────────
+    fn query_metric_rollups(
+        &self,
+        name: Option<&str>,
+        service: Option<&str>,
+        last_seconds: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<super::models::MetricRollup>> {
+        let cutoff = last_seconds.map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
+        let mut out: Vec<super::models::MetricRollup> = self
+            .cold
+            .all_rollups()?
+            .into_iter()
+            .filter(|r| name.is_none_or(|n| r.name == n))
+            .filter(|r| service.is_none_or(|s| r.service == s))
+            .filter(|r| cutoff.is_none_or(|c| r.bucket_start >= c))
+            .map(|r| super::models::MetricRollup {
+                bucket_start: r.bucket_start,
+                service: r.service.clone(),
+                name: r.name.clone(),
+                min: r.min,
+                max: r.max,
+                avg: r.avg(),
+                sum: r.sum,
+                count: r.count,
+            })
+            .collect();
+        // Newest first, matching every other query surface.
+        out.sort_by_key(|b| std::cmp::Reverse(b.bucket_start));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    fn explain_traces(&self, query: &TraceQuery) -> Result<serde_json::Value> {
+        let started = std::time::Instant::now();
+        let cutoff = query
+            .last_seconds
+            .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
+        let limit = query.limit.unwrap_or(100) as usize;
+
+        // Mirror the real access paths so the counts describe what a query
+        // actually does, not an idealized plan.
+        let (path, tiers, scanned, text_matches, index) = if let Some(ref text) = query.text {
+            let trace_ids = self.search.search_trace_ids(text, 1000)?;
+            let mut scanned = 0usize;
+            for tid in &trace_ids {
+                scanned += self.get_trace(tid)?.len();
+            }
+            (
+                "full_text_index",
+                vec!["search", "hot", "cold"],
+                scanned,
+                Some(trace_ids.len()),
+                None,
+            )
+        } else {
+            let hot = self.hot.scan_spans(query)?;
+            // `rows_scanned` counts index entries visited, which is the number
+            // that says whether the chosen index was selective. `rows_decoded`
+            // is how many survived the covering header far enough to be read
+            // back in full.
+            let index = serde_json::json!({
+                "keyspace": hot.index.keyspace(),
+                "rows_scanned": hot.rows_scanned,
+                "rows_decoded": hot.rows_decoded,
+            });
+            if hot.spans.len() >= limit {
+                // The hot tier filled the limit, so cold was never opened.
+                (
+                    "hot_scan",
+                    vec!["hot"],
+                    hot.rows_scanned as usize,
+                    None,
+                    Some(index),
+                )
+            } else {
+                let cold_rows = self
+                    .cold
+                    .all_spans()?
+                    .into_iter()
+                    .filter(|s| hot::span_matches(s, query, cutoff))
+                    .count();
+                (
+                    "hot_then_cold_scan",
+                    vec!["hot", "cold"],
+                    hot.rows_scanned as usize + cold_rows,
+                    None,
+                    Some(index),
+                )
+            }
+        };
+
+        let returned = self.query_traces(query)?.len();
+        Ok(serde_json::json!({
+            "supported": true,
+            "engine": "tael-backend",
+            "access_path": path,
+            "hot_index": index,
+            "tiers_consulted": tiers,
+            "rows_scanned": scanned,
+            "rows_returned": returned,
+            "limit": limit,
+            "limit_reached": returned >= limit,
+            "text_index_trace_matches": text_matches,
+            "effective_filters": {
+                "service": query.service,
+                "operation": query.operation,
+                "status": query.status,
+                "min_duration_ms": query.min_duration_ms,
+                "max_duration_ms": query.max_duration_ms,
+                "last_seconds": query.last_seconds,
+                "attributes": query.attributes,
+                "text": query.text,
+            },
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "notes": explain_notes(query, returned, limit),
+        }))
+    }
+
     fn query_traces(&self, query: &TraceQuery) -> Result<Vec<Span>> {
         // Full-text payload filter: restrict to traces whose LLM prompts/
         // completions match, then apply the rest of the query over those spans.
@@ -323,7 +487,7 @@ impl Store for TaelBackend {
                     }
                 }
             }
-            matched.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            matched.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             matched.truncate(limit);
             return Ok(matched);
         }
@@ -341,7 +505,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|s| hot::span_matches(s, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for s in cold {
                 if results.len() >= limit {
                     break;
@@ -381,7 +545,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|l| hot::log_matches(l, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for l in cold {
                 if results.len() >= limit {
                     break;
@@ -404,7 +568,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|m| hot::metric_matches(m, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for m in cold {
                 if results.len() >= limit {
                     break;
@@ -496,21 +660,46 @@ impl Store for TaelBackend {
         }
     }
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        // DataFusion serves SQL on the default build. The DuckDB projection,
+        // when compiled in, keeps serving it instead: that build already
+        // maintains a second copy of everything, and querying it avoids
+        // materializing the tables a second time in memory.
         #[cfg(feature = "duckdb")]
         {
             self.inner.query_sql(sql)
         }
-        #[cfg(not(feature = "duckdb"))]
+        #[cfg(all(not(feature = "duckdb"), feature = "sql"))]
+        {
+            let (trace_query, log_query, metric_query) = crate::sql::source_queries();
+            crate::sql::query(
+                self.query_traces(&trace_query)?,
+                self.query_logs(&log_query)?,
+                self.query_metrics(&metric_query)?,
+                self.list_comments(crate::sql::row_limit() as usize)?,
+                sql,
+            )
+        }
+        #[cfg(all(not(feature = "duckdb"), not(feature = "sql")))]
         {
             let _ = sql;
-            bail!("SQL queries require a build with the `duckdb` feature")
+            bail!(concat!(
+                "this build has no SQL engine. Reinstall with ",
+                "`cargo install tael-cli --features sql` (DataFusion over the ",
+                "default storage engine) or `--features duckdb` (the legacy ",
+                "backend). Without one, use `summarize`, `diff`, `topology`, ",
+                "or the PromQL subset — between them they cover most of what ",
+                "SQL gets reached for."
+            ))
         }
     }
 
     fn flush(&self) -> Result<()> {
-        // Graceful-shutdown flush: tighten the hot tier so a restart/standby
-        // replays less WAL. WAL fsync already guarantees durability.
-        self.hot.flush()
+        // Graceful-shutdown flush: checkpoint, which makes the hot tier durable
+        // and consumes the applied WAL, so a restart replays at most the last
+        // cursor-persist chunk instead of everything since the last threshold
+        // checkpoint.
+        self.checkpoint()?;
+        Ok(())
     }
 
     /// Standby entrypoint: durably accept a framed WAL record shipped from a
@@ -520,25 +709,53 @@ impl Store for TaelBackend {
     /// promotion on leader loss (§5.1).
     fn apply_framed_wal(&self, framed: &[u8]) -> Result<()> {
         let record = WalRecord::decode(framed)?;
-        self.wal.append_framed(framed)?;
+        let ticket = self.wal.append_framed(framed)?;
         match &record {
             WalRecord::Spans(s) => self.apply_spans(s)?,
             WalRecord::Logs(l) => self.apply_logs(l)?,
             WalRecord::Metrics(m) => self.apply_metrics(m)?,
         }
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 }
 
 impl TaelBackend {
-    fn summary_native(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
-        let spans = self.query_traces(&TraceQuery {
+    /// Aggregate every span in a window, hot tier and cold.
+    ///
+    /// The hot half never reads a span: the covering index carries service,
+    /// operation, duration and status, and the key carries the trace id, so a
+    /// window that used to decode ten thousand records now walks ten thousand
+    /// index entries. The cold half still materializes, because Parquet has no
+    /// equivalent index — but cold holds aged data, and the windows these
+    /// reports ask about are recent.
+    fn aggregate_spans(&self, last_seconds: i64, service: Option<&str>) -> Result<SpanWindow> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(last_seconds);
+        let cutoff_ns = cutoff.timestamp_nanos_opt().unwrap_or(0);
+        let mut window = SpanWindow::default();
+        self.hot.for_each_span_fact(service, cutoff_ns, |facts| {
+            window.observe(
+                facts.trace_id,
+                facts.service,
+                facts.operation,
+                facts.duration_ms,
+                facts.is_error,
+            );
+        })?;
+        let cold_query = TraceQuery {
             service: service.map(str::to_string),
             last_seconds: Some(last_seconds),
-            limit: Some(u32::MAX),
             ..Default::default()
-        })?;
+        };
+        for span in self.cold.all_spans()? {
+            if hot::span_matches(&span, &cold_query, Some(cutoff)) {
+                window.push(&span);
+            }
+        }
+        Ok(window)
+    }
+
+    fn summary_native(&self, last_seconds: i64, service: Option<&str>) -> Result<SummaryReport> {
+        let mut spans = self.aggregate_spans(last_seconds, service)?;
         let logs = self.query_logs(&LogQuery {
             service: service.map(str::to_string),
             last_seconds: Some(last_seconds),
@@ -554,9 +771,9 @@ impl TaelBackend {
         Ok(SummaryReport {
             window_seconds: last_seconds,
             service_filter: service.map(str::to_string),
-            traces: trace_summary(&spans),
-            top_services: service_summaries(&spans),
-            top_error_operations: error_operations(&spans),
+            top_services: spans.service_summaries(),
+            top_error_operations: spans.top_error_operations(),
+            traces: spans.traces(),
             logs: log_summary(&logs),
             metrics: metric_summary(&metrics),
         })
@@ -568,23 +785,13 @@ impl TaelBackend {
         baseline_seconds: i64,
         service: Option<&str>,
     ) -> Result<AnomalyReport> {
-        let current = self.query_traces(&TraceQuery {
-            service: service.map(str::to_string),
-            last_seconds: Some(current_seconds),
-            limit: Some(u32::MAX),
-            ..Default::default()
-        })?;
-        let baseline = self.query_traces(&TraceQuery {
-            service: service.map(str::to_string),
-            last_seconds: Some(baseline_seconds),
-            limit: Some(u32::MAX),
-            ..Default::default()
-        })?;
+        let mut current = self.aggregate_spans(current_seconds, service)?;
+        let mut baseline = self.aggregate_spans(baseline_seconds, service)?;
         Ok(AnomalyReport {
             current_seconds,
             baseline_seconds,
             service_filter: service.map(str::to_string),
-            anomalies: anomalies(&current, &baseline),
+            anomalies: anomalies(&current.service_summaries(), &baseline.service_summaries()),
         })
     }
 
@@ -637,81 +844,139 @@ impl TaelBackend {
     }
 }
 
-fn trace_summary(spans: &[Span]) -> TraceSummary {
-    let mut durations: Vec<f64> = spans.iter().map(|s| s.duration_ms).collect();
-    durations.sort_by(|a, b| a.total_cmp(b));
-    let trace_count = spans
-        .iter()
-        .map(|s| &s.trace_id)
-        .collect::<HashSet<_>>()
-        .len() as i64;
-    let error_count = spans
-        .iter()
-        .filter(|s| matches!(s.status, SpanStatus::Error))
-        .count() as i64;
-    TraceSummary {
-        span_count: spans.len() as i64,
-        trace_count,
-        error_count,
-        error_rate: ratio(error_count, spans.len() as i64),
-        avg_ms: if durations.is_empty() {
-            0.0
-        } else {
-            durations.iter().sum::<f64>() / durations.len() as f64
-        },
-        max_ms: durations.last().copied().unwrap_or(0.0),
-        p50_ms: percentile(&durations, 0.50),
-        p95_ms: percentile(&durations, 0.95),
-        p99_ms: percentile(&durations, 0.99),
+/// Running aggregate over a set of spans.
+///
+/// Everything a summary reports is exact, which rules out reservoir sampling or
+/// bucketed percentiles: the durations are all kept and sorted at the end.
+#[derive(Default)]
+struct SpanAgg {
+    durations: Vec<f64>,
+    traces: HashSet<String>,
+    errors: i64,
+}
+
+impl SpanAgg {
+    fn observe(&mut self, trace_id: &str, duration_ms: f64, is_error: bool) {
+        self.durations.push(duration_ms);
+        // Spans outnumber traces by roughly an order of magnitude, so checking
+        // first turns most of these into a lookup instead of an allocation.
+        if !self.traces.contains(trace_id) {
+            self.traces.insert(trace_id.to_string());
+        }
+        if is_error {
+            self.errors += 1;
+        }
+    }
+
+    fn finish(mut self) -> TraceSummary {
+        self.durations.sort_by(|a, b| a.total_cmp(b));
+        let span_count = self.durations.len() as i64;
+        TraceSummary {
+            span_count,
+            trace_count: self.traces.len() as i64,
+            error_count: self.errors,
+            error_rate: ratio(self.errors, span_count),
+            avg_ms: if self.durations.is_empty() {
+                0.0
+            } else {
+                self.durations.iter().sum::<f64>() / self.durations.len() as f64
+            },
+            max_ms: self.durations.last().copied().unwrap_or(0.0),
+            p50_ms: percentile(&self.durations, 0.50),
+            p95_ms: percentile(&self.durations, 0.95),
+            p99_ms: percentile(&self.durations, 0.99),
+        }
     }
 }
 
-fn service_summaries(spans: &[Span]) -> Vec<ServiceSummary> {
-    let mut by_service: HashMap<String, Vec<Span>> = HashMap::new();
-    for span in spans {
-        by_service
-            .entry(span.service.clone())
-            .or_default()
-            .push(span.clone());
+/// Every span aggregate a report needs, accumulated in one pass.
+///
+/// `summarize` and `anomalies` both want the same three rollups over the same
+/// window, and computing them together means the window is walked once instead
+/// of three times.
+#[derive(Default)]
+struct SpanWindow {
+    total: SpanAgg,
+    by_service: HashMap<String, SpanAgg>,
+    error_operations: HashMap<(String, String), i64>,
+}
+
+impl SpanWindow {
+    fn observe(
+        &mut self,
+        trace_id: &str,
+        service: &str,
+        operation: &str,
+        duration_ms: f64,
+        is_error: bool,
+    ) {
+        self.total.observe(trace_id, duration_ms, is_error);
+        // Distinct services are few, so the lookup-then-allocate pattern keeps
+        // this to one owned string per service rather than one per span.
+        match self.by_service.get_mut(service) {
+            Some(agg) => agg.observe(trace_id, duration_ms, is_error),
+            None => self
+                .by_service
+                .entry(service.to_string())
+                .or_default()
+                .observe(trace_id, duration_ms, is_error),
+        }
+        // Error spans are a small minority, so this allocates rarely enough
+        // that borrowing the key would be complexity for nothing.
+        if is_error {
+            *self
+                .error_operations
+                .entry((service.to_string(), operation.to_string()))
+                .or_default() += 1;
+        }
     }
-    let mut rows: Vec<ServiceSummary> = by_service
-        .into_iter()
-        .map(|(service, spans)| {
-            let summary = trace_summary(&spans);
-            ServiceSummary {
+
+    fn push(&mut self, span: &Span) {
+        self.observe(
+            &span.trace_id,
+            &span.service,
+            &span.operation,
+            span.duration_ms,
+            matches!(span.status, SpanStatus::Error),
+        );
+    }
+
+    fn traces(self) -> TraceSummary {
+        self.total.finish()
+    }
+
+    fn service_summaries(&mut self) -> Vec<ServiceSummary> {
+        let mut rows: Vec<ServiceSummary> = std::mem::take(&mut self.by_service)
+            .into_iter()
+            .map(|(service, agg)| {
+                let summary = agg.finish();
+                ServiceSummary {
+                    service,
+                    span_count: summary.span_count,
+                    error_rate: summary.error_rate,
+                    p95_ms: summary.p95_ms,
+                }
+            })
+            .collect();
+        rows.sort_by_key(|b| std::cmp::Reverse(b.span_count));
+        rows.truncate(10);
+        rows
+    }
+
+    fn top_error_operations(&mut self) -> Vec<ErrorOperation> {
+        let mut rows: Vec<((String, String), i64)> = std::mem::take(&mut self.error_operations)
+            .into_iter()
+            .collect();
+        rows.sort_by_key(|b| std::cmp::Reverse(b.1));
+        rows.truncate(10);
+        rows.into_iter()
+            .map(|((service, operation), error_count)| ErrorOperation {
                 service,
-                span_count: summary.span_count,
-                error_rate: summary.error_rate,
-                p95_ms: summary.p95_ms,
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| b.span_count.cmp(&a.span_count));
-    rows.truncate(10);
-    rows
-}
-
-fn error_operations(spans: &[Span]) -> Vec<ErrorOperation> {
-    let mut counts: HashMap<(String, String), i64> = HashMap::new();
-    for span in spans
-        .iter()
-        .filter(|s| matches!(s.status, SpanStatus::Error))
-    {
-        *counts
-            .entry((span.service.clone(), span.operation.clone()))
-            .or_default() += 1;
+                operation,
+                error_count,
+            })
+            .collect()
     }
-    let mut rows: Vec<ErrorOperation> = counts
-        .into_iter()
-        .map(|((service, operation), error_count)| ErrorOperation {
-            service,
-            operation,
-            error_count,
-        })
-        .collect();
-    rows.sort_by(|a, b| b.error_count.cmp(&a.error_count));
-    rows.truncate(10);
-    rows
 }
 
 fn log_summary(logs: &[LogRecord]) -> LogSummary {
@@ -742,14 +1007,12 @@ fn metric_summary(metrics: &[MetricPoint]) -> MetricSummary {
     }
 }
 
-fn anomalies(current: &[Span], baseline: &[Span]) -> Vec<Anomaly> {
-    let cur = service_summaries(current);
-    let base = service_summaries(baseline);
-    let base_map: HashMap<String, ServiceSummary> =
-        base.into_iter().map(|s| (s.service.clone(), s)).collect();
+fn anomalies(current: &[ServiceSummary], baseline: &[ServiceSummary]) -> Vec<Anomaly> {
+    let base_map: HashMap<&str, &ServiceSummary> =
+        baseline.iter().map(|s| (s.service.as_str(), s)).collect();
     let mut rows = Vec::new();
-    for c in cur {
-        let Some(b) = base_map.get(&c.service) else {
+    for c in current {
+        let Some(b) = base_map.get(c.service.as_str()) else {
             continue;
         };
         if c.error_rate > b.error_rate + 0.05 {
@@ -810,6 +1073,41 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     }
 }
 
+/// Human-readable hints for an `explain` result.
+///
+/// These target the mistakes that actually produce confusing query results:
+/// silently hitting the row limit, filtering on an attribute value that only
+/// matches exactly, or asking for payload text on data that has none.
+fn explain_notes(query: &TraceQuery, returned: usize, limit: usize) -> Vec<String> {
+    let mut notes = Vec::new();
+    if returned >= limit {
+        notes.push(format!(
+            "result hit the limit of {limit}; there may be more matches — raise --limit or narrow the window"
+        ));
+    }
+    if returned == 0 && !query.attributes.is_empty() {
+        notes.push(
+            "no matches with attribute filters applied; attribute matching is exact — \
+             check the value, or drop the filter to confirm the spans exist"
+                .to_string(),
+        );
+    }
+    if query.text.is_some() {
+        notes.push(
+            "--text searches indexed LLM prompt/completion payloads and log bodies only, \
+             not span attributes"
+                .to_string(),
+        );
+    }
+    if query.last_seconds.is_none() {
+        notes.push(
+            "no time window given; the scan covers all retained data — pass --last to bound it"
+                .to_string(),
+        );
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +1128,122 @@ mod tests {
         let key = format!("tael-test-backend-{}", uuid::Uuid::new_v4());
         let b = TaelBackend::with_wal_key(dir.path().to_str().unwrap(), &key).unwrap();
         (b, dir, NsGuard(key))
+    }
+
+    /// A summary computed the obvious way — materialize every span, aggregate
+    /// in memory — so the index-derived one has something to be checked
+    /// against. It is what `summary_native` used to do.
+    fn naive_summary(spans: &[Span]) -> (i64, i64, i64, f64, Vec<(String, i64)>) {
+        let mut traces: HashSet<&str> = HashSet::new();
+        let mut errors = 0i64;
+        let mut durations: Vec<f64> = Vec::new();
+        let mut by_service: HashMap<&str, i64> = HashMap::new();
+        for s in spans {
+            traces.insert(s.trace_id.as_str());
+            durations.push(s.duration_ms);
+            *by_service.entry(s.service.as_str()).or_default() += 1;
+            if matches!(s.status, SpanStatus::Error) {
+                errors += 1;
+            }
+        }
+        durations.sort_by(|a, b| a.total_cmp(b));
+        let mut services: Vec<(String, i64)> = by_service
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        services.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        (
+            spans.len() as i64,
+            traces.len() as i64,
+            errors,
+            percentile(&durations, 0.95),
+            services,
+        )
+    }
+
+    #[test]
+    fn the_index_derived_summary_matches_a_naive_one() {
+        // `summarize` is computed from index entries now, never from the spans
+        // themselves. That is only worth doing if the numbers are identical, so
+        // this pins them against the straightforward computation — a mistake in
+        // the covering header layout or the trace id key offsets would show up
+        // as a wrong count here and nowhere else.
+        let (b, _dir, _ns) = backend();
+        let mut spans = Vec::new();
+        for i in 0..500 {
+            let service = if i % 3 == 0 { "api" } else { "worker" };
+            let status = if i % 7 == 0 {
+                SpanStatus::Error
+            } else {
+                SpanStatus::Ok
+            };
+            // Several spans per trace, so trace_count and span_count differ and
+            // a confusion between them cannot pass.
+            let mut s = span(
+                &format!("trace-{}", i / 5),
+                &format!("span-{i}"),
+                service,
+                (i % 97) as f64,
+                status,
+            );
+            s.operation = format!("op-{}", i % 4);
+            spans.push(s);
+        }
+        b.insert_spans(&spans).unwrap();
+
+        let (span_count, trace_count, errors, p95, services) = naive_summary(&spans);
+        let report = b.query_summary(3_600, None).unwrap();
+        assert_eq!(report.traces.span_count, span_count);
+        assert_eq!(report.traces.trace_count, trace_count);
+        assert_eq!(report.traces.error_count, errors);
+        assert_eq!(report.traces.p95_ms, p95);
+        assert_eq!(
+            report
+                .top_services
+                .iter()
+                .map(|s| (s.service.clone(), s.span_count))
+                .collect::<Vec<_>>(),
+            services
+        );
+        assert_eq!(
+            report
+                .top_error_operations
+                .iter()
+                .map(|e| e.error_count)
+                .sum::<i64>(),
+            errors,
+            "every error span has to be attributed to an operation"
+        );
+
+        // Scoped to one service, which reads a different index and has to agree
+        // with the same naive computation restricted the same way.
+        let api: Vec<Span> = spans
+            .iter()
+            .filter(|s| s.service == "api")
+            .cloned()
+            .collect();
+        let (span_count, trace_count, errors, p95, _) = naive_summary(&api);
+        let report = b.query_summary(3_600, Some("api")).unwrap();
+        assert_eq!(report.traces.span_count, span_count);
+        assert_eq!(report.traces.trace_count, trace_count);
+        assert_eq!(report.traces.error_count, errors);
+        assert_eq!(report.traces.p95_ms, p95);
+    }
+
+    #[test]
+    fn a_window_excludes_spans_older_than_it() {
+        // The aggregate reads a bounded index range rather than filtering after
+        // the fact, so an off-by-one in the bound would silently widen the
+        // window instead of erroring.
+        let (b, _dir, _ns) = backend();
+        let mut old = span("t-old", "s-old", "api", 1.0, SpanStatus::Ok);
+        old.start_time = Utc::now() - chrono::Duration::hours(3);
+        old.end_time = old.start_time;
+        b.insert_spans(&[old, span("t-new", "s-new", "api", 2.0, SpanStatus::Ok)])
+            .unwrap();
+
+        assert_eq!(b.query_summary(3_600, None).unwrap().traces.span_count, 1);
+        assert_eq!(b.query_summary(86_400, None).unwrap().traces.span_count, 2);
     }
 
     fn span(trace: &str, sid: &str, svc: &str, dur: f64, status: SpanStatus) -> Span {
@@ -1032,6 +1446,7 @@ mod tests {
             value: 42.0,
             unit: "1".into(),
             attributes: HashMap::new(),
+            histogram: None,
         }])
         .unwrap();
         let metrics = b
@@ -1103,6 +1518,7 @@ mod tests {
             value: 7.0,
             unit: "1".into(),
             attributes: HashMap::new(),
+            histogram: None,
         }])
         .unwrap();
 

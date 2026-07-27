@@ -26,13 +26,13 @@ pub fn make_span(i: usize) -> Span {
         trace_id: format!("{:032x}", i / SPANS_PER_TRACE),
         span_id: format!("{:016x}", i),
         // Every trace's first span is the root (no parent).
-        parent_span_id: (i % SPANS_PER_TRACE != 0).then(|| format!("{:016x}", i - 1)),
+        parent_span_id: (!i.is_multiple_of(SPANS_PER_TRACE)).then(|| format!("{:016x}", i - 1)),
         service: format!("service-{}", i % 8),
         operation: format!("operation-{}", i % 20),
         start_time: start,
         end_time: end,
         duration_ms: 5.0,
-        status: if i % 50 == 0 {
+        status: if i.is_multiple_of(50) {
             SpanStatus::Error
         } else {
             SpanStatus::Ok
@@ -63,12 +63,17 @@ pub fn make_log(i: usize) -> LogRecord {
         observed_timestamp: ts,
         trace_id: Some(format!("{:032x}", i / SPANS_PER_TRACE)),
         span_id: Some(format!("{:016x}", i)),
-        severity: if i % 20 == 0 {
+        severity: if i.is_multiple_of(20) {
             LogSeverity::Error
         } else {
             LogSeverity::Info
         },
-        severity_text: if i % 20 == 0 { "ERROR" } else { "INFO" }.to_string(),
+        severity_text: if i.is_multiple_of(20) {
+            "ERROR"
+        } else {
+            "INFO"
+        }
+        .to_string(),
         body: format!("request {} completed in {}ms", i, i % 100),
         service: format!("service-{}", i % 8),
         attributes: attrs([
@@ -98,6 +103,8 @@ pub fn make_metric(i: usize) -> MetricPoint {
             ("endpoint", "/health".to_string()),
             ("code", "200".to_string()),
         ]),
+        // Scalar point: bucket layout only applies to histogram types.
+        histogram: None,
     }
 }
 

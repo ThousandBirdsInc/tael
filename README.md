@@ -344,11 +344,14 @@ tael skill where
 Restart any running Claude Code session after the first install so it picks up the new skill directory. Subsequent `--force` re-installs take effect within the session.
 
 ### Interactive TUI
-`tael live` launches a terminal UI with live-updating trace feed, service health, and a waterfall trace visualizer.
+`tael live` launches a terminal UI with a live-updating trace feed, service
+health, a waterfall trace visualizer, and panels for the rest of the query
+surface. Number keys switch tabs — `1` through `9`, then `0`.
 
 ```
 ┌─ tael ─────────────────────────────────────────────────────┐
-│  1:Traces    2:Services    Trace                           │
+│  1:Traces 2:Services 3:Evals 4:Timeline 5:Health 6:Topology │
+│  7:Automation 8:Clusters 9:Review 0:SQL              Trace │
 ├────────────────────────────────────────────────────────────-┤
 │ Trace a1b2c3… │ 340ms │ 3 spans                           │
 │                  0ms        170ms       340ms              │
@@ -367,15 +370,34 @@ Restart any running Claude Code session after the first install so it picks up t
  ctrl-c:quit  q/esc:back  j/k:navigate  c:comment
 ```
 
+| Tab | What it shows |
+|-----|---------------|
+| Traces / Timeline / Trace | Live span feed, trace-level timeline, and the waterfall for one trace |
+| Services | Per-service span counts, latency, and error rate |
+| Evals | The most recent eval run and its cases |
+| Health | `summarize` plus `anomalies` against a baseline four windows back |
+| Topology | The service graph, and how many spans had a parent outside the window |
+| Automation | Alert rules and their state, the firing feed, and scoring-rule progress |
+| Clusters | Grouped failures with cohesion, labelled weak below 0.7 |
+| Review | Questions an agent filed for a human, open ones first |
+| SQL | A read-only query console (`e` to edit, `r` to run) |
+
+The panels are read-only. Creating an alert rule or answering a review request
+is an agent's job and stays in the CLI, where it can be scripted and its exit
+code checked. `enter` on a cluster exemplar or a review request opens that
+trace. The desktop GUI (`tael gui`) carries the same tabs.
+
 **Controls:**
 
 | Key | Action |
 |-----|--------|
-| `1` / `2` | Switch between Traces and Services tabs |
+| `1`–`9`, `0` | Switch tabs, in the order shown in the header |
 | `j` / `k` | Navigate up/down |
 | `Enter` | Open trace waterfall visualizer |
 | `q` / `Esc` / `Backspace` | Go back (leave trace view, or clear active filters) |
 | `c` | Add comment (in trace view) |
+| `r` | Re-fetch the open panel |
+| `e` | Edit the query (SQL panel) |
 | `Space` | Pause/resume live updates |
 | `Ctrl-C` | Quit |
 

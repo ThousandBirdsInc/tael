@@ -379,42 +379,42 @@ pub fn print_summary(value: &Value) {
     println!("{t}");
     println!();
 
-    if let Some(svcs) = value["top_services"].as_array() {
-        if !svcs.is_empty() {
-            let mut st = Table::new();
-            st.set_header(vec!["Service", "Spans", "Error Rate", "p95 (ms)"]);
-            for s in svcs {
-                st.add_row(vec![
-                    Cell::new(s["service"].as_str().unwrap_or("-")),
-                    Cell::new(s["span_count"].as_i64().unwrap_or(0).to_string()),
-                    Cell::new(format!(
-                        "{:.2}%",
-                        s["error_rate"].as_f64().unwrap_or(0.0) * 100.0
-                    )),
-                    Cell::new(format!("{:.1}", s["p95_ms"].as_f64().unwrap_or(0.0))),
-                ]);
-            }
-            println!("Top services");
-            println!("{st}");
-            println!();
+    if let Some(svcs) = value["top_services"].as_array()
+        && !svcs.is_empty()
+    {
+        let mut st = Table::new();
+        st.set_header(vec!["Service", "Spans", "Error Rate", "p95 (ms)"]);
+        for s in svcs {
+            st.add_row(vec![
+                Cell::new(s["service"].as_str().unwrap_or("-")),
+                Cell::new(s["span_count"].as_i64().unwrap_or(0).to_string()),
+                Cell::new(format!(
+                    "{:.2}%",
+                    s["error_rate"].as_f64().unwrap_or(0.0) * 100.0
+                )),
+                Cell::new(format!("{:.1}", s["p95_ms"].as_f64().unwrap_or(0.0))),
+            ]);
         }
+        println!("Top services");
+        println!("{st}");
+        println!();
     }
 
-    if let Some(ops) = value["top_error_operations"].as_array() {
-        if !ops.is_empty() {
-            let mut et = Table::new();
-            et.set_header(vec!["Service", "Operation", "Errors"]);
-            for o in ops {
-                et.add_row(vec![
-                    Cell::new(o["service"].as_str().unwrap_or("-")),
-                    Cell::new(o["operation"].as_str().unwrap_or("-")),
-                    Cell::new(o["error_count"].as_i64().unwrap_or(0).to_string()),
-                ]);
-            }
-            println!("Top error operations");
-            println!("{et}");
-            println!();
+    if let Some(ops) = value["top_error_operations"].as_array()
+        && !ops.is_empty()
+    {
+        let mut et = Table::new();
+        et.set_header(vec!["Service", "Operation", "Errors"]);
+        for o in ops {
+            et.add_row(vec![
+                Cell::new(o["service"].as_str().unwrap_or("-")),
+                Cell::new(o["operation"].as_str().unwrap_or("-")),
+                Cell::new(o["error_count"].as_i64().unwrap_or(0).to_string()),
+            ]);
         }
+        println!("Top error operations");
+        println!("{et}");
+        println!();
     }
 
     let logs = &value["logs"];
@@ -727,7 +727,7 @@ pub fn print_eval_cases(value: &Value) {
 pub fn print_eval_scores(value: &Value) {
     let scores = match value
         .get("scores")
-        .or_else(|| value.get("score").and_then(|_| Some(value)))
+        .or_else(|| value.get("score").map(|_| value))
         .and_then(|v| v.as_array())
     {
         Some(v) if !v.is_empty() => v,
@@ -810,4 +810,103 @@ pub fn render(format: &OutputFormat, value: &Value, table_fn: fn(&Value)) {
         OutputFormat::Json => print_json(value),
         OutputFormat::Table => table_fn(value),
     }
+}
+
+/// Render the terminal verdict of a `tael watch --exit-on` run: which
+/// condition tripped, and on what values.
+pub fn print_watch_verdict(verdict: &Value) {
+    match verdict["verdict"].as_str().unwrap_or("") {
+        "condition_met" => {
+            println!();
+            println!(
+                "Condition met after {} tick(s):",
+                verdict["ticks"].as_i64().unwrap_or(0)
+            );
+            for trip in verdict["tripped"].as_array().into_iter().flatten() {
+                println!(
+                    "  {} — {} was {} (threshold {})",
+                    trip["condition"].as_str().unwrap_or("?"),
+                    trip["field"].as_str().unwrap_or("?"),
+                    trip["actual"].as_f64().unwrap_or(0.0),
+                    trip["threshold"].as_f64().unwrap_or(0.0),
+                );
+            }
+        }
+        "max_ticks_reached" => {
+            println!();
+            println!(
+                "Reached --max-ticks ({}) with no condition met.",
+                verdict["ticks"].as_i64().unwrap_or(0)
+            );
+        }
+        other => println!("{other}"),
+    }
+}
+
+/// Render a query `explain` block for humans. The JSON form is the contract for
+/// agents; this is the same information laid out for a terminal.
+pub fn print_explain(explain: &Value) {
+    if explain.is_null() {
+        return;
+    }
+    println!();
+    if explain["supported"].as_bool() == Some(false) {
+        println!(
+            "explain: unavailable — {}",
+            explain["reason"].as_str().unwrap_or("unsupported backend")
+        );
+        return;
+    }
+    println!("explain:");
+    println!(
+        "  access path   {}",
+        explain["access_path"].as_str().unwrap_or("?")
+    );
+    let tiers: Vec<&str> = explain["tiers_consulted"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    println!("  tiers         {}", tiers.join(" -> "));
+    println!(
+        "  rows          {} scanned, {} returned (limit {})",
+        explain["rows_scanned"].as_u64().unwrap_or(0),
+        explain["rows_returned"].as_u64().unwrap_or(0),
+        explain["limit"].as_u64().unwrap_or(0),
+    );
+    println!(
+        "  elapsed       {:.2}ms",
+        explain["elapsed_ms"].as_f64().unwrap_or(0.0)
+    );
+    for note in explain["notes"].as_array().into_iter().flatten() {
+        if let Some(note) = note.as_str() {
+            println!("  note          {note}");
+        }
+    }
+}
+
+/// Render 5-minute metric rollups. Each bucket keeps min/max/avg rather than a
+/// single value, because a downsample that kept only the mean would hide the
+/// spikes a long-range trend question is usually asking about.
+pub fn print_rollups_table(result: &Value) {
+    let rollups = result["rollups"].as_array().cloned().unwrap_or_default();
+    if rollups.is_empty() {
+        println!("No rollups. They are written when metrics age out of the hot tier.");
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec![
+        "BUCKET", "SERVICE", "METRIC", "MIN", "AVG", "MAX", "COUNT",
+    ]);
+    for r in &rollups {
+        table.add_row(vec![
+            r["bucket_start"].as_str().unwrap_or("-").to_string(),
+            r["service"].as_str().unwrap_or("-").to_string(),
+            r["name"].as_str().unwrap_or("-").to_string(),
+            format!("{:.3}", r["min"].as_f64().unwrap_or(0.0)),
+            format!("{:.3}", r["avg"].as_f64().unwrap_or(0.0)),
+            format!("{:.3}", r["max"].as_f64().unwrap_or(0.0)),
+            r["count"].as_i64().unwrap_or(0).to_string(),
+        ]);
+    }
+    println!("{table}");
 }

@@ -8,12 +8,12 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 };
 use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyVal;
 use opentelemetry_proto::tonic::metrics::v1::{
-    metric::Data as MetricData, number_data_point::Value as NumberValue,
+    AggregationTemporality, metric::Data as MetricData, number_data_point::Value as NumberValue,
 };
 use tonic::{Request, Response, Status};
 
 use crate::storage::Store;
-use crate::storage::models::{MetricPoint, MetricType};
+use crate::storage::models::{HistogramBuckets, MetricPoint, MetricType, Temporality};
 
 pub struct OtlpMetricsService {
     store: Arc<dyn Store>,
@@ -22,6 +22,20 @@ pub struct OtlpMetricsService {
 impl OtlpMetricsService {
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
+    }
+}
+
+/// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
+/// metrics service. See [`super::otlp::SharedTraceService`].
+pub struct SharedMetricsService(pub Arc<OtlpMetricsService>);
+
+#[tonic::async_trait]
+impl MetricsService for SharedMetricsService {
+    async fn export(
+        &self,
+        request: Request<ExportMetricsServiceRequest>,
+    ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        self.0.export(request).await
     }
 }
 
@@ -92,6 +106,10 @@ impl MetricsService for OtlpMetricsService {
                                     value: dp.sum.unwrap_or(0.0),
                                     unit: unit.clone(),
                                     attributes: kv_to_map(&dp.attributes),
+                                    histogram: explicit_buckets(
+                                        dp,
+                                        temporality_of(h.aggregation_temporality),
+                                    ),
                                 });
                             }
                         }
@@ -105,6 +123,9 @@ impl MetricsService for OtlpMetricsService {
                                     value: dp.sum,
                                     unit: unit.clone(),
                                     attributes: kv_to_map(&dp.attributes),
+                                    // Summaries carry precomputed quantiles,
+                                    // not buckets.
+                                    histogram: None,
                                 });
                             }
                         }
@@ -118,6 +139,10 @@ impl MetricsService for OtlpMetricsService {
                                     value: dp.sum.unwrap_or(0.0),
                                     unit: unit.clone(),
                                     attributes: kv_to_map(&dp.attributes),
+                                    histogram: exponential_buckets(
+                                        dp,
+                                        temporality_of(h.aggregation_temporality),
+                                    ),
                                 });
                             }
                         }
@@ -140,6 +165,102 @@ impl MetricsService for OtlpMetricsService {
     }
 }
 
+/// Capture an explicit-bounds histogram data point's buckets.
+///
+/// OTLP sends `explicit_bounds` (N ascending upper bounds) and `bucket_counts`
+/// (N+1 per-bucket counts, the last one open-ended). A producer that omits the
+/// counts, or sends a mismatched pair, yields `None` — a wrong bucket layout
+/// would silently produce wrong quantiles, which is worse than admitting the
+/// point has no usable distribution.
+fn explicit_buckets(
+    dp: &opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint,
+    temporality: Temporality,
+) -> Option<HistogramBuckets> {
+    if dp.bucket_counts.is_empty() || dp.bucket_counts.len() != dp.explicit_bounds.len() + 1 {
+        return None;
+    }
+    Some(HistogramBuckets {
+        bounds: dp.explicit_bounds.clone(),
+        counts: dp.bucket_counts.clone(),
+        count: dp.count,
+        sum: dp.sum.unwrap_or(0.0),
+        min: dp.min,
+        max: dp.max,
+        temporality,
+    })
+}
+
+/// Convert an exponential histogram to explicit bounds.
+///
+/// Exponential histograms encode bucket `i` as covering `(base^i, base^(i+1)]`
+/// where `base = 2^(2^-scale)`. Materializing those bounds at ingest means the
+/// query layer has exactly one histogram shape to reason about, at the cost of
+/// storing the bounds — a few hundred bytes per point, against a whole class of
+/// unanswerable quantile questions.
+///
+/// Only the positive range and the zero bucket are represented. Negative
+/// observations are rare for the measurements histograms are used for (latency,
+/// size) and folding them into ascending explicit bounds alongside positives
+/// would misreport the distribution, so a point carrying them is left without
+/// buckets rather than described incorrectly.
+fn exponential_buckets(
+    dp: &opentelemetry_proto::tonic::metrics::v1::ExponentialHistogramDataPoint,
+    temporality: Temporality,
+) -> Option<HistogramBuckets> {
+    let positive = dp.positive.as_ref()?;
+    if positive.bucket_counts.is_empty() {
+        return None;
+    }
+    if dp
+        .negative
+        .as_ref()
+        .is_some_and(|n| n.bucket_counts.iter().any(|c| *c > 0))
+    {
+        return None;
+    }
+
+    let base = 2f64.powf(2f64.powi(-dp.scale));
+    let mut bounds = Vec::with_capacity(positive.bucket_counts.len() + 1);
+    let mut counts = Vec::with_capacity(positive.bucket_counts.len() + 2);
+
+    // The zero bucket holds observations at (or very near) zero, so its upper
+    // bound is 0 and it leads the ascending sequence.
+    bounds.push(0.0);
+    counts.push(dp.zero_count);
+
+    for (i, count) in positive.bucket_counts.iter().enumerate() {
+        let index = positive.offset as i64 + i as i64 + 1;
+        let upper = base.powf(index as f64);
+        if !upper.is_finite() {
+            return None;
+        }
+        bounds.push(upper);
+        counts.push(*count);
+    }
+    // Trailing open-ended bucket: nothing lands above the top bound because the
+    // encoding's own range ends there.
+    counts.push(0);
+
+    Some(HistogramBuckets {
+        bounds,
+        counts,
+        count: dp.count,
+        sum: dp.sum.unwrap_or(0.0),
+        min: dp.min,
+        max: dp.max,
+        temporality,
+    })
+}
+
+/// Map OTLP's aggregation temporality enum onto the stored form. OTLP's
+/// `UNSPECIFIED` is treated as cumulative, matching the SDK default.
+fn temporality_of(raw: i32) -> Temporality {
+    match AggregationTemporality::try_from(raw) {
+        Ok(AggregationTemporality::Delta) => Temporality::Delta,
+        _ => Temporality::Cumulative,
+    }
+}
+
 fn number_point(
     dp: &opentelemetry_proto::tonic::metrics::v1::NumberDataPoint,
     service: &str,
@@ -159,6 +280,7 @@ fn number_point(
         value,
         unit: unit.to_string(),
         attributes: kv_to_map(&dp.attributes),
+        histogram: None,
     })
 }
 

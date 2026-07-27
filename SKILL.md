@@ -152,14 +152,103 @@ Returns `{"query", "series": [...], "count": N}`. Supported syntax:
 - Bare selectors: `metric{label="v",other!="x"}`
 - `rate(sel[5m])`
 - Aggregators: `sum|avg|min|max|count(expr)` with optional `by (lbl)`
+- `histogram_quantile(0.95, metric{...})`, optionally `... by (lbl)`
+
+Note `histogram_quantile` takes the **metric selector directly**, not a fan of
+`le`-labelled bucket series as in Prometheus — tael keeps each point's whole
+bucket layout on the point. Dotted OTel metric names work as written.
 
 **Not supported** — do not generate these, they'll fail:
 - Binary ops (`a/b`, `a+b`), comparisons, `and/or/unless`
 - `without (...)`, regex matchers (`=~`/`!~`), offset, subqueries
-- `histogram_quantile`, `topk`, `quantile`, `stddev`
+- `topk`, `bottomk`, `quantile`, `stddev`
 - Range queries / `/query_range` — all evaluation is instant
 
 When filter mode suffices, prefer it. PromQL here is a small subset and easy to misuse.
+
+### 5b. Map the system, or compare two windows
+
+```bash
+tael --format json topology --last 1h
+tael --format json diff --last 10m --baseline 6h --service api
+```
+
+`topology` reconstructs the service graph from span parent/child edges — use it
+when you don't know what calls what, or to find which downstream dependency an
+error rate is coming from. `diff` reports every summary metric's current,
+baseline, delta, and ratio with no threshold applied; `anomalies` is the same
+comparison with an opinion attached. Reach for `diff` when investigating a
+*specific* change ("did the deploy at 14:00 do this"), and `anomalies` when
+asking "is anything wrong".
+
+Before querying an unfamiliar metric, describe it:
+
+```bash
+tael --format json get metric http.server.duration --last 24h
+```
+
+That reports its type, unit, label keys, and whether the points retained
+histogram buckets — i.e. whether `histogram_quantile` will work on it.
+
+### 5c. Block until something happens, or alert on it
+
+```bash
+# Wait for a condition, then exit 6. This is how to watch a deploy.
+tael watch --last 1m --interval 10 --exit-on 'error_rate>0.05' --exit-on 'p95_ms>2x'
+
+# Or make it standing, delivered to a webhook or command.
+tael alert create --name high-errors \
+  --query 'tael:span_error_rate{service="api"} > 0.05' --for 5m \
+  --sink exec='./page.sh'
+tael alerts --follow
+```
+
+Prefer `watch --exit-on` for a bounded wait inside one task, and an alert rule
+for a standing condition. Thresholds can be absolute (`error_rate>0.05`) or
+relative to the first sample (`p95_ms>2x`) — use the relative form when you're
+starting mid-incident and don't know what healthy looks like.
+
+These span-derived series need no metric instrumentation, each labelled by
+`service` with a fleet-wide aggregate under `service="tael"`:
+`tael:span_error_rate`, `tael:span_p95_ms`, `tael:span_p99_ms`,
+`tael:span_count`, `tael:span_error_count`.
+
+### 5d. Score production traffic continuously
+
+```bash
+tael score rule create --name faithfulness --sample 0.05 \
+  --match service=agent-api --cmd ./judge.sh
+tael score rule list
+```
+
+Samples matching traces and runs a scorer against each, writing
+`tael_eval_score` points tagged `source=online`. The scorer contract matches
+`tael eval run`, so the same script grades golden cases offline and production
+traffic online. Check `failures` and `last_error` in `score rule list` — a
+broken judge shows up there, not as missing data.
+
+### 5e. Ask whether a failure has happened before
+
+```bash
+tael embed --cmd './embed.sh' --last 24h   # one-time, costs per trace
+tael --format json similar <trace-id> --limit 5
+tael --format json cluster --k 5
+```
+
+Text search only finds traces sharing a literal term; these find traces that
+are the *same problem*. Use `similar` when you have one failing trace and want
+to know if it is recurring, and `cluster` when you want to know what the
+distinct failure modes even are.
+
+The clustering playbook: cluster, read each exemplar with `tael get trace`,
+name what it is, then `tael issue create --from-trace <exemplar>` for the ones
+worth tracking and `tael eval case add --from-trace` to protect against
+regressions. Cohesion below ~0.7 means the grouping is weak — say so rather
+than reporting a shaky cluster as a finding.
+
+Embeddings require an embedding command you supply; tael never calls a model
+provider. If `similar` reports no embedding for a trace, run `tael embed`
+first.
 
 ### 6. Watch an ongoing change
 
@@ -317,18 +406,34 @@ tael live --eval-run <run_id>
 
 As an agent, prefer the JSON eval commands over the TUI unless the user explicitly asks for an interactive view.
 
-### SQL escape hatch (advanced)
+### SQL escape hatch (advanced, and opt-in at build time)
 
-When the structured commands can't express the cut you need — a `GROUP BY` the
-CLI doesn't offer, a join across signals, an aggregate over attributes — drop to
-read-only SQL over the telemetry tables (`spans`, `logs`, `metrics`,
-`trace_comments`):
+**Check this before reaching for it.** `tael query sql` needs a server built
+with either `--features sql` (DataFusion over the default storage engine) or
+`--features duckdb` (the legacy backend). A plain `cargo install tael-cli`
+has neither, and the error names both.
+
+DataFusion roughly doubles the binary, which is why it is opt-in rather than
+default. Install it with `cargo install tael-cli --features sql` when the
+structured commands genuinely can't express the cut you need.
+
+Where it is available, it runs read-only SQL over the telemetry tables
+(`spans`, `logs`, `metrics`, `trace_comments`), with identical column names on
+both backends so a query is portable between them. Span rows additionally
+carry flattened `llm_provider`, `llm_model`, `input_tokens`, `output_tokens`,
+`total_tokens`, and `cost_usd` columns, so token and cost aggregations don't
+need JSON surgery:
 
 ```bash
 tael --format json query sql "SELECT service, COUNT(*) AS n FROM spans WHERE status = 'error' GROUP BY service ORDER BY n DESC"
 ```
 
-Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected. Reach for this only after the purpose-built commands above; they're faster to write and harder to get wrong.
+Returns `{"rows": [...], "count": N}`. Only `SELECT`/`WITH` are allowed — mutations are rejected.
+
+Without a SQL build, cover the same ground with `summarize` (aggregates by
+service and operation), `diff` (window comparison), `topology` (cross-service
+call counts and error rates), and the PromQL subset with `sum by (...)`.
+Between them these answer most of what SQL gets reached for.
 
 ## Instrumenting apps to export to tael
 
@@ -421,7 +526,7 @@ Avoid: PII unless you've cleared it, full request/response bodies (truncate or h
 - **Don't ship a second observability stack alongside tael** (app logging to a file + OTel to tael). Pick OTel and route everything through it.
 - **Don't skip `service.name`.** Without it, the service field in tael becomes `"unknown"` and you can't filter by service.
 - **Don't instrument hot loops with a span per iteration.** Wrap the whole batch in one span and record counts, totals, and min/max as attributes.
-- **Don't use histogram metrics for latency in tael.** Bucket data is dropped on ingest (see caveats below), so percentiles won't work. Record latency as span duration — tael queries spans natively — and use metrics for rates and gauges only.
+- **Prefer span duration over histogram metrics for latency.** tael retains histogram buckets, so `histogram_quantile` works — but a span carries the attributes that explain *why* a request was slow, and a histogram bucket doesn't. Use histograms for aggregate distributions, spans for anything you'll need to investigate.
 - **Don't strip "noisy" attributes to reduce cardinality.** Tael does not charge per cardinality. The attribute you remove today is the one you'll need tomorrow.
 
 ### Verifying the integration worked
@@ -441,7 +546,7 @@ If the service doesn't appear, the usual culprits are: wrong endpoint, wrong pro
 
 ## Caveats you must know before using the data
 
-**Histograms lose bucket data.** OTLP Histogram and ExponentialHistogram points are stored with `value = sum` and buckets dropped. You **cannot compute p95/p99 from stored histograms.** If the user asks for percentiles, say so explicitly — don't fabricate them.
+**Histogram quantiles are bucket-resolution estimates.** OTLP Histogram and ExponentialHistogram points retain their bucket layout, so `histogram_quantile(0.95, metric)` works. The answer interpolates within the containing bucket — a histogram doesn't keep individual observations — so it is an estimate, not an exact percentile. A quantile landing in the open-ended top bucket reports the producer's `max`. Points ingested before bucket retention, and anything from Prometheus remote-write, have no bucket layout and are skipped rather than reported as zero.
 
 **Prometheus remote-write loses type info.** Metrics ingested via `/api/v1/write` are all stored with `metric_type = "unknown"`. Filtering `--type gauge` won't match them.
 
@@ -449,9 +554,9 @@ If the service doesn't appear, the usual culprits are: wrong endpoint, wrong pro
 
 **Log body search is substring, not regex.** `--body-contains "5\d\d"` will not do what you think.
 
-**Attribute filtering is exact-match only.** `--attribute key=value` filters spans by attribute (repeatable, ANDed), but matches the whole value exactly — no substring or regex on attribute values. For partial matches, pull a broader set and filter the JSON yourself.
+**Attribute filtering has three operators.** `--attribute k=v` matches the whole value exactly, `--attribute 'k~=v'` matches a substring, and `--attribute 'k=~pattern'` matches a regex. All are repeatable and ANDed. Reach for the substring form whenever you don't already know the exact value — a URL with an ID in it, a model name with a date suffix. An invalid regex is rejected up front (exit 3) rather than silently matching nothing. Quote the spec so the shell doesn't eat the operator.
 
-**`--text` search needs the tael-backend storage.** Full-text payload search is served by the default engine's index; under `--storage duckdb` it returns nothing. (LLM prompt/completion text is the only thing indexed — not span attributes or log bodies yet.)
+**`--text` search needs the tael-backend storage.** Full-text search is served by the default engine's index; under `--storage duckdb` it returns nothing. Three kinds of text are indexed, all resolving to trace IDs so one query reaches every signal: LLM prompt/completion payloads, log bodies (only for logs carrying a trace ID), and span attribute values as `key=value` text. That last one is why `--text PaymentDeclined` finds a trace whose `error.type` attribute holds it. Attribute text is truncated at 4 KB per span, so an attribute carrying a whole request body is only partly searchable.
 
 **Single-node engine.** tael runs as one node: reads scan the in-memory/LSM hot tier for recent data and Parquet for older data. Keep `--last` windows narrow (minutes to hours) when the server is busy — wide scans over millions of rows are slow.
 
@@ -464,7 +569,7 @@ get trace        → {"trace_id", "span_count", "spans": [...]}
 query logs       → {"logs": [...], "count": N}
 query metrics    → {"metrics": [...], "count": N}                  (filter mode)
 query metrics    → {"query", "series": [...], "count": N}          (--query mode)
-query sql        → {"rows": [...], "count": N}
+query sql        → {"rows": [...], "count": N}   (needs a --features sql or --features duckdb build)
 comment list     → {"comments": [...], "count": N}
 summarize        → {"window_seconds", "traces", "top_services", "top_error_operations", "logs", "metrics"}
 anomalies        → {"current_seconds", "baseline_seconds", "anomalies": [...]}
@@ -482,8 +587,31 @@ issue examples   → {"issue_id", "examples": [...], "count": N}
 signal trend     → {"signal", "definitions", "matches", "buckets", "count": N}
 experiment compare → {"experiment_id", "variants": [...], "count": N}
 diagnose list    → {"diagnostics": [...], "count": N}
+topology         → {"services": [...], "edges": [...], "spans_examined", "spans_with_parent_outside_window"}
+diff             → {"current_window_seconds", "baseline_window_seconds", "<metric>": {"current","baseline","delta","ratio"}, "totals", "note"}
+get metric       → {"metric", "type", "unit", "point_count", "series_count", "services", "label_keys", "value_min", "value_max", "histogram_quantile_available", "recent_points"}
+alert list       → {"alerts": [...], "count": N}
+alerts           → {"events": [...], "count": N}
+score rule list  → {"rules": [...], "count": N}
+config show      → {"config_file", "config_file_exists", "storage", "retention_days"}
+auth list        → {"keystore", "count", "keys": [...]}
 <error>          → {"error": "..."}   (with non-2xx HTTP status)
 ```
+
+### Exit codes
+
+Branch on the exit code instead of parsing output:
+
+```
+0  success                       3  malformed query or argument
+1  unclassified failure          4  server unreachable
+2  matched nothing               5  auth failure
+                                 6  a --exit-on condition tripped
+```
+
+Code 2 is not an error — the command printed a well-formed empty response.
+`tael query traces --status error` exiting 2 means "no errors", which is a
+useful thing to be able to test directly.
 
 ## Working with results
 

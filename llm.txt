@@ -113,8 +113,11 @@ tael live --evals
 tael live --eval-run <run_id>
 ```
 
-Interactive ratatui feed of incoming spans. Primarily a human tool — not
-useful from an agent. Skip unless explicitly asked.
+Interactive ratatui feed of incoming spans, with tabs for services, evals,
+health, topology, automation (alerts + scoring), clusters, review, and SQL.
+Read-only throughout — every action it can take has a CLI command that is
+scriptable and returns an exit code, which is what an agent should use.
+Primarily a human tool. Skip unless explicitly asked.
 
 ### Evals
 
@@ -136,6 +139,246 @@ tael eval compare <run_id> <baseline_run_id>
 Score JSONL lines require `case_id`, `metric`, and `value`; `run_id` is filled
 from the command argument when omitted. Optional fields include `suite_id`,
 `trace_id`, `span_id`, `scorer`, `label`, `rationale_sha256`, and `source`.
+
+### Attribute filters and text search
+
+```
+tael query traces --attribute http.method=GET            # exact
+tael query traces --attribute 'http.route~=/users'       # substring
+tael query traces --attribute 'gen_ai.request.model=~claude-.*'   # regex
+tael query traces --text PaymentDeclined
+```
+
+Attribute filters are repeatable and ANDed. An invalid regex is rejected with
+a 400 (CLI exit 3) rather than silently matching nothing.
+
+`--text` searches a Tantivy index over three kinds of text, all resolving to
+trace IDs so one query reaches every signal:
+- LLM prompt/completion payloads
+- log bodies (only for logs carrying a trace ID)
+- span attribute values, flattened to `key=value` text and truncated at 4 KB
+  per span
+
+Requires `tael-backend` storage; under `--storage duckdb` it returns nothing.
+
+### Reliability loop
+
+The failure lifecycle — stumble, issue, signal, experiment, closed — recorded
+as structured trace comments. No dedicated tables; everything here is
+queryable through the comment surface.
+
+```
+tael issue create --from-trace ID --failure-mode tool_error \
+  --impact high --summary "..." [--last-successful-step ...] [--first-failure ...]
+tael issue list [--limit N]
+tael issue examples <issue-id>
+
+tael signal create --from-trace ID --name ignored_tool_errors \
+  [--query ...] [--failure-mode ...] [--summary ...]
+tael signal trend <name>
+
+tael experiment compare <experiment-id> [--signal NAME] [--last 24h]
+
+tael diagnose report --trace-id ID --category missing_context \
+  --severity high [--confidence low|medium|high] --summary "..."
+tael diagnose list
+```
+
+Suggested failure modes: `tool_error`, `context_loss`, `retrieval_miss`,
+`policy_violation`, `timeout`.
+
+`experiment compare` groups by the `tael.experiment.id` and
+`tael.experiment.variant` span attributes, so a variant must be stamped on the
+spans at instrumentation time to be comparable afterward.
+
+Self-diagnostics are **untrusted agent hints**, not facts: an agent reporting
+"the tool was broken" is evidence about the agent's belief, and
+`diagnose report` records it with a `confidence` so a reader can weigh it.
+
+### Golden cases from production traces
+
+```
+tael eval case add --from-trace ID --suite NAME --case-id ID \
+  [--failure-mode ...] [--source-issue-id ...] [--critical-path] \
+  [--expected-behavior "..."] [--author ...]
+tael eval case link --case-id ID --issue-id ID
+tael eval suite inspect <suite> [--limit N]
+```
+
+`case add --from-trace` records provenance: which production failure this case
+protects against. `suite inspect` reports the hygiene gaps that make a suite
+stop being trustworthy — cases with no provenance, no expected behavior,
+duplicate failure modes, and how many cover a critical path.
+
+### Installing the agent skill
+
+```
+tael skill install [--project] [--force]
+tael skill where [--project]
+```
+
+Writes `SKILL.md` into `~/.claude/skills/tael/` (or `./.claude/skills/tael/`
+with `--project`), so a coding agent picks up the debugging playbook without
+being told about it.
+
+### Human review queue
+
+```
+tael review request --trace-id ID --question "was this refusal correct?" \
+  --option yes --option no [--case-id CASE] [--span-id SPAN]
+tael review list [--state open|answered|all]
+tael review submit <review-id> --answer no [--note "..."]
+```
+
+Inverted from a conventional review queue: the agent triages and files only
+the residue it cannot decide, so human attention goes to judgement calls
+rather than to every trace. Requests and answers are structured trace
+comments (`kind: review_request` / `review_answer`), so the queue is
+queryable through the existing comment surface with no new tables.
+
+A request's state is derived, not mutated — comments are append-only, so an
+answer is a separate comment referencing the request id. An answer outside a
+request's declared `--option` set is rejected. Linking `--case-id` lets an
+answer flow back into an eval suite as durable expected behavior.
+
+### Eval case suites
+
+```
+tael eval suite push <name> cases.jsonl     # whole-set replace
+tael eval suite pull <name>[@<snapshot>] [--out FILE]
+tael eval suite snapshot <name> [--note "..."]
+tael eval suite list
+tael eval suite diff <ref> <ref>            # ref = name or name@snapshot
+```
+
+The server becomes the system of record while JSONL stays the interchange
+format, so suites can still live in git. A case is stored as a
+content-addressed blob and a snapshot is an ordered list of hashes, so
+unchanged cases are shared rather than copied and diffing is a set operation.
+
+`push` replaces the working set — a case omitted from the file is removed,
+because a merge-only push makes deleting a stale case impossible.
+
+A snapshot id is derived from content, so re-snapshotting an unchanged suite
+returns the same id instead of accumulating duplicates. Pin a run to a
+snapshot (`name@snap_...`) so two experiments provably compared the same data.
+
+`pull` emits canonical JSONL (object keys sorted), so a push/pull round trip
+is byte-stable and reformatting a file is not mistaken for editing every case.
+
+`diff` reports an edited case as `changed`, not as an add plus a remove — it
+is still the same case.
+
+### Structure and comparison
+
+```
+tael topology --last 1h
+tael diff --last 10m --baseline 1h [--service NAME]
+tael get metric <name> --last 24h
+```
+
+`topology` reconstructs the service dependency graph from span parent/child
+edges — it reflects what the system actually did, not a declared architecture.
+Cross-service edges only; same-service parent/child pairs are internal
+structure. `spans_with_parent_outside_window` counts spans whose parent fell
+outside the window, so a high value means the graph is missing edges and the
+window should be widened.
+
+`diff` is the unopinionated sibling of `anomalies`: every summary metric with
+current, baseline, delta, and ratio, with no threshold applied. The baseline
+window *contains* the current one, so rates compare directly but totals do not
+— the response says so and reports both.
+
+`get metric` describes one metric before you query it: type, unit, label keys,
+series count, value range, and whether the points retained histogram buckets
+(which decides whether `histogram_quantile` will work on it).
+
+### Alerts
+
+```
+tael alert create --name high-errors \
+  --query 'tael:span_error_rate{service="api"} > 0.05' \
+  --for 5m --sink webhook=https://... --sink exec='./page.sh'
+tael alert list
+tael alert delete <name>
+tael alerts [--limit N] [--follow]
+```
+
+Rules evaluate a PromQL-subset expression every 30s and emit an event on state
+transition only — a rule firing for an hour does not re-deliver. `--for`
+requires the condition to hold *continuously*; a dip resets the streak.
+
+These span-derived series exist without any metric instrumentation, each
+labelled by `service` (plus a fleet-wide aggregate under `service="tael"`):
+`tael:span_error_rate`, `tael:span_p95_ms`, `tael:span_p99_ms`,
+`tael:span_count`, `tael:span_error_count`.
+
+`tael alerts --follow` blocks and streams — it is the long-poll primitive for
+waiting on a system rather than polling it.
+
+### Online scoring
+
+```
+tael score rule create --name faithfulness --sample 0.05 \
+  --match service=agent-api --match attribute:gen_ai.system=anthropic \
+  --cmd ./judge.sh
+tael score rule list
+tael score rule delete <name>
+```
+
+Samples matching production traces and runs the scorer once per trace, writing
+results as `tael_eval_score` points tagged `source=online` and `rule=<name>`.
+The scorer sees `TAEL_EVAL_TRACE_ID`, `TAEL_EVAL_SPAN_ID`, `TAEL_EVAL_SERVICE`,
+`TAEL_EVAL_OPERATION`, `TAEL_EVAL_RULE`, `TAEL_EVAL_ONLINE=1`, and must print
+one JSON object per line with `metric` and `value` (optionally `rationale`).
+Same contract as `tael eval run`, so one script works in both places.
+
+Sampling is deterministic in the trace ID, so a given trace is always in or out
+of the sample. `score rule list` reports traces seen vs sampled and the last
+scorer error — a silently broken judge shows up as `failures`, not as missing
+data.
+
+### Multi-tenancy
+
+Off by default. `TAEL_MULTI_TENANT=1` scopes reads to the calling key's tenant
+(`tael auth create-key --tenant team-a`) and stamps writes with it.
+
+**This is authorization, not isolation.** The storage engine keys nothing by
+tenant — all tenants share one hot tier, one cold tier, and one blob store —
+so the guarantee is that the API will not hand tenant A's records to tenant B,
+not that they are stored apart. Two consequences follow:
+
+- `tael query sql` is admin-only while tenancy is on, because a SQL query
+  cannot be scoped per row without rewriting it. It is refused rather than
+  silently returning every tenant's data.
+- Admin keys read across all tenants by design.
+
+Records written before tenancy was enabled read as the `default` tenant, so
+turning it on does not make existing history invisible.
+
+### Config and keys
+
+```
+tael config show [--data-dir DIR]
+tael config init [--force]
+tael auth create-key --name NAME --role reader|writer|admin
+tael auth list
+tael auth revoke <key-id>
+```
+
+Retention defaults to 365 days for every signal; `config init` writes the
+shorter recommended per-signal windows. Precedence is flag > env > file >
+default.
+
+### MCP
+
+```
+tael mcp serve
+```
+
+Serves the query surface over the Model Context Protocol on stdio. Tools map
+1:1 onto these commands and return the same JSON shapes. `SKILL.md` and this
+file are served as the `tael://skill` and `tael://llm-contract` resources.
 
 ### Server
 
@@ -159,8 +402,55 @@ With `--format json` (default), responses have these top-level shapes:
 - `tael eval status` → `{"run": {...}}`
 - `tael eval cases` → `{"run_id", "cases": [...], "count": N}`
 - `tael eval scores` → `{"run_id", "scores": [...], "count": N}`
+- `tael topology` → `{"services": [...], "edges": [...], "spans_examined", "spans_with_parent_outside_window"}`
+- `tael diff` → `{"current_window_seconds", "baseline_window_seconds", "<metric>": {"current","baseline","delta","ratio"}, "totals", "note"}`
+- `tael get metric` → `{"metric","type","unit","point_count","series_count","services","label_keys","value_min","value_max","histogram_quantile_available","recent_points"}`
+- `tael alert list` → `{"alerts": [...], "count": N}`
+- `tael alerts` → `{"events": [...], "count": N}`
+- `tael score rule list` → `{"rules": [...], "count": N}`
+- `tael config show` → `{"config_file","config_file_exists","storage","retention_days"}`
+- `tael auth list` → `{"keystore","count","keys": [...]}`
 
 Errors are returned as `{"error": "..."}` with a non-2xx HTTP status.
+
+### Exit codes
+
+Every command exits with a category code, so a caller can branch without
+parsing output:
+
+```
+0  success
+1  unclassified failure
+2  query succeeded but matched nothing
+3  malformed query, filter, or argument
+4  server unreachable
+5  authentication or authorization failure
+6  a --exit-on condition tripped (tael watch)
+```
+
+Code 2 is not an error — the command still printed a well-formed empty
+response. Failures also print `{"error", "category", "exit_code"}` on stderr.
+
+### Blocking on a condition
+
+```
+tael watch --last 1m --interval 10 \
+  --exit-on 'error_rate>0.05' --exit-on 'p95_ms>2x' [--max-ticks N]
+```
+
+Polls and prints deltas until a condition holds, then exits 6 with a verdict
+naming what tripped. Thresholds are absolute (`error_rate>0.05`) or relative to
+the first sample (`p95_ms>2x`), which is what you want when starting mid-incident
+with no known-good baseline. Fields resolve flat (`error_rate`) or dotted
+(`traces.error_rate`). Without `--exit-on` it polls forever, as before.
+
+### Explaining a query
+
+`tael query traces --explain` adds an `explain` object: `access_path`,
+`tiers_consulted`, `rows_scanned`, `rows_returned`, `limit_reached`,
+`effective_filters`, `elapsed_ms`, and `notes` describing the mistakes that
+actually produce confusing results (silently hitting the row limit,
+exact-match attribute filters, an unbounded window).
 
 ## PromQL subset (`GET /api/v1/metrics/query?query=...&last=...`)
 
@@ -189,7 +479,7 @@ PromQL. Stick to the grammar below.
 - Offset modifier: `metric offset 1h`
 - Subqueries: `rate(metric[5m:1m])`
 - Range queries / `/api/v1/query_range` — all evaluation is **instant**
-- `histogram_quantile`, `topk`, `bottomk`, `quantile`, `stddev`, `stdvar`
+- `topk`, `bottomk`, `quantile`, `stddev`, `stdvar`
 - Scalar literals, `vector()`, `time()`, `timestamp()`
 - `@` modifier, `absent()`, label_replace/label_join
 - Nested binary ops or arithmetic inside aggregators
@@ -205,11 +495,38 @@ for SLO math.
 
 ### Histogram metrics
 
-OTLP Histogram and ExponentialHistogram data points are stored as a
-single row with `value = sum` and `metric_type = "histogram"`. Bucket
-boundaries, counts, and min/max are dropped. You cannot compute
-percentiles from stored histograms. If you need p95/p99, aggregate at
-the client before export.
+OTLP Histogram and ExponentialHistogram data points retain their bucket
+layout in a `histogram` object on the point:
+
+    {"bounds": [10.0, 50.0, 100.0], "counts": [2, 5, 2, 1],
+     "count": 10, "sum": 420.0, "min": 3.0, "max": 250.0,
+     "temporality": "cumulative"}
+
+`counts` is per-bucket (not cumulative) and always has one more entry
+than `bounds`; the last entry counts observations above the final bound.
+Exponential histograms are converted to explicit bounds at ingest, so
+there is one shape to query regardless of how the client encoded it.
+
+Query percentiles with the PromQL subset:
+
+    histogram_quantile(0.95, http.server.duration)
+    histogram_quantile(0.99, http.server.duration) by (service)
+
+Unlike Prometheus, the second argument is the metric selector itself —
+there are no `le`-labelled `_bucket` series to rate over.
+
+Caveats:
+- The result interpolates linearly within the containing bucket, so it
+  is bucket-resolution accurate, not exact.
+- A quantile falling in the open-ended top bucket reports the producer's
+  `max` (or the last bound when `max` is absent).
+- `temporality` decides how points combine over the lookback window:
+  `delta` points are summed, `cumulative` points already contain every
+  earlier observation so only the newest is used.
+- Points with no bucket layout (pre-retention rows, remote-write data,
+  the legacy DuckDB backend) produce **no series** rather than a zero.
+- Merging across a `by (...)` grouping requires identical bounds;
+  mismatched layouts are skipped, not approximated.
 
 ## Prometheus remote-write (`POST /api/v1/write`)
 
@@ -220,7 +537,10 @@ the client before export.
   is stored with `metric_type = "unknown"`. Queries filtering by
   `--type gauge` etc. will not match remote-write data.
 - `NaN` samples (Prometheus "stale" markers) are dropped on ingest.
-- No metadata handling, no exemplars, no native histograms.
+- No metadata handling, no exemplars, no native histograms. Remote-write
+  flattens histograms into `_bucket`/`_sum`/`_count` series before the
+  wire, so there is no bucket layout to retain and `histogram_quantile`
+  does not apply to remote-write data.
 
 ## Datadog trace-agent intake (`/v0.3|/v0.4|/v0.5/traces`, `GET /info`)
 
@@ -266,7 +586,26 @@ attribute filtering yet.
 
 - All timestamps returned are UTC ISO 8601.
 - Default limits: traces/logs 100, metrics 500. Raise with `limit=`.
-- The server is single-node DuckDB. Treat queries scanning > ~1M rows
-  as slow; prefer narrow `last=` windows.
-- Auth is off by default; the server binds to `127.0.0.1` only unless
-  reconfigured.
+- The default storage engine is `tael-backend` (an LSM hot tier over a
+  Parquet cold tier), not DuckDB. DuckDB is a legacy backend behind
+  `--features duckdb`.
+- `tael query sql` needs a build with `--features sql` (DataFusion over the
+  default engine) or `--features duckdb` (the legacy backend). Neither is in
+  the default install; the error names both. Column names are identical
+  across the two, so a query is portable. The `spans` table additionally
+  exposes flattened `llm_provider`, `llm_model`, `input_tokens`,
+  `output_tokens`, `total_tokens`, and `cost_usd` columns. SQL execution is
+  in-memory and bounded at 200k rows per table — it is the escape hatch, not
+  the primary read path. Without a SQL build, use the filter commands, the
+  PromQL subset, and `summarize`/`diff`/`topology`.
+- `query_traces` has no secondary indexes: it walks the time index
+  newest-first and deserializes every span until the limit fills, so a
+  low-selectivity filter over a large window is the slow case. Prefer narrow
+  `last=` windows. `summarize` is a full scan of its window — roughly 65ms
+  per 10k spans — so bound it on a busy server.
+- Auth is off by default when every listener is loopback. A server bound to
+  a non-loopback address requires API keys and refuses to start without them
+  (override with `--auth off`). Authenticate with
+  `Authorization: Bearer <key>`; the CLI reads `TAEL_API_KEY` or `--api-key`.
+- OTLP ingest accepts gRPC on :4317 and HTTP/protobuf on :4318. OTLP/JSON is
+  not supported.

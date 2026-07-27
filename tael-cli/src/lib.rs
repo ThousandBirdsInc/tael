@@ -42,10 +42,18 @@
 //! # }
 //! ```
 
+// CLI command functions take one parameter per flag on purpose: the
+// signature is the command's surface, and grouping flags into a struct hides
+// which ones a command actually accepts.
+#![allow(clippy::too_many_arguments)]
+
 pub mod client;
 pub mod commands;
+pub mod exit;
+pub mod mcp;
 pub mod output;
 pub mod tui;
+pub mod tui_panels;
 
 pub use client::TaelClient;
 /// Re-export of the server crate so embedders can run an in-process tael
@@ -105,6 +113,11 @@ pub struct GlobalOpts {
     /// listen address to `127.0.0.1:<port>`. Ignored by client commands.
     #[arg(long, global = true)]
     pub port_otel: Option<u16>,
+
+    /// API key for a server running with auth enabled. Falls back to
+    /// TAEL_API_KEY. Sent as `Authorization: Bearer <key>`.
+    #[arg(long, global = true)]
+    pub api_key: Option<String>,
 }
 
 impl Default for GlobalOpts {
@@ -115,6 +128,7 @@ impl Default for GlobalOpts {
             port_rest: None,
             unix_socket: None,
             port_otel: None,
+            api_key: None,
         }
     }
 }
@@ -146,6 +160,10 @@ pub enum Commands {
         /// OTLP gRPC listen address (env: TAEL_OTLP_GRPC_ADDR)
         #[arg(long)]
         otlp_grpc_addr: Option<String>,
+        /// OTLP/HTTP listen address; `off` disables the dedicated listener
+        /// (env: TAEL_OTLP_HTTP_ADDR) [default: 127.0.0.1:4318]
+        #[arg(long)]
+        otlp_http_addr: Option<String>,
         /// REST API listen address (env: TAEL_REST_API_ADDR)
         #[arg(long)]
         rest_api_addr: Option<String>,
@@ -165,6 +183,15 @@ pub enum Commands {
         /// Storage backend: tael-backend (default). duckdb requires installing with --features duckdb.
         #[arg(long)]
         storage: Option<String>,
+        /// Authentication: `off` or `required`. Defaults to off for
+        /// loopback-only listeners and required when any listener is reachable
+        /// off-box (env: TAEL_AUTH)
+        #[arg(long)]
+        auth: Option<String>,
+        /// TOML config file with retention and compaction policy. Defaults to
+        /// config.toml beside the data directory (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
     },
     /// Launch the desktop GUI (requires a build with `--features gui`)
     Gui,
@@ -224,6 +251,57 @@ pub enum Commands {
         #[arg(long)]
         service: Option<String>,
     },
+    /// Build embeddings for recent traces using your own embedding command
+    Embed {
+        /// Command that reads trace text on stdin and prints a JSON array of
+        /// numbers. tael never calls a model provider itself.
+        #[arg(long)]
+        cmd: String,
+        /// Time window of traces to embed (e.g. 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max traces to embed in this pass
+        #[arg(long, default_value = "1000")]
+        limit: u32,
+    },
+    /// Find traces similar to one you already have — "has this happened before?"
+    Similar {
+        /// The trace to compare against
+        trace_id: String,
+        /// Max neighbors to return
+        #[arg(long, default_value = "10")]
+        limit: u32,
+        /// Drop neighbors below this cosine similarity
+        #[arg(long, default_value = "0.0")]
+        min_similarity: f32,
+    },
+    /// Group embedded traces into clusters of similar failures
+    Cluster {
+        /// Number of clusters
+        #[arg(long, default_value = "5")]
+        k: usize,
+    },
+    /// Service dependency graph derived from span parent/child edges
+    Topology {
+        /// Time window (e.g. 1h, 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max spans to examine
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+    /// Compare every summary metric between a window and a baseline window
+    Diff {
+        /// Current window (default 1h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Baseline window (default: 6x current)
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Filter to a single service
+        #[arg(long)]
+        service: Option<String>,
+    },
     /// Pull spans, logs, and metrics for a trace ID
     Correlate {
         /// Trace ID to correlate across signals
@@ -241,6 +319,16 @@ pub enum Commands {
         /// Poll interval in seconds
         #[arg(long, default_value = "10")]
         interval: u64,
+        /// Stop and exit 6 when this condition becomes true. Repeatable (any
+        /// match stops). Format: <field><op><value>, where value is a number
+        /// or a multiple of the first sample.
+        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, span_count<1
+        #[arg(long = "exit-on")]
+        exit_on: Vec<String>,
+        /// Give up after this many ticks and exit 0. Without it, `watch` polls
+        /// until a condition trips or the process is interrupted.
+        #[arg(long)]
+        max_ticks: Option<u64>,
     },
     /// Collect, score, report, and compare trace-native evals
     Eval {
@@ -262,6 +350,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ExperimentAction,
     },
+    /// Queue questions for a human and read their answers
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Record and list untrusted agent self diagnostics
     Diagnose {
         #[command(subcommand)]
@@ -276,6 +369,186 @@ pub enum Commands {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// Manage API keys (operates on the keystore in the data directory)
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+    /// Score sampled production traffic with a scorer command
+    Score {
+        #[command(subcommand)]
+        action: ScoreAction,
+    },
+    /// Manage alert rules
+    Alert {
+        #[command(subcommand)]
+        action: AlertAction,
+    },
+    /// Read the alert feed; --follow blocks until something fires
+    Alerts {
+        /// Max recent events to print before following
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Block and stream new events as they happen
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Inspect or scaffold the retention and compaction config
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Expose tael's query surface to an AI agent over the Model Context Protocol
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScoreAction {
+    /// Manage online scoring rules
+    Rule {
+        #[command(subcommand)]
+        action: ScoreRuleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScoreRuleAction {
+    /// Create a rule that scores sampled production traces
+    Create {
+        /// Rule name (unique)
+        #[arg(long)]
+        name: String,
+        /// Fraction of matching traces to score, 0.0-1.0. Keep it low for a
+        /// judge that calls a model per trace; a few percent trends fine.
+        #[arg(long, default_value = "0.05")]
+        sample: f64,
+        /// Which traces to score, repeatable. Same vocabulary as
+        /// `tael query traces`: service=, operation=, status=,
+        /// min_duration_ms=, attribute:<key>=
+        #[arg(long = "match")]
+        matches: Vec<String>,
+        /// Scorer command. Receives TAEL_EVAL_TRACE_ID, TAEL_EVAL_SPAN_ID,
+        /// TAEL_EVAL_SERVICE, TAEL_EVAL_OPERATION, TAEL_EVAL_RULE, and
+        /// TAEL_EVAL_ONLINE=1. Must print one JSON object per line with
+        /// `metric` and `value` (optionally `rationale`).
+        #[arg(long)]
+        cmd: String,
+        /// Human-readable note
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List score rules and their progress
+    List,
+    /// Delete a score rule
+    Delete {
+        /// Rule name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AlertAction {
+    /// Create an alert rule
+    Create {
+        /// Rule name (unique)
+        #[arg(long)]
+        name: String,
+        /// PromQL-subset expression, normally ending in a comparison.
+        /// Span-derived series are available without instrumenting metrics:
+        /// tael:span_error_rate, tael:span_p95_ms, tael:span_p99_ms,
+        /// tael:span_count, tael:span_error_count — each labelled by service.
+        /// Example: 'tael:span_error_rate{service="api"} > 0.05'
+        #[arg(long)]
+        query: String,
+        /// How long the condition must hold continuously before firing
+        /// (e.g. 5m). Default 0 — fire on the first satisfied evaluation.
+        #[arg(long = "for")]
+        for_duration: Option<String>,
+        /// Lookback window used when evaluating the query (default 5m)
+        #[arg(long)]
+        window: Option<String>,
+        /// Where to deliver, repeatable: webhook=<url> or exec=<command>
+        #[arg(long = "sink")]
+        sinks: Vec<String>,
+        /// Human-readable note carried on every event
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List alert rules and their current state
+    List,
+    /// Delete an alert rule
+    Delete {
+        /// Rule name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show the retention/compaction policy actually in effect
+    Show {
+        /// Config file path (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
+        /// Data directory the config sits beside (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Write a commented config file with the recommended retention windows
+    Init {
+        /// Config file path (env: TAEL_CONFIG)
+        #[arg(long)]
+        config: Option<String>,
+        /// Data directory the config sits beside (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Overwrite an existing config file
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// Serve MCP over stdio. Configure this as an MCP server in your agent:
+    /// {"command": "tael", "args": ["mcp", "serve"]}
+    Serve,
+}
+
+#[derive(Subcommand)]
+pub enum AuthAction {
+    /// Mint a new API key. The key is printed once and is not recoverable.
+    CreateKey {
+        /// Label for this key, e.g. claude-code-prod
+        #[arg(long)]
+        name: String,
+        /// Role: reader (query), writer (+ push telemetry), admin (+ manage keys)
+        #[arg(long, default_value = "reader")]
+        role: String,
+        /// Tenant this key reads and writes within
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// List API keys and their roles. Never prints key material.
+    List {
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Revoke a key by id. Takes effect without restarting the server.
+    Revoke {
+        /// Key id from `tael auth list`
+        key_id: String,
+        /// Data directory holding the keystore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
     },
 }
 
@@ -304,14 +577,20 @@ pub enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "100")]
         limit: u32,
-        /// Filter by span attribute, repeatable. Format: key=value
-        /// (e.g. --attribute http.method=GET --attribute http.status_code=500)
+        /// Filter by span attribute, repeatable and ANDed. Three operators:
+        /// key=value (exact), key~=value (contains), key=~pattern (regex).
+        /// e.g. --attribute http.method=GET --attribute 'http.url~=/checkout'
+        /// --attribute 'gen_ai.request.model=~claude-.*'
         #[arg(long = "attribute")]
         attribute: Vec<String>,
         /// Full-text search over LLM prompt/completion payloads
         /// (tael-backend storage only; e.g. --text "rate limit")
         #[arg(long)]
         text: Option<String>,
+        /// Also report how the query executed: access path, tiers consulted,
+        /// rows scanned vs returned, and hints about surprising results
+        #[arg(long)]
+        explain: bool,
     },
     /// Search and filter metrics
     Metrics {
@@ -333,6 +612,11 @@ pub enum QuerySignal {
         /// Max results to return
         #[arg(long, default_value = "500")]
         limit: u32,
+        /// Read 5-minute downsampled rollups instead of raw points. Rollups
+        /// are retained far longer than raw data, so this is what answers a
+        /// long-range trend question. Each bucket carries min/max/avg/sum/count.
+        #[arg(long)]
+        rollups: bool,
     },
     /// Search and filter logs
     Logs {
@@ -370,6 +654,17 @@ pub enum GetResource {
     Trace {
         /// The trace ID to look up
         trace_id: String,
+    },
+    /// Describe a metric: type, unit, labels, series count, recent points
+    Metric {
+        /// The metric name
+        name: String,
+        /// Time window (e.g. 1h, 24h)
+        #[arg(long)]
+        last: Option<String>,
+        /// Max points to examine
+        #[arg(long, default_value = "500")]
+        limit: u32,
     },
 }
 
@@ -518,6 +813,38 @@ pub enum EvalSuiteAction {
         #[arg(long, default_value = "50000")]
         limit: u32,
     },
+    /// Upload a JSONL case file as the suite's working set (a whole-set replace)
+    Push {
+        /// Suite name
+        suite: String,
+        /// JSONL case file. Each line needs `case_id` or `id`.
+        cases: String,
+    },
+    /// Write a suite back out as canonical JSONL
+    Pull {
+        /// Suite name, or suite@snapshot to pull a frozen version
+        suite: String,
+        /// Write here instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Freeze the working set as an immutable snapshot
+    Snapshot {
+        /// Suite name
+        suite: String,
+        /// Note recorded with the snapshot
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List server-managed suites
+    List,
+    /// Compare two suite references (suite or suite@snapshot)
+    Diff {
+        /// Left side
+        from: String,
+        /// Right side
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -611,6 +938,57 @@ pub enum ExperimentAction {
 }
 
 #[derive(Subcommand)]
+pub enum ReviewAction {
+    /// File a question about a trace for a human to answer
+    Request {
+        /// Trace the question is about
+        #[arg(long)]
+        trace_id: String,
+        /// The question, e.g. "was this refusal correct?"
+        #[arg(long)]
+        question: String,
+        /// Constrain the answer to these values, repeatable
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Optional span the question is about
+        #[arg(long)]
+        span_id: Option<String>,
+        /// Eval case this review informs; the answer flows back to it
+        #[arg(long)]
+        case_id: Option<String>,
+        /// Who is asking
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// List review requests
+    List {
+        /// Filter by state: open, answered, or all (default open)
+        #[arg(long, default_value = "open")]
+        state: String,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+    /// Answer a queued question
+    Submit {
+        /// Review id from `tael review list`
+        review_id: String,
+        /// The answer
+        #[arg(long)]
+        answer: String,
+        /// Optional free-text note
+        #[arg(long)]
+        note: Option<String>,
+        /// Who answered
+        #[arg(long)]
+        author: Option<String>,
+        /// Maximum comments to scan when locating the request
+        #[arg(long, default_value = "50000")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DiagnoseAction {
     /// Record an untrusted self diagnostic on a trace
     Report {
@@ -685,12 +1063,15 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
     // before constructing one.
     if let Commands::Serve {
         otlp_grpc_addr,
+        otlp_http_addr,
         rest_api_addr,
         rest_api_socket,
         dd_agent_addr,
         data_dir,
         wal_dir,
         storage,
+        auth,
+        config: config_path,
     } = command
     {
         if opts.unix_socket.is_some() && rest_api_socket.is_some() {
@@ -703,6 +1084,9 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             config.otlp_grpc_addr = a;
         } else if let Some(p) = opts.port_otel {
             config.otlp_grpc_addr = format!("127.0.0.1:{p}");
+        }
+        if let Some(a) = otlp_http_addr {
+            config.otlp_http_addr = tael_server::parse_otlp_http_addr(Some(a));
         }
         if let Some(socket) = rest_api_socket.or_else(|| opts.unix_socket.clone()) {
             config.rest_api_socket = Some(socket);
@@ -725,7 +1109,64 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         if let Some(s) = storage {
             config.storage = tael_server::StorageBackend::parse(&s);
         }
+        if let Some(a) = auth {
+            config.auth = Some(tael_server::auth::AuthMode::parse(&a)?);
+        }
+        if let Some(p) = config_path {
+            config.config_path = Some(p);
+        }
         return tael_server::run(config).await;
+    }
+
+    // Config inspection reads the same files the server does, so it works
+    // whether or not one is running.
+    if let Commands::Config { action } = command {
+        let resolve_dir = |explicit: Option<String>| {
+            explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
+        };
+        return match action {
+            ConfigAction::Show { config, data_dir } => {
+                commands::config::show(&opts.format, config.as_deref(), &resolve_dir(data_dir))
+            }
+            ConfigAction::Init {
+                config,
+                data_dir,
+                force,
+            } => commands::config::init(
+                &opts.format,
+                config.as_deref(),
+                &resolve_dir(data_dir),
+                force,
+            ),
+        };
+    }
+
+    // Key management works on the keystore file directly, so it must not need
+    // a reachable server — the first key is minted before one can start.
+    if let Commands::Auth { action } = command {
+        let resolve_dir = |explicit: Option<String>| {
+            explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
+        };
+        return match action {
+            AuthAction::CreateKey {
+                name,
+                role,
+                tenant,
+                data_dir,
+            } => commands::auth::create_key(
+                &opts.format,
+                &resolve_dir(data_dir),
+                &name,
+                &role,
+                &tenant,
+            ),
+            AuthAction::List { data_dir } => {
+                commands::auth::list_keys(&opts.format, &resolve_dir(data_dir))
+            }
+            AuthAction::Revoke { key_id, data_dir } => {
+                commands::auth::revoke_key(&opts.format, &resolve_dir(data_dir), &key_id)
+            }
+        };
     }
 
     let server_url = opts.server_url();
@@ -746,11 +1187,19 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         );
     }
 
-    let client = client::TaelClient::new(&server_url);
+    // An explicit --api-key wins; otherwise the client picks up TAEL_API_KEY.
+    let client = match &opts.api_key {
+        Some(key) => client::TaelClient::with_api_key(&server_url, Some(key)),
+        None => client::TaelClient::new(&server_url),
+    };
 
     match command {
         // Handled above; the early return means this arm is never reached.
         Commands::Serve { .. } => unreachable!(),
+        // Handled above; the early return means this arm is never reached.
+        Commands::Auth { .. } => unreachable!(),
+        // Handled above; the early return means this arm is never reached.
+        Commands::Config { .. } => unreachable!(),
         // Handled above; the early return / bail means this arm is never reached.
         Commands::Gui => unreachable!(),
         Commands::Query { signal } => match signal {
@@ -764,6 +1213,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 limit,
                 attribute,
                 text,
+                explain,
             } => {
                 commands::query::traces(
                     &client,
@@ -777,6 +1227,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     limit,
                     attribute,
                     text,
+                    explain,
                 )
                 .await?;
             }
@@ -787,6 +1238,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 metric_type,
                 last,
                 limit,
+                rollups,
             } => {
                 commands::query::metrics(
                     &client,
@@ -797,6 +1249,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     metric_type,
                     last,
                     limit,
+                    rollups,
                 )
                 .await?;
             }
@@ -827,6 +1280,9 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Get { resource } => match resource {
             GetResource::Trace { trace_id } => {
                 commands::get::trace(&client, &opts.format, &trace_id).await?;
+            }
+            GetResource::Metric { name, last, limit } => {
+                commands::get::metric(&client, &opts.format, &name, last, limit).await?;
             }
         },
         Commands::Comment { action } => match action {
@@ -872,6 +1328,30 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         } => {
             commands::anomalies::run(&client, &opts.format, last, baseline, service).await?;
         }
+        Commands::Embed { cmd, last, limit } => {
+            commands::similar::embed(&client, &opts.format, &cmd, last.as_deref(), limit).await?;
+        }
+        Commands::Similar {
+            trace_id,
+            limit,
+            min_similarity,
+        } => {
+            commands::similar::similar(&client, &opts.format, &trace_id, limit, min_similarity)
+                .await?;
+        }
+        Commands::Cluster { k } => {
+            commands::similar::cluster(&client, &opts.format, k).await?;
+        }
+        Commands::Topology { last, limit } => {
+            commands::topology::run(&client, &opts.format, last, limit).await?;
+        }
+        Commands::Diff {
+            last,
+            baseline,
+            service,
+        } => {
+            commands::topology::diff(&client, &opts.format, last, baseline, service).await?;
+        }
         Commands::Correlate { trace } => {
             commands::correlate::run(&client, &opts.format, &trace).await?;
         }
@@ -879,8 +1359,19 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             last,
             service,
             interval,
+            exit_on,
+            max_ticks,
         } => {
-            commands::watch::run(&client, &opts.format, last, service, interval).await?;
+            commands::watch::run(
+                &client,
+                &opts.format,
+                last,
+                service,
+                interval,
+                exit_on,
+                max_ticks,
+            )
+            .await?;
         }
         Commands::Eval { action } => match action {
             EvalAction::Run {
@@ -964,6 +1455,22 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 EvalSuiteAction::Inspect { suite, limit } => {
                     commands::eval::suite_inspect(&client, &opts.format, &suite, limit).await?;
                 }
+                EvalSuiteAction::Push { suite, cases } => {
+                    commands::suite::push(&client, &opts.format, &suite, &cases).await?;
+                }
+                EvalSuiteAction::Pull { suite, out } => {
+                    commands::suite::pull(&client, &opts.format, &suite, out.as_deref()).await?;
+                }
+                EvalSuiteAction::Snapshot { suite, note } => {
+                    commands::suite::snapshot(&client, &opts.format, &suite, note.as_deref())
+                        .await?;
+                }
+                EvalSuiteAction::List => {
+                    commands::suite::list(&client, &opts.format).await?;
+                }
+                EvalSuiteAction::Diff { from, to } => {
+                    commands::suite::diff(&client, &opts.format, &from, &to).await?;
+                }
             },
         },
         Commands::Issue { action } => match action {
@@ -1031,6 +1538,49 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     .await?;
             }
         },
+        Commands::Review { action } => match action {
+            ReviewAction::Request {
+                trace_id,
+                question,
+                options,
+                span_id,
+                case_id,
+                author,
+            } => {
+                commands::review::request(
+                    &client,
+                    &opts.format,
+                    &trace_id,
+                    &question,
+                    &options,
+                    span_id.as_deref(),
+                    case_id.as_deref(),
+                    author.as_deref(),
+                )
+                .await?;
+            }
+            ReviewAction::List { state, limit } => {
+                commands::review::list(&client, &opts.format, Some(&state), limit).await?;
+            }
+            ReviewAction::Submit {
+                review_id,
+                answer,
+                note,
+                author,
+                limit,
+            } => {
+                commands::review::submit(
+                    &client,
+                    &opts.format,
+                    &review_id,
+                    &answer,
+                    note.as_deref(),
+                    limit,
+                    author.as_deref(),
+                )
+                .await?;
+            }
+        },
         Commands::Diagnose { action } => match action {
             DiagnoseAction::Report {
                 trace_id,
@@ -1063,6 +1613,66 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 commands::server::status(&client, &opts.format).await?;
             }
         },
+        Commands::Mcp { action } => match action {
+            McpAction::Serve => {
+                mcp::serve(client, &server_url).await?;
+            }
+        },
+        Commands::Score { action } => match action {
+            ScoreAction::Rule { action } => match action {
+                ScoreRuleAction::Create {
+                    name,
+                    sample,
+                    matches,
+                    cmd,
+                    description,
+                } => {
+                    commands::score::create(
+                        &client,
+                        &opts.format,
+                        &name,
+                        sample,
+                        &matches,
+                        &cmd,
+                        description.as_deref(),
+                    )
+                    .await?;
+                }
+                ScoreRuleAction::List => commands::score::list(&client, &opts.format).await?,
+                ScoreRuleAction::Delete { name } => {
+                    commands::score::delete(&client, &opts.format, &name).await?
+                }
+            },
+        },
+        Commands::Alert { action } => match action {
+            AlertAction::Create {
+                name,
+                query,
+                for_duration,
+                window,
+                sinks,
+                description,
+            } => {
+                commands::alert::create(
+                    &client,
+                    &opts.format,
+                    &name,
+                    &query,
+                    for_duration.as_deref(),
+                    window.as_deref(),
+                    &sinks,
+                    description.as_deref(),
+                )
+                .await?;
+            }
+            AlertAction::List => commands::alert::list(&client, &opts.format).await?,
+            AlertAction::Delete { name } => {
+                commands::alert::delete(&client, &opts.format, &name).await?
+            }
+        },
+        Commands::Alerts { limit, follow } => {
+            commands::alert::feed(&client, &opts.format, limit, follow).await?;
+        }
         Commands::Skill { action } => match action {
             SkillAction::Install { project, force } => {
                 commands::skill::install(project, force)?;

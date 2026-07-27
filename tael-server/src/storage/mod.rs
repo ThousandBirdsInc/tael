@@ -15,11 +15,12 @@ pub use comments::{CommentsStore, JsonlComments, open as open_comments};
 #[cfg(feature = "duckdb")]
 pub use duckdb_store::DuckDbStore;
 pub use fanout::FanoutStore;
-pub use objstore::{
-    DynObjectBackend, FsBackend, ObjectBackend, StoreLocation, open_object_backend,
-};
+pub use objstore::{DynObjectBackend, FsBackend, StoreLocation, open_object_backend};
 pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};
 pub use search::SearchIndex;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 use anyhow::Result;
 
@@ -80,6 +81,42 @@ pub trait Store: Send + Sync {
     /// Read-only SQL query surface (`SELECT`/`WITH`) over the telemetry tables,
     /// returning rows as JSON objects.
     fn query_sql(&self, sql: &str) -> Result<Vec<serde_json::Value>>;
+
+    /// Read 5-minute downsampled metric aggregates.
+    ///
+    /// Rollups outlive raw points by design (a year against thirty days), so
+    /// they are the only way to answer a long-range trend question once raw
+    /// retention has passed. Without a read path they were being written and
+    /// expired but never queried, which made the downsampling pure cost.
+    ///
+    /// Default: unsupported — only the tiered engine keeps rollups.
+    fn query_metric_rollups(
+        &self,
+        _name: Option<&str>,
+        _service: Option<&str>,
+        _last_seconds: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<models::MetricRollup>> {
+        anyhow::bail!("metric rollups are not supported by this storage backend")
+    }
+
+    /// Describe how a trace query would execute: which tiers are consulted,
+    /// which access path is taken, and how many rows are examined to produce
+    /// the result.
+    ///
+    /// This is the agent's substitute for a query-planner UI. An agent that
+    /// gets an unexpectedly empty or slow answer needs to know *why* — a
+    /// filter that matched nothing looks identical to a filter the engine
+    /// ignored, unless the engine says which it was.
+    ///
+    /// The default reports that the backend can't introspect itself rather
+    /// than inventing plausible-looking numbers.
+    fn explain_traces(&self, _query: &TraceQuery) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "supported": false,
+            "reason": "this storage backend does not report query execution details",
+        }))
+    }
 
     // ── Lifecycle / operability (default no-ops) ────────────────────
     /// Readiness probe — `Ok(())` when this store can serve requests. Backs the

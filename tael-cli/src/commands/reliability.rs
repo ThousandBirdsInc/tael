@@ -8,10 +8,10 @@ pub async fn comment_rows(client: &TaelClient, limit: u32) -> Result<Vec<Value>>
     // every storage backend. TraceComment serializes with the same keys the
     // SQL row shape used (id, trace_id, span_id, author, body, created_at),
     // so downstream consumers are agnostic to which path produced the rows.
-    if let Ok(result) = client.list_comments(limit).await {
-        if let Some(comments) = result.get("comments").and_then(|v| v.as_array()) {
-            return Ok(comments.clone());
-        }
+    if let Ok(result) = client.list_comments(limit).await
+        && let Some(comments) = result.get("comments").and_then(|v| v.as_array())
+    {
+        return Ok(comments.clone());
     }
 
     // Fallback for older servers without /api/v1/comments: the SQL layer

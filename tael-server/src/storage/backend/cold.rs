@@ -112,22 +112,43 @@ impl ColdTier {
     /// under each signal and deletes the expired ones individually (a crash
     /// mid-drop leaves a harmless partial partition that a re-run finishes).
     pub fn drop_partitions_before(&self, cutoff_date: &str) -> Result<usize> {
+        self.drop_partitions_per_signal(&[
+            (SPANS, cutoff_date),
+            (LOGS, cutoff_date),
+            (METRICS, cutoff_date),
+        ])
+    }
+
+    /// Drop expired partitions with a **per-signal** cutoff date.
+    ///
+    /// Signals age at different rates: span payloads are large and investigated
+    /// within days, while 5-minute metric rollups are tiny and wanted for a
+    /// year. A single shared cutoff forces the shortest useful window on
+    /// everything, so each root gets its own.
+    pub fn drop_partitions_per_signal(&self, cutoffs: &[(&str, &str)]) -> Result<usize> {
         use std::collections::HashSet;
         let mut dropped: HashSet<String> = HashSet::new();
-        for root in [SPANS, LOGS, METRICS] {
+        for (root, cutoff_date) in cutoffs {
             for key in self.backend.list(root)? {
                 // Keys look like `spans/date=YYYY-MM-DD/hour=HH/…`; the date is
                 // zero-padded fixed-width, so a lexicographic compare is correct.
-                if let Some(date) = parse_date_segment(&key) {
-                    if date < cutoff_date {
-                        self.backend.delete(&key)?;
-                        dropped.insert(format!("{root}/date={date}"));
-                    }
+                if let Some(date) = parse_date_segment(&key)
+                    && date < *cutoff_date
+                {
+                    self.backend.delete(&key)?;
+                    dropped.insert(format!("{root}/date={date}"));
                 }
             }
         }
         Ok(dropped.len())
     }
+
+    /// The object-namespace roots, so callers can name signals without
+    /// duplicating the key strings.
+    pub const SPANS_ROOT: &'static str = SPANS;
+    pub const LOGS_ROOT: &'static str = LOGS;
+    pub const METRICS_ROOT: &'static str = METRICS;
+    pub const METRICS_5M_ROOT: &'static str = METRICS_5M;
 
     /// Read all spans for a trace from the cold tier.
     pub fn get_trace(&self, trace_id: &str) -> Result<Vec<Span>> {
@@ -610,6 +631,10 @@ fn metric_schema() -> Arc<Schema> {
         Field::new("value", DataType::Float64, false),
         Field::new("unit", DataType::Utf8, false),
         Field::new("attributes_json", DataType::Utf8, false),
+        // Bucket layout for histogram points; null for every other type.
+        // Stored as JSON alongside `attributes_json` rather than as a nested
+        // list column so the SQL surface can read it without a struct decoder.
+        Field::new("histogram_json", DataType::Utf8, true),
     ]))
 }
 
@@ -646,6 +671,16 @@ fn metrics_to_batch(metrics: &[&MetricPoint]) -> Result<RecordBatch> {
             metrics
                 .iter()
                 .map(|m| serde_json::to_string(&m.attributes).unwrap_or_else(|_| "{}".into()))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            metrics
+                .iter()
+                .map(|m| {
+                    m.histogram
+                        .as_ref()
+                        .and_then(|h| serde_json::to_string(h).ok())
+                })
                 .collect::<Vec<_>>(),
         )),
     ];
@@ -748,6 +783,17 @@ fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
     let value = col!(4, Float64Array);
     let unit = col!(5, StringArray);
     let attrs = col!(6, StringArray);
+    // Parquet files written before histogram buckets were retained have no
+    // such column; those points simply read back without a distribution.
+    let histograms = (batch.num_columns() > 7)
+        .then(|| {
+            batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("bad histogram column")
+        })
+        .transpose()?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -759,6 +805,9 @@ fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
             value: value.value(i),
             unit: unit.value(i).to_string(),
             attributes: serde_json::from_str(attrs.value(i)).unwrap_or_default(),
+            histogram: histograms
+                .filter(|h| !h.is_null(i))
+                .and_then(|h| serde_json::from_str(h.value(i)).ok()),
         });
     }
     Ok(out)
@@ -823,6 +872,7 @@ mod tests {
             value: v,
             unit: "1".into(),
             attributes: std::collections::HashMap::new(),
+            histogram: None,
         };
         // Three points in the same 5m bucket (0,60,120s) + one in the next (360s).
         cold.write_downsampled(&[mk(0, 10.0), mk(60, 30.0), mk(120, 20.0), mk(360, 5.0)])

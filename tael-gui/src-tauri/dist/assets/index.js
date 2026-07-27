@@ -1,74 +1,234 @@
-(function(){const s=document.createElement("link").relList;if(s&&s.supports&&s.supports("modulepreload"))return;for(const n of document.querySelectorAll('link[rel="modulepreload"]'))a(n);new MutationObserver(n=>{for(const l of n)if(l.type==="childList")for(const u of l.addedNodes)u.tagName==="LINK"&&u.rel==="modulepreload"&&a(u)}).observe(document,{childList:!0,subtree:!0});function r(n){const l={};return n.integrity&&(l.integrity=n.integrity),n.referrerPolicy&&(l.referrerPolicy=n.referrerPolicy),n.crossOrigin==="use-credentials"?l.credentials="include":n.crossOrigin==="anonymous"?l.credentials="omit":l.credentials="same-origin",l}function a(n){if(n.ep)return;n.ep=!0;const l=r(n);fetch(n.href,l)}})();function ve(e,s=!1){return window.__TAURI_INTERNALS__.transformCallback(e,s)}async function $(e,s={},r){return window.__TAURI_INTERNALS__.invoke(e,s,r)}var z;(function(e){e.WINDOW_RESIZED="tauri://resize",e.WINDOW_MOVED="tauri://move",e.WINDOW_CLOSE_REQUESTED="tauri://close-requested",e.WINDOW_DESTROYED="tauri://destroyed",e.WINDOW_FOCUS="tauri://focus",e.WINDOW_BLUR="tauri://blur",e.WINDOW_SCALE_FACTOR_CHANGED="tauri://scale-change",e.WINDOW_THEME_CHANGED="tauri://theme-changed",e.WINDOW_CREATED="tauri://window-created",e.WINDOW_SUSPENDED="tauri://suspended",e.WINDOW_RESUMED="tauri://resumed",e.WEBVIEW_CREATED="tauri://webview-created",e.DRAG_ENTER="tauri://drag-enter",e.DRAG_OVER="tauri://drag-over",e.DRAG_DROP="tauri://drag-drop",e.DRAG_LEAVE="tauri://drag-leave"})(z||(z={}));async function me(e,s){window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(e,s),await $("plugin:event|unlisten",{event:e,eventId:s})}async function X(e,s,r){var a;const n=(a=void 0)!==null&&a!==void 0?a:{kind:"Any"};return $("plugin:event|listen",{event:e,target:n,handler:ve(s)}).then(l=>async()=>me(e,l))}const be=200,L=500,Y='12px "BerkeleyMono", ui-monospace, Menlo, Consolas, monospace',he='11px "BerkeleyMono", ui-monospace, Menlo, Consolas, monospace',q="#141414",$e="#181818",Se="#2b2611",ye="#2a2a2a",J="#b5b5b1",K="#6f6f6c",Q="#ef4444";function ee(){return typeof crypto<"u"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}const t={server:"http://127.0.0.1:7701",serviceFilter:"",statusFilter:"",lastWindow:"1h",textFilter:"",pinnedColumns:[],attrPickerOpen:!1,spanViewer:null,tab:"traces",prevTab:"traces",paused:!1,connection:"idle",error:null,streamId:ee(),spans:[],selectedSpanIdx:null,services:[],selectedServiceIdx:null,liveTraceMap:new Map,liveTraces:[],selectedTraceIdx:null,timelineWindowMs:6e4,traceSpans:[],waterfallRows:[],selectedWaterfallIdx:null,currentTraceId:null,comments:[],commentDraft:"",evalRun:null,evalCases:[],selectedEvalIdx:null,evalFailuresOnly:!1,detailZoom:{start:0,end:1},liveZoom:{start:0,end:1}};let R=null,O=null,N=!1,F=null;const te=document.querySelector("#app");if(!te)throw new Error("missing #app");const p=te;function o(){N||(N=!0,requestAnimationFrame(()=>{N=!1,ae()}))}function i(e){return String(e??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;")}function Ie(e){const s=Date.parse(e);return Number.isFinite(s)?s:0}function P(e){return(Array.isArray(e)?e:Array.isArray(e?.spans)?e.spans:[]).map(r=>{const a=String(r.start_time??r.startTime??"-");return{traceId:String(r.trace_id??r.traceId??"-"),spanId:String(r.span_id??r.spanId??"-"),parentSpanId:r.parent_span_id??r.parentSpanId??null,service:String(r.service??"-"),operation:String(r.operation??"-"),durationMs:Number(r.duration_ms??r.durationMs??0),status:String(r.status??"-"),startTime:a,startTimeMs:Ie(a),attributes:r.attributes&&typeof r.attributes=="object"?r.attributes:{},events:Array.isArray(r.events)?r.events:[]}})}function we(e){return(Array.isArray(e?.services)?e.services:[]).map(s=>({name:String(s.name??"-"),spanCount:Number(s.span_count??s.spanCount??0),traceCount:Number(s.trace_count??s.traceCount??0),avgDurationMs:Number(s.avg_duration_ms??s.avgDurationMs??0),errorRate:Number(s.error_rate??s.errorRate??0)}))}function V(e){return(Array.isArray(e?.comments)?e.comments:[]).map(s=>({author:String(s.author??"-"),body:String(s.body??""),createdAt:String(s.created_at??s.createdAt??"-"),spanId:s.span_id??s.spanId??null}))}function ge(e){return e?{runId:String(e.run_id??e.runId??"-"),suiteId:String(e.suite_id??e.suiteId??"-"),status:String(e.status??"-"),caseCount:e.case_count??e.caseCount??null,observedCases:Number(e.observed_cases??e.observedCases??0),scoredCases:Number(e.scored_cases??e.scoredCases??0),passedCases:Number(e.passed_cases??e.passedCases??0),failedCases:Number(e.failed_cases??e.failedCases??0),costUsd:Number(e.cost_usd??e.costUsd??0),avgScores:e.avg_scores??e.avgScores??{}}:null}function Te(e){return(Array.isArray(e?.cases)?e.cases:[]).map(s=>({caseId:String(s.case_id??s.caseId??"-"),status:String(s.status??"-"),traceId:s.trace_id??s.traceId??null,durationMs:s.duration_ms??s.durationMs??null,costUsd:Number(s.cost_usd??s.costUsd??0),scores:s.scores??{},comments:V({comments:s.comments})}))}function w(e){const s=["#facc15","#62a9ff","#52d284","#b78cff","#f59e8c","#5ad1c9","#e0a3ff","#8fc4ff","#d4b483","#ff9ab0"];let r=0;for(const a of e)r=r*31+a.charCodeAt(0)>>>0;return s[r%s.length]}function A(e){return e>=500?"danger":e>=100?"warn":"ok"}function M(e){return e==="error"||e==="fail"?"danger":e==="ok"||e==="pass"?"ok":"muted"}function se(e){return(e.includes("T")?e.split("T")[1]:e).replace(/Z$/,"").slice(0,12)}function k(e,s=16){return e.length>s?`${e.slice(0,s)}...`:e}function Ee(e,s){const r=e.attributes[s];return r==null?"":typeof r=="string"?r:JSON.stringify(r)}function Me(){const e=C()??g(),s=new Set,r=[],a=n=>{if(n)for(const l of Object.keys(n.attributes))s.has(l)||(s.add(l),r.push(l))};a(e);for(const n of t.spans)a(n);for(const n of t.traceSpans)a(n);return r}function Ce(e){const s=t.pinnedColumns.indexOf(e);s>=0?t.pinnedColumns.splice(s,1):t.pinnedColumns.push(e)}function U(){const e=t.textFilter.trim().toLowerCase();return e?t.spans.filter(s=>s.service.toLowerCase().includes(e)||s.operation.toLowerCase().includes(e)||s.traceId.toLowerCase().includes(e)||s.status.toLowerCase().includes(e)):t.spans}function j(){const e=t.textFilter.trim().toLowerCase();return e?t.liveTraces.filter(s=>s.service.toLowerCase().includes(e)||s.operation.toLowerCase().includes(e)||s.traceId.toLowerCase().includes(e)||(s.hasError?"error":"ok").includes(e)):t.liveTraces}function D(){const e=t.textFilter.trim().toLowerCase();return t.evalCases.filter(s=>t.evalFailuresOnly&&s.status!=="fail"?!1:e?s.caseId.toLowerCase().includes(e)||s.status.toLowerCase().includes(e)||(s.traceId??"").toLowerCase().includes(e):!0)}function _e(e){if(e.length===0)return[];const s=Math.min(...e.map(d=>d.startTimeMs)),r=Math.max(...e.map(d=>d.startTimeMs+d.durationMs)),a=Math.max(r-s,1),n=new Map,l="__root__";e.forEach((d,m)=>{const b=d.parentSpanId??l,y=n.get(b)??[];y.push(m),n.set(b,y)});const u=[],f=[{parent:l,depth:0}];for(;f.length>0;){const d=f.pop(),m=n.get(d.parent)??[];for(const b of[...m].reverse()){const y=e[b];u.push({spanIdx:b,depth:d.depth,offsetPct:I((y.startTimeMs-s)/a,0,1),widthPct:I(y.durationMs/a,.005,1)}),f.push({parent:y.spanId,depth:d.depth+1})}}const v=new Set(u.map(d=>d.spanIdx));return e.forEach((d,m)=>{v.has(m)||u.push({spanIdx:m,depth:0,offsetPct:I((d.startTimeMs-s)/a,0,1),widthPct:I(d.durationMs/a,.005,1)})}),u}function I(e,s,r){return Math.max(s,Math.min(r,e))}function re(e){for(const s of e){const r=s.startTimeMs+s.durationMs,a=t.liveTraceMap.get(s.traceId);if(!a){t.liveTraceMap.set(s.traceId,{traceId:s.traceId,service:s.service,operation:s.operation,startTimeMs:s.startTimeMs,endTimeMs:r,durationMs:s.durationMs,spanCount:1,hasError:s.status==="error"});continue}a.startTimeMs=Math.min(a.startTimeMs,s.startTimeMs),a.endTimeMs=Math.max(a.endTimeMs,r),a.durationMs=a.endTimeMs-a.startTimeMs,a.spanCount+=1,a.hasError||=s.status==="error",s.parentSpanId||(a.service=s.service,a.operation=s.operation)}if(t.liveTraces=[...t.liveTraceMap.values()].sort((s,r)=>s.startTimeMs-r.startTimeMs),t.liveTraces.length>L){const s=t.liveTraces.slice(0,t.liveTraces.length-L);for(const r of s)t.liveTraceMap.delete(r.traceId);t.liveTraces=t.liveTraces.slice(-L)}}async function W(){const e=await $("query_traces",{server:t.server,request:{service:t.serviceFilter||null,status:t.statusFilter||null,last:t.lastWindow||"1h",limit:200,text:t.textFilter||null}});t.spans=P(e),re(t.spans)}async function Z(){t.services=we(await $("list_services",{server:t.server}))}async function B(){const e=await $("eval_runs",{server:t.server}),s=Array.isArray(e?.runs)?e.runs[0]:null,r=s?.run_id??s?.runId;if(!r){t.evalRun=null,t.evalCases=[];return}const a=await $("eval_status",{server:t.server,runId:r});t.evalRun=ge(a?.run??a),t.evalCases=Te(await $("eval_cases",{server:t.server,runId:r}))}async function E(e){t.prevTab=t.tab==="detail"?t.prevTab:t.tab,t.tab="detail",t.currentTraceId=e,t.selectedWaterfallIdx=null,t.traceSpans=[],t.waterfallRows=[],t.comments=[],t.detailZoom={start:0,end:1},t.error=null,o();try{const[s,r]=await Promise.all([$("get_trace",{server:t.server,traceId:e}),$("get_comments",{server:t.server,traceId:e})]);t.traceSpans=P(s),t.waterfallRows=_e(t.traceSpans),t.selectedWaterfallIdx=t.waterfallRows.length>0?0:null,t.comments=V(r)}catch(s){t.error=String(s)}o()}async function xe(){if(!t.currentTraceId||!t.commentDraft.trim())return;const e=g();try{await $("add_comment",{server:t.server,request:{traceId:t.currentTraceId,body:t.commentDraft.trim(),author:"gui",spanId:e?.spanId??null}}),t.commentDraft="",t.comments=V(await $("get_comments",{server:t.server,traceId:t.currentTraceId}))}catch(s){t.error=String(s)}o()}async function x(){t.error=null,t.connection="checking",t.streamId=ee(),o();try{await $("healthz",{server:t.server}),t.connection="loading",await Promise.all([W(),Z(),B()]),await Ae(),t.connection="connected"}catch(e){t.connection="error",t.error=String(e)}o()}async function Ae(){await $("start_live_stream",{server:t.server,service:t.serviceFilter||null,status:t.statusFilter||null,streamId:t.streamId})}async function ke(){R?.(),O?.(),R=await X("tael://live-spans",e=>{if(!(e.payload.streamId!==t.streamId||t.paused))try{const s=P(JSON.parse(e.payload.data));if(s.length===0)return;re(s),t.spans=[...s,...t.spans].slice(0,be),t.error=null,o()}catch{}}),O=await X("tael://live-status",e=>{e.payload.streamId===t.streamId&&(t.connection=e.payload.status,e.payload.message&&(t.error=e.payload.message),o())})}function H(){const e=j();return t.selectedTraceIdx==null?null:e[t.selectedTraceIdx]??null}function C(){const e=U();return t.selectedSpanIdx==null?null:e[t.selectedSpanIdx]??null}function g(){if(t.selectedWaterfallIdx==null)return null;const e=t.waterfallRows[t.selectedWaterfallIdx];return e?t.traceSpans[e.spanIdx]:null}function _(e,s){return`<button class="tab ${t.tab===e?"active":""}" data-tab="${e}">${s}</button>`}function ae(){p.innerHTML=`
+(function(){const e=document.createElement("link").relList;if(e&&e.supports&&e.supports("modulepreload"))return;for(const a of document.querySelectorAll('link[rel="modulepreload"]'))n(a);new MutationObserver(a=>{for(const o of a)if(o.type==="childList")for(const d of o.addedNodes)d.tagName==="LINK"&&d.rel==="modulepreload"&&n(d)}).observe(document,{childList:!0,subtree:!0});function r(a){const o={};return a.integrity&&(o.integrity=a.integrity),a.referrerPolicy&&(o.referrerPolicy=a.referrerPolicy),a.crossOrigin==="use-credentials"?o.credentials="include":a.crossOrigin==="anonymous"?o.credentials="omit":o.credentials="same-origin",o}function n(a){if(a.ep)return;a.ep=!0;const o=r(a);fetch(a.href,o)}})();function _t(t,e=!1){return window.__TAURI_INTERNALS__.transformCallback(t,e)}async function h(t,e={},r){return window.__TAURI_INTERNALS__.invoke(t,e,r)}var at;(function(t){t.WINDOW_RESIZED="tauri://resize",t.WINDOW_MOVED="tauri://move",t.WINDOW_CLOSE_REQUESTED="tauri://close-requested",t.WINDOW_DESTROYED="tauri://destroyed",t.WINDOW_FOCUS="tauri://focus",t.WINDOW_BLUR="tauri://blur",t.WINDOW_SCALE_FACTOR_CHANGED="tauri://scale-change",t.WINDOW_THEME_CHANGED="tauri://theme-changed",t.WINDOW_CREATED="tauri://window-created",t.WINDOW_SUSPENDED="tauri://suspended",t.WINDOW_RESUMED="tauri://resumed",t.WEBVIEW_CREATED="tauri://webview-created",t.DRAG_ENTER="tauri://drag-enter",t.DRAG_OVER="tauri://drag-over",t.DRAG_DROP="tauri://drag-drop",t.DRAG_LEAVE="tauri://drag-leave"})(at||(at={}));async function Tt(t,e){window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(t,e),await h("plugin:event|unlisten",{event:t,eventId:e})}async function nt(t,e,r){var n;const a=(n=void 0)!==null&&n!==void 0?n:{kind:"Any"};return h("plugin:event|listen",{event:t,target:a,handler:_t(e)}).then(o=>async()=>Tt(t,o))}const Ct=["health","topology","automation","clusters","review","sql"];function V(t){return Ct.includes(t)}function A(){return{loaded:!1,error:null,data:null}}const Et=200,W=500,it='12px "BerkeleyMono", ui-monospace, Menlo, Consolas, monospace',Mt='11px "BerkeleyMono", ui-monospace, Menlo, Consolas, monospace',Q="#141414",kt="#181818",xt="#2b2611",At="#2a2a2a",ot="#b5b5b1",lt="#6f6f6c",dt="#ef4444";function ct(){return typeof crypto<"u"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}const s={server:"http://127.0.0.1:7701",serviceFilter:"",statusFilter:"",lastWindow:"1h",textFilter:"",pinnedColumns:[],attrPickerOpen:!1,spanViewer:null,tab:"traces",prevTab:"traces",paused:!1,connection:"idle",error:null,streamId:ct(),spans:[],selectedSpanIdx:null,services:[],selectedServiceIdx:null,liveTraceMap:new Map,liveTraces:[],selectedTraceIdx:null,timelineWindowMs:6e4,traceSpans:[],waterfallRows:[],selectedWaterfallIdx:null,currentTraceId:null,comments:[],commentDraft:"",evalRun:null,evalCases:[],selectedEvalIdx:null,evalFailuresOnly:!1,detailZoom:{start:0,end:1},liveZoom:{start:0,end:1},panels:{health:A(),topology:A(),automation:A(),clusters:A(),review:A(),sql:A()},sqlQuery:"SELECT service, count(*) AS spans FROM spans GROUP BY service ORDER BY spans DESC",suites:[]};let j=null,U=null,P=!1,B=null;const ut=document.querySelector("#app");if(!ut)throw new Error("missing #app");const p=ut;function u(){P||(P=!0,requestAnimationFrame(()=>{P=!1,vt()}))}function i(t){return String(t??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;")}function Nt(t){const e=Date.parse(t);return Number.isFinite(e)?e:0}function G(t){return(Array.isArray(t)?t:Array.isArray(t?.spans)?t.spans:[]).map(r=>{const n=String(r.start_time??r.startTime??"-");return{traceId:String(r.trace_id??r.traceId??"-"),spanId:String(r.span_id??r.spanId??"-"),parentSpanId:r.parent_span_id??r.parentSpanId??null,service:String(r.service??"-"),operation:String(r.operation??"-"),durationMs:Number(r.duration_ms??r.durationMs??0),status:String(r.status??"-"),startTime:n,startTimeMs:Nt(n),attributes:r.attributes&&typeof r.attributes=="object"?r.attributes:{},events:Array.isArray(r.events)?r.events:[]}})}function Rt(t){return(Array.isArray(t?.services)?t.services:[]).map(e=>({name:String(e.name??"-"),spanCount:Number(e.span_count??e.spanCount??0),traceCount:Number(e.trace_count??e.traceCount??0),avgDurationMs:Number(e.avg_duration_ms??e.avgDurationMs??0),errorRate:Number(e.error_rate??e.errorRate??0)}))}function Y(t){return(Array.isArray(t?.comments)?t.comments:[]).map(e=>({author:String(e.author??"-"),body:String(e.body??""),createdAt:String(e.created_at??e.createdAt??"-"),spanId:e.span_id??e.spanId??null}))}function Lt(t){return t?{runId:String(t.run_id??t.runId??"-"),suiteId:String(t.suite_id??t.suiteId??"-"),status:String(t.status??"-"),caseCount:t.case_count??t.caseCount??null,observedCases:Number(t.observed_cases??t.observedCases??0),scoredCases:Number(t.scored_cases??t.scoredCases??0),passedCases:Number(t.passed_cases??t.passedCases??0),failedCases:Number(t.failed_cases??t.failedCases??0),costUsd:Number(t.cost_usd??t.costUsd??0),avgScores:t.avg_scores??t.avgScores??{}}:null}function qt(t){return(Array.isArray(t?.cases)?t.cases:[]).map(e=>({caseId:String(e.case_id??e.caseId??"-"),status:String(e.status??"-"),traceId:e.trace_id??e.traceId??null,durationMs:e.duration_ms??e.durationMs??null,costUsd:Number(e.cost_usd??e.costUsd??0),scores:e.scores??{},comments:Y({comments:e.comments})}))}function C(t){const e=["#facc15","#62a9ff","#52d284","#b78cff","#f59e8c","#5ad1c9","#e0a3ff","#8fc4ff","#d4b483","#ff9ab0"];let r=0;for(const n of t)r=r*31+n.charCodeAt(0)>>>0;return e[r%e.length]}function F(t){return t>=500?"danger":t>=100?"warn":"ok"}function N(t){return t==="error"||t==="fail"?"danger":t==="ok"||t==="pass"?"ok":"muted"}function J(t){return(t.includes("T")?t.split("T")[1]:t).replace(/Z$/,"").slice(0,12)}function O(t,e=16){return t.length>e?`${t.slice(0,e)}...`:t}function Ft(t,e){const r=t.attributes[e];return r==null?"":typeof r=="string"?r:JSON.stringify(r)}function Ot(){const t=R()??k(),e=new Set,r=[],n=a=>{if(a)for(const o of Object.keys(a.attributes))e.has(o)||(e.add(o),r.push(o))};n(t);for(const a of s.spans)n(a);for(const a of s.traceSpans)n(a);return r}function Dt(t){const e=s.pinnedColumns.indexOf(t);e>=0?s.pinnedColumns.splice(e,1):s.pinnedColumns.push(t)}function X(){const t=s.textFilter.trim().toLowerCase();return t?s.spans.filter(e=>e.service.toLowerCase().includes(t)||e.operation.toLowerCase().includes(t)||e.traceId.toLowerCase().includes(t)||e.status.toLowerCase().includes(t)):s.spans}function K(){const t=s.textFilter.trim().toLowerCase();return t?s.liveTraces.filter(e=>e.service.toLowerCase().includes(t)||e.operation.toLowerCase().includes(t)||e.traceId.toLowerCase().includes(t)||(e.hasError?"error":"ok").includes(t)):s.liveTraces}function H(){const t=s.textFilter.trim().toLowerCase();return s.evalCases.filter(e=>s.evalFailuresOnly&&e.status!=="fail"?!1:t?e.caseId.toLowerCase().includes(t)||e.status.toLowerCase().includes(t)||(e.traceId??"").toLowerCase().includes(t):!0)}function Wt(t){if(t.length===0)return[];const e=Math.min(...t.map(f=>f.startTimeMs)),r=Math.max(...t.map(f=>f.startTimeMs+f.durationMs)),n=Math.max(r-e,1),a=new Map,o="__root__";t.forEach((f,b)=>{const y=f.parentSpanId??o,S=a.get(y)??[];S.push(b),a.set(y,S)});const d=[],l=[{parent:o,depth:0}];for(;l.length>0;){const f=l.pop(),b=a.get(f.parent)??[];for(const y of[...b].reverse()){const S=t[y];d.push({spanIdx:y,depth:f.depth,offsetPct:T((S.startTimeMs-e)/n,0,1),widthPct:T(S.durationMs/n,.005,1)}),l.push({parent:S.spanId,depth:f.depth+1})}}const c=new Set(d.map(f=>f.spanIdx));return t.forEach((f,b)=>{c.has(b)||d.push({spanIdx:b,depth:0,offsetPct:T((f.startTimeMs-e)/n,0,1),widthPct:T(f.durationMs/n,.005,1)})}),d}function T(t,e,r){return Math.max(e,Math.min(r,t))}function pt(t){for(const e of t){const r=e.startTimeMs+e.durationMs,n=s.liveTraceMap.get(e.traceId);if(!n){s.liveTraceMap.set(e.traceId,{traceId:e.traceId,service:e.service,operation:e.operation,startTimeMs:e.startTimeMs,endTimeMs:r,durationMs:e.durationMs,spanCount:1,hasError:e.status==="error"});continue}n.startTimeMs=Math.min(n.startTimeMs,e.startTimeMs),n.endTimeMs=Math.max(n.endTimeMs,r),n.durationMs=n.endTimeMs-n.startTimeMs,n.spanCount+=1,n.hasError||=e.status==="error",e.parentSpanId||(n.service=e.service,n.operation=e.operation)}if(s.liveTraces=[...s.liveTraceMap.values()].sort((e,r)=>e.startTimeMs-r.startTimeMs),s.liveTraces.length>W){const e=s.liveTraces.slice(0,s.liveTraces.length-W);for(const r of e)s.liveTraceMap.delete(r.traceId);s.liveTraces=s.liveTraces.slice(-W)}}async function Z(){const t=await h("query_traces",{server:s.server,request:{service:s.serviceFilter||null,status:s.statusFilter||null,last:s.lastWindow||"1h",limit:200,text:s.textFilter||null}});s.spans=G(t),pt(s.spans)}async function tt(){s.services=Rt(await h("list_services",{server:s.server}))}async function et(){const t=await h("eval_runs",{server:s.server}),e=Array.isArray(t?.runs)?t.runs[0]:null,r=e?.run_id??e?.runId;if(!r){s.evalRun=null,s.evalCases=[];return}const n=await h("eval_status",{server:s.server,runId:r});s.evalRun=Lt(n?.run??n),s.evalCases=qt(await h("eval_cases",{server:s.server,runId:r}))}function ft(t,e){const r=/^(\d+)([a-z]+)$/i.exec(t.trim());return r?`${Number(r[1])*e}${r[2]}`:t}function Pt(t){const e=(Array.isArray(t?.comments)?t.comments:[]).map(a=>{try{return JSON.parse(String(a?.body??""))}catch{return null}}).filter(a=>a&&typeof a=="object"),r=new Map;for(const a of e)a.kind==="review_answer"&&r.set(String(a.review_id??""),a);const n=e.filter(a=>a.kind==="review_request").map(a=>{const o=String(a.review_id??""),d=r.get(o);return{reviewId:o,state:d?"answered":"open",traceId:a.trace_id?String(a.trace_id):null,question:String(a.question??""),answer:d?String(d.answer??""):null}});return n.sort((a,o)=>a.state===o.state?a.reviewId.localeCompare(o.reviewId):a.state==="open"?-1:1),n}async function z(t){const e=s.panels[t];e.loaded=!0,e.error=null;const r=s.server,n=s.lastWindow||"1h";try{if(t==="health"){const[a,o]=await Promise.all([h("query_summary",{server:r,last:n}),h("query_anomalies",{server:r,last:n,baseline:ft(n,4)})]);e.data={summary:a,anomalies:o}}else if(t==="topology")e.data=await h("query_topology",{server:r,last:n});else if(t==="automation"){const[a,o,d]=await Promise.all([h("list_alerts",{server:r}),h("alert_events",{server:r,limit:20}),h("list_score_rules",{server:r})]);e.data={alerts:a,events:o,scoreRules:d}}else t==="clusters"?e.data=await h("cluster_traces",{server:r,k:5}):t==="review"?e.data=Pt(await h("list_comments",{server:r,limit:500})):t==="sql"&&(e.data=await h("query_sql",{server:r,query:s.sqlQuery}))}catch(a){e.error=String(a),e.data=null}u()}async function Vt(t){s.tab=t,u(),s.panels[t].loaded||await z(t)}async function M(t){s.prevTab=s.tab==="detail"?s.prevTab:s.tab,s.tab="detail",s.currentTraceId=t,s.selectedWaterfallIdx=null,s.traceSpans=[],s.waterfallRows=[],s.comments=[],s.detailZoom={start:0,end:1},s.error=null,u();try{const[e,r]=await Promise.all([h("get_trace",{server:s.server,traceId:t}),h("get_comments",{server:s.server,traceId:t})]);s.traceSpans=G(e),s.waterfallRows=Wt(s.traceSpans),s.selectedWaterfallIdx=s.waterfallRows.length>0?0:null,s.comments=Y(r)}catch(e){s.error=String(e)}u()}async function jt(){if(!s.currentTraceId||!s.commentDraft.trim())return;const t=k();try{await h("add_comment",{server:s.server,request:{traceId:s.currentTraceId,body:s.commentDraft.trim(),author:"gui",spanId:t?.spanId??null}}),s.commentDraft="",s.comments=Y(await h("get_comments",{server:s.server,traceId:s.currentTraceId}))}catch(e){s.error=String(e)}u()}async function q(){s.error=null,s.connection="checking",s.streamId=ct(),u();try{await h("healthz",{server:s.server}),s.connection="loading",await Promise.all([Z(),tt(),et()]),await Ut(),s.connection="connected"}catch(t){s.connection="error",s.error=String(t)}u()}async function Ut(){await h("start_live_stream",{server:s.server,service:s.serviceFilter||null,status:s.statusFilter||null,streamId:s.streamId})}async function Bt(){j?.(),U?.(),j=await nt("tael://live-spans",t=>{if(!(t.payload.streamId!==s.streamId||s.paused))try{const e=G(JSON.parse(t.payload.data));if(e.length===0)return;pt(e),s.spans=[...e,...s.spans].slice(0,Et),s.error=null,u()}catch{}}),U=await nt("tael://live-status",t=>{t.payload.streamId===s.streamId&&(s.connection=t.payload.status,t.payload.message&&(s.error=t.payload.message),u())})}function st(){const t=K();return s.selectedTraceIdx==null?null:t[s.selectedTraceIdx]??null}function R(){const t=X();return s.selectedSpanIdx==null?null:t[s.selectedSpanIdx]??null}function k(){if(s.selectedWaterfallIdx==null)return null;const t=s.waterfallRows[s.selectedWaterfallIdx];return t?s.traceSpans[t.spanIdx]:null}function I(t,e){return`<button class="tab ${s.tab===t?"active":""}" data-tab="${t}">${e}</button>`}function vt(){p.innerHTML=`
     <div class="shell">
       <header class="topbar">
         <div class="brand">
           <span class="brand-mark">◆</span>
           <span class="brand-name">tael</span>
-          <span class="conn"><span class="conn-dot ${i(t.connection)}"></span>${i(t.connection)}</span>
+          <span class="conn"><span class="conn-dot ${i(s.connection)}"></span>${i(s.connection)}</span>
         </div>
         <div class="conn-controls">
-          <label class="field"><span>server</span><input id="server-input" class="server-input" value="${i(t.server)}" /></label>
-          <label class="field"><span>service</span><input id="service-input" class="small-input" placeholder="all" value="${i(t.serviceFilter)}" /></label>
+          <label class="field"><span>server</span><input id="server-input" class="server-input" value="${i(s.server)}" /></label>
+          <label class="field"><span>service</span><input id="service-input" class="small-input" placeholder="all" value="${i(s.serviceFilter)}" /></label>
           <label class="field"><span>status</span>
             <select id="status-input" class="small-input">
-              <option value="" ${t.statusFilter===""?"selected":""}>all</option>
-              <option value="ok" ${t.statusFilter==="ok"?"selected":""}>ok</option>
-              <option value="error" ${t.statusFilter==="error"?"selected":""}>error</option>
+              <option value="" ${s.statusFilter===""?"selected":""}>all</option>
+              <option value="ok" ${s.statusFilter==="ok"?"selected":""}>ok</option>
+              <option value="error" ${s.statusFilter==="error"?"selected":""}>error</option>
             </select>
           </label>
-          <label class="field"><span>window</span><input id="last-input" class="tiny-input" value="${i(t.lastWindow)}" /></label>
+          <label class="field"><span>window</span><input id="last-input" class="tiny-input" value="${i(s.lastWindow)}" /></label>
           <button id="connect-btn" class="primary">Connect</button>
           <button id="refresh-btn" title="Refresh">Refresh</button>
-          <button id="pause-btn" class="${t.paused?"active":""}" title="Pause live ingest">${t.paused?"Resume":"Pause"}</button>
+          <button id="pause-btn" class="${s.paused?"active":""}" title="Pause live ingest">${s.paused?"Resume":"Pause"}</button>
         </div>
       </header>
       <nav class="subnav">
         <div class="tabs">
-          ${_("traces","Traces")}
-          ${_("services","Services")}
-          ${_("evals","Evals")}
-          ${_("timeline","Timeline")}
-          ${t.tab==="detail"?_("detail","Trace"):""}
+          ${I("traces","Traces")}
+          ${I("services","Services")}
+          ${I("evals","Evals")}
+          ${I("timeline","Timeline")}
+          ${I("health","Health")}
+          ${I("topology","Topology")}
+          ${I("automation","Automation")}
+          ${I("clusters","Clusters")}
+          ${I("review","Review")}
+          ${I("sql","SQL")}
+          ${s.tab==="detail"?I("detail","Trace"):""}
         </div>
         <div class="filter-box">
-          <input id="filter-input" placeholder="filter…" value="${i(t.textFilter)}" />
-          ${t.textFilter?'<button id="clear-filter-btn">Clear</button>':""}
+          <input id="filter-input" placeholder="filter…" value="${i(s.textFilter)}" />
+          ${s.textFilter?'<button id="clear-filter-btn">Clear</button>':""}
         </div>
       </nav>
-      ${t.error?`<div class="error-bar">${i(t.error)}</div>`:'<div class="error-bar is-hidden"></div>'}
-      <main class="workspace">${Le()}</main>
-      ${t.attrPickerOpen?qe():""}
-      ${t.spanViewer?Pe(t.spanViewer):""}
+      ${s.error?`<div class="error-bar">${i(s.error)}</div>`:'<div class="error-bar is-hidden"></div>'}
+      <main class="workspace">${Ht()}</main>
+      ${s.attrPickerOpen?ne():""}
+      ${s.spanViewer?ie(s.spanViewer):""}
     </div>
-  `,Ve(),Ue()}function Le(){return t.tab==="services"?Re():t.tab==="evals"?Oe():t.tab==="timeline"?De():t.tab==="detail"?We():Ne()}function Ne(){const e=U(),s=C(),r=t.pinnedColumns.map(a=>`<th>${i(a)}</th>`).join("");return`
+  `,oe(),le()}function Ht(){return s.tab==="services"?te():s.tab==="evals"?ee():s.tab==="timeline"?re():s.tab==="detail"?ae():V(s.tab)?Zt(s.tab):Kt()}function L(t,e,r="muted"){return`
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>${i(t)}</span></div>
+      <p class="panel-note ${r}">${i(e)}</p>
+    </section>
+  `}function Zt(t){const e=s.panels[t];return e.error?L(t,e.error,"danger"):e.loaded?t==="health"?zt(e.data):t==="topology"?Qt(e.data):t==="automation"?Gt(e.data):t==="clusters"?Yt(e.data):t==="review"?Jt(e.data):Xt(e.data):L(t,"Loading…")}function m(t,e){const r=t?.[e];return typeof r=="number"&&Number.isFinite(r)?r:0}function $(t,e){const r=t?.[e];return r==null?"":typeof r=="string"?r:String(r)}function _(t,e){return Array.isArray(t?.[e])?t[e]:[]}function D(t){return t>.05?"danger":t>0?"warn":"ok"}function E(t,e,r=""){return`
+    <div class="stat">
+      <span class="stat-label">${i(t)}</span>
+      <span class="stat-value ${r}">${i(e)}</span>
+    </div>
+  `}function zt(t){const e=t?.summary;if(!e)return L("Health","No summary yet.");const r=e.traces??{},n=e.logs??{},a=m(r,"error_rate"),o=_(t.anomalies,"anomalies"),d=_(e,"top_error_operations").slice(0,5).map(c=>`<tr>
+        <td class="danger">${i(m(c,"error_count"))}</td>
+        <td class="accent">${i($(c,"service"))}</td>
+        <td>${i($(c,"operation"))}</td>
+      </tr>`).join(""),l=o.map(c=>`<tr>
+        <td class="accent">${i($(c,"service"))}</td>
+        <td>${i($(c,"kind"))}</td>
+        <td class="${$(c,"severity")==="high"?"danger":"warn"}">${i($(c,"severity"))}</td>
+        <td>${m(c,"baseline").toFixed(2)}</td>
+        <td>${m(c,"current").toFixed(2)}</td>
+        <td>${i($(c,"description"))}</td>
+      </tr>`).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Health</span><span>last ${i(s.lastWindow||"1h")}</span></div>
+      <div class="stat-row">
+        ${E("spans",String(m(r,"span_count")))}
+        ${E("traces",String(m(r,"trace_count")))}
+        ${E("errors",String(m(r,"error_count")),D(a))}
+        ${E("error rate",`${(a*100).toFixed(2)}%`,D(a))}
+        ${E("p50",`${m(r,"p50_ms").toFixed(1)}ms`)}
+        ${E("p95",`${m(r,"p95_ms").toFixed(1)}ms`)}
+        ${E("p99",`${m(r,"p99_ms").toFixed(1)}ms`)}
+        ${E("logs",`${m(n,"total")} / ${m(n,"error")} err`)}
+      </div>
+      <div class="table-wrap">
+        <div class="panel-subhead">Top error operations</div>
+        <table>
+          <thead><tr><th>Errors</th><th>Service</th><th>Operation</th></tr></thead>
+          <tbody>${d||'<tr><td colspan="3" class="muted">No errors in this window.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Anomalies vs ${i(ft(s.lastWindow||"1h",4))} baseline</div>
+        <table>
+          <thead><tr><th>Service</th><th>Kind</th><th>Severity</th><th>Baseline</th><th>Current</th><th>Description</th></tr></thead>
+          <tbody>${l||'<tr><td colspan="6" class="ok">Nothing regressed against the baseline window.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Qt(t){const e=_(t,"edges");if(e.length===0)return L("Topology","No parent/child edges in this window. A single-service trace has no graph.");const r=m(t,"spans_with_parent_outside_window"),n=e.map(a=>{const o=m(a,"error_rate");return`<tr>
+        <td class="accent">${i($(a,"from"))}</td>
+        <td class="muted">→</td>
+        <td class="accent">${i($(a,"to"))}</td>
+        <td>${m(a,"calls")}</td>
+        <td class="${D(o)}">${m(a,"errors")}</td>
+        <td class="${D(o)}">${(o*100).toFixed(1)}%</td>
+        <td>${m(a,"avg_duration_ms").toFixed(1)}ms</td>
+      </tr>`}).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title">
+        <span>Topology</span>
+        <span>${e.length} edges over ${m(t,"spans_examined")} spans${r>0?` · <b class="warn">${r} with a parent outside the window</b>`:""}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>From</th><th></th><th>To</th><th>Calls</th><th>Errors</th><th>Rate</th><th>Avg</th></tr></thead>
+          <tbody>${n}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Gt(t){const e=_(t?.alerts,"alerts"),r=_(t?.events,"events"),n=_(t?.scoreRules,"rules"),a=e.map(l=>{const c=$(l,"state");return`<tr>
+        <td class="accent">${i($(l,"name"))}</td>
+        <td class="${c==="firing"?"danger":c==="pending"?"warn":"ok"}">${i(c)}</td>
+        <td>${m(l,"for_seconds")}s</td>
+        <td>${_(l,"sinks").length}</td>
+        <td class="mono">${i($(l,"query"))}</td>
+      </tr>`}).join(""),o=r.map(l=>{const c=$(l,"state");return`<tr>
+        <td class="muted">${i(J($(l,"at")))}</td>
+        <td class="accent">${i($(l,"rule"))}</td>
+        <td class="${c==="firing"?"danger":"ok"}">${i($(l,"previous_state"))} → ${i(c)}</td>
+        <td>${_(l,"matched").length} series</td>
+      </tr>`}).join(""),d=n.map(l=>{const c=l?.status??{},f=$(c,"last_error");return`<tr>
+        <td class="accent">${i($(l,"name"))}</td>
+        <td>${(m(l,"sample")*100).toFixed(0)}%</td>
+        <td>${m(c,"scored")}</td>
+        <td class="danger">${i(f||"—")}</td>
+        <td class="mono">${i($(l,"command"))}</td>
+      </tr>`}).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Automation</span><span>${e.length} alert rules · ${n.length} scoring rules</span></div>
+      <div class="table-wrap">
+        <div class="panel-subhead">Alert rules (${e.length})</div>
+        <table>
+          <thead><tr><th>Rule</th><th>State</th><th>For</th><th>Sinks</th><th>Query</th></tr></thead>
+          <tbody>${a||'<tr><td colspan="5" class="muted">No alert rules. Create one with <code>tael alert create</code>.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Alert feed (${r.length})</div>
+        <table>
+          <thead><tr><th>When</th><th>Rule</th><th>Transition</th><th>Matched</th></tr></thead>
+          <tbody>${o||'<tr><td colspan="4" class="ok">Nothing has fired.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Scoring rules (${n.length})</div>
+        <table>
+          <thead><tr><th>Rule</th><th>Sample</th><th>Scored</th><th>Last error</th><th>Command</th></tr></thead>
+          <tbody>${d||'<tr><td colspan="5" class="muted">No scoring rules. Create one with <code>tael score rule create</code>.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Yt(t){const e=_(t,"clusters");if(e.length===0)return L("Clusters","Nothing embedded yet. Run `tael embed --command <your embedder>` first.");const r=e.map(n=>{const a=m(n,"cohesion"),o=a>=.85?"ok":a>=.7?"warn":"danger",d=$(n,"exemplar");return`<tr data-cluster-trace="${i(d)}">
+        <td class="accent">#${m(n,"id")}</td>
+        <td>${m(n,"size")}</td>
+        <td class="${o}">${a.toFixed(3)}</td>
+        <td class="danger">${a>=.7?"":"weak"}</td>
+        <td class="mono muted">${i(d)}</td>
+      </tr>`}).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title">
+        <span>Clusters</span>
+        <span>${e.length} over ${m(t,"corpus_size")} embedded traces · cohesion below 0.7 is weak</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Cluster</th><th>Size</th><th>Cohesion</th><th></th><th>Exemplar (click to open)</th></tr></thead>
+          <tbody>${r}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Jt(t){if(!t||t.length===0)return L("Review queue","Nothing waiting on a human.","ok");const e=t.filter(n=>n.state==="open").length,r=t.map(n=>`<tr ${n.traceId?`data-review-trace="${i(n.traceId)}"`:""}>
+        <td class="${n.state==="open"?"warn":"ok"}">${i(n.state)}</td>
+        <td class="mono muted">${i(n.traceId?O(n.traceId,12):"—")}</td>
+        <td>${i(n.question)}</td>
+        <td class="ok">${i(n.answer??"")}</td>
+      </tr>`).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Review queue</span><span>${e} open of ${t.length}</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>State</th><th>Trace</th><th>Question (click to open)</th><th>Answer</th></tr></thead>
+          <tbody>${r}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Xt(t){const e=_(t,"rows"),r=e.length>0&&e[0]&&typeof e[0]=="object"?Object.keys(e[0]):[],n=e.map(a=>`<tr>${r.map(o=>{const d=a?.[o],l=d==null?"":typeof d=="string"?d:JSON.stringify(d);return`<td>${i(l)}</td>`}).join("")}</tr>`).join("");return`
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>SQL</span><span>${e.length} rows</span></div>
+      <div class="sql-bar">
+        <textarea id="sql-input" class="sql-input" rows="3" spellcheck="false">${i(s.sqlQuery)}</textarea>
+        <button id="sql-run-btn" class="primary">Run</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>${r.map(a=>`<th>${i(a)}</th>`).join("")||"<th></th>"}</tr></thead>
+          <tbody>${n||'<tr><td class="muted">No rows.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `}function Kt(){const t=X(),e=R(),r=s.pinnedColumns.map(n=>`<th>${i(n)}</th>`).join("");return`
     <section class="split vertical">
       <div class="pane table-pane">
         <div class="pane-title">
           <span>Traces</span>
-          <span>${e.length}/${t.spans.length}</span>
+          <span>${t.length}/${s.spans.length}</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Time</th><th>Service</th><th>Operation</th><th>Duration</th><th>Status</th><th>Trace ID</th>${r}</tr></thead>
             <tbody>
-              ${e.map((a,n)=>`
-                <tr class="${t.selectedSpanIdx===n?"selected":""}" data-span-idx="${n}">
-                  <td class="muted">${i(se(a.startTime))}</td>
-                  <td style="color:${w(a.service)}">${i(a.service)}</td>
-                  <td>${i(a.operation)}</td>
-                  <td class="${A(a.durationMs)}">${a.durationMs.toFixed(0)}ms</td>
-                  <td class="${M(a.status)}">${i(a.status)}</td>
-                  <td class="mono muted">${i(k(a.traceId))}</td>
-                  ${t.pinnedColumns.map(l=>{const u=Ee(a,l);return`<td class="${u?"attr-cell":"muted"}">${i(u||"-")}</td>`}).join("")}
+              ${t.map((n,a)=>`
+                <tr class="${s.selectedSpanIdx===a?"selected":""}" data-span-idx="${a}">
+                  <td class="muted">${i(J(n.startTime))}</td>
+                  <td style="color:${C(n.service)}">${i(n.service)}</td>
+                  <td>${i(n.operation)}</td>
+                  <td class="${F(n.durationMs)}">${n.durationMs.toFixed(0)}ms</td>
+                  <td class="${N(n.status)}">${i(n.status)}</td>
+                  <td class="mono muted">${i(O(n.traceId))}</td>
+                  ${s.pinnedColumns.map(o=>{const d=Ft(n,o);return`<td class="${d?"attr-cell":"muted"}">${i(d||"-")}</td>`}).join("")}
                 </tr>
               `).join("")}
             </tbody>
           </table>
         </div>
       </div>
-      <aside class="pane detail-pane">${s?ne(s):'<div class="empty">No span selected.</div>'}</aside>
+      <aside class="pane detail-pane">${e?mt(e):'<div class="empty">No span selected.</div>'}</aside>
     </section>
-  `}function ne(e){return`
+  `}function mt(t){return`
     <div class="pane-title">
       <span>Span</span>
       <div class="button-row">
@@ -78,157 +238,157 @@
       </div>
     </div>
     <dl class="properties">
-      <dt>trace_id</dt><dd class="mono">${i(e.traceId)}</dd>
-      <dt>span_id</dt><dd class="mono">${i(e.spanId)}</dd>
-      <dt>parent</dt><dd class="mono">${i(e.parentSpanId??"none")}</dd>
-      <dt>service</dt><dd style="color:${w(e.service)}">${i(e.service)}</dd>
-      <dt>operation</dt><dd>${i(e.operation)}</dd>
-      <dt>status</dt><dd class="${M(e.status)}">${i(e.status)}</dd>
-      <dt>duration</dt><dd class="${A(e.durationMs)}">${e.durationMs.toFixed(2)}ms</dd>
-      <dt>start</dt><dd>${i(e.startTime)}</dd>
+      <dt>trace_id</dt><dd class="mono">${i(t.traceId)}</dd>
+      <dt>span_id</dt><dd class="mono">${i(t.spanId)}</dd>
+      <dt>parent</dt><dd class="mono">${i(t.parentSpanId??"none")}</dd>
+      <dt>service</dt><dd style="color:${C(t.service)}">${i(t.service)}</dd>
+      <dt>operation</dt><dd>${i(t.operation)}</dd>
+      <dt>status</dt><dd class="${N(t.status)}">${i(t.status)}</dd>
+      <dt>duration</dt><dd class="${F(t.durationMs)}">${t.durationMs.toFixed(2)}ms</dd>
+      <dt>start</dt><dd>${i(t.startTime)}</dd>
     </dl>
-    <pre class="json-view">${i(JSON.stringify({attributes:e.attributes,events:e.events},null,2))}</pre>
-  `}function Re(){return`
+    <pre class="json-view">${i(JSON.stringify({attributes:t.attributes,events:t.events},null,2))}</pre>
+  `}function te(){return`
     <section class="pane table-pane full">
-      <div class="pane-title"><span>Services</span><span>${t.services.length}</span></div>
+      <div class="pane-title"><span>Services</span><span>${s.services.length}</span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Service</th><th>Spans</th><th>Traces</th><th>Avg Duration</th><th>Error Rate</th></tr></thead>
           <tbody>
-            ${t.services.map((e,s)=>`
-              <tr class="${t.selectedServiceIdx===s?"selected":""}" data-service-idx="${s}">
-                <td style="color:${w(e.name)}">${i(e.name)}</td>
-                <td>${e.spanCount}</td>
-                <td>${e.traceCount}</td>
-                <td class="${A(e.avgDurationMs)}">${e.avgDurationMs.toFixed(1)}ms</td>
-                <td class="${e.errorRate>.05?"danger":e.errorRate>0?"warn":"ok"}">${(e.errorRate*100).toFixed(1)}%</td>
+            ${s.services.map((t,e)=>`
+              <tr class="${s.selectedServiceIdx===e?"selected":""}" data-service-idx="${e}">
+                <td style="color:${C(t.name)}">${i(t.name)}</td>
+                <td>${t.spanCount}</td>
+                <td>${t.traceCount}</td>
+                <td class="${F(t.avgDurationMs)}">${t.avgDurationMs.toFixed(1)}ms</td>
+                <td class="${t.errorRate>.05?"danger":t.errorRate>0?"warn":"ok"}">${(t.errorRate*100).toFixed(1)}%</td>
               </tr>
             `).join("")}
           </tbody>
         </table>
       </div>
     </section>
-  `}function Oe(){const e=t.evalRun,s=D(),r=t.selectedEvalIdx==null?null:s[t.selectedEvalIdx];if(!e)return'<section class="pane full"><div class="empty">No eval runs found.</div></section>';const a=typeof e.avgScores.correctness=="number"?e.avgScores.correctness.toFixed(3):"-";return`
+  `}function ee(){const t=s.evalRun,e=H(),r=s.selectedEvalIdx==null?null:e[s.selectedEvalIdx];if(!t)return'<section class="pane full"><div class="empty">No eval runs found.</div></section>';const n=typeof t.avgScores.correctness=="number"?t.avgScores.correctness.toFixed(3):"-";return`
     <section class="split vertical eval-layout">
       <div class="pane run-strip">
         <div class="run-stat grow">
           <span class="run-stat-label">Suite</span>
-          <span class="run-stat-value">${i(e.suiteId)}</span>
-          <span class="run-stat-sub mono">${i(e.runId)}</span>
+          <span class="run-stat-value">${i(t.suiteId)}</span>
+          <span class="run-stat-sub mono">${i(t.runId)}</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Status</span>
-          <span class="run-stat-value ${M(e.status)}">${i(e.status)}</span>
+          <span class="run-stat-value ${N(t.status)}">${i(t.status)}</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Cases</span>
-          <span class="run-stat-value">${e.observedCases}<span class="run-stat-sub"> / ${e.caseCount??"?"}</span></span>
+          <span class="run-stat-value">${t.observedCases}<span class="run-stat-sub"> / ${t.caseCount??"?"}</span></span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Pass</span>
-          <span class="run-stat-value ok">${e.passedCases}</span>
+          <span class="run-stat-value ok">${t.passedCases}</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Fail</span>
-          <span class="run-stat-value ${e.failedCases>0?"danger":""}">${e.failedCases}</span>
+          <span class="run-stat-value ${t.failedCases>0?"danger":""}">${t.failedCases}</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Avg score</span>
-          <span class="run-stat-value">${a}</span>
+          <span class="run-stat-value">${n}</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Cost</span>
-          <span class="run-stat-value">$${e.costUsd.toFixed(4)}</span>
+          <span class="run-stat-value">$${t.costUsd.toFixed(4)}</span>
         </div>
-        <button id="failures-only-btn" class="spacer ${t.evalFailuresOnly?"active":""}">Failures</button>
+        <button id="failures-only-btn" class="spacer ${s.evalFailuresOnly?"active":""}">Failures</button>
       </div>
       <div class="pane table-pane">
-        <div class="pane-title"><span>Cases</span><span>${s.length}</span></div>
+        <div class="pane-title"><span>Cases</span><span>${e.length}</span></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Status</th><th>Case</th><th>Score</th><th>Cost</th><th>Duration</th><th>Trace</th></tr></thead>
             <tbody>
-              ${s.map((n,l)=>{const u=typeof n.scores.correctness=="number"?n.scores.correctness.toFixed(3):Object.values(n.scores).find(f=>typeof f=="number")?.toString()??"-";return`
-                  <tr class="${t.selectedEvalIdx===l?"selected":""}" data-eval-idx="${l}">
-                    <td class="${M(n.status)}">${i(n.status.toUpperCase())}</td>
-                    <td>${i(n.caseId)}</td>
-                    <td>${i(u)}</td>
-                    <td>${n.costUsd.toFixed(4)}</td>
-                    <td>${n.durationMs==null?"-":`${n.durationMs.toFixed(0)}ms`}</td>
-                    <td class="mono muted">${i(n.traceId?k(n.traceId,12):"-")}</td>
+              ${e.map((a,o)=>{const d=typeof a.scores.correctness=="number"?a.scores.correctness.toFixed(3):Object.values(a.scores).find(l=>typeof l=="number")?.toString()??"-";return`
+                  <tr class="${s.selectedEvalIdx===o?"selected":""}" data-eval-idx="${o}">
+                    <td class="${N(a.status)}">${i(a.status.toUpperCase())}</td>
+                    <td>${i(a.caseId)}</td>
+                    <td>${i(d)}</td>
+                    <td>${a.costUsd.toFixed(4)}</td>
+                    <td>${a.durationMs==null?"-":`${a.durationMs.toFixed(0)}ms`}</td>
+                    <td class="mono muted">${i(a.traceId?O(a.traceId,12):"-")}</td>
                   </tr>
                 `}).join("")}
             </tbody>
           </table>
         </div>
       </div>
-      <aside class="pane detail-pane">${r?Fe(r):'<div class="empty">No case selected.</div>'}</aside>
+      <aside class="pane detail-pane">${r?se(r):'<div class="empty">No case selected.</div>'}</aside>
     </section>
-  `}function Fe(e){return`
+  `}function se(t){return`
     <div class="pane-title">
-      <span>${i(e.caseId)}</span>
-      ${e.traceId?'<button id="open-eval-trace-btn">Open Trace</button>':""}
+      <span>${i(t.caseId)}</span>
+      ${t.traceId?'<button id="open-eval-trace-btn">Open Trace</button>':""}
     </div>
     <dl class="properties">
-      <dt>status</dt><dd class="${M(e.status)}">${i(e.status)}</dd>
-      <dt>trace</dt><dd class="mono">${i(e.traceId??"-")}</dd>
-      <dt>duration</dt><dd>${e.durationMs==null?"-":`${e.durationMs.toFixed(1)}ms`}</dd>
-      <dt>cost</dt><dd>$${e.costUsd.toFixed(4)}</dd>
+      <dt>status</dt><dd class="${N(t.status)}">${i(t.status)}</dd>
+      <dt>trace</dt><dd class="mono">${i(t.traceId??"-")}</dd>
+      <dt>duration</dt><dd>${t.durationMs==null?"-":`${t.durationMs.toFixed(1)}ms`}</dd>
+      <dt>cost</dt><dd>$${t.costUsd.toFixed(4)}</dd>
     </dl>
-    <pre class="json-view">${i(JSON.stringify(e.scores,null,2))}</pre>
-    ${e.comments.length?`<div class="comment-list">${e.comments.map(ie).join("")}</div>`:""}
-  `}function De(){const e=H();return`
+    <pre class="json-view">${i(JSON.stringify(t.scores,null,2))}</pre>
+    ${t.comments.length?`<div class="comment-list">${t.comments.map(ht).join("")}</div>`:""}
+  `}function re(){const t=st();return`
     <section class="split vertical">
       <div class="pane timeline-pane">
         <div class="pane-title">
           <span>Live Timeline</span>
-          <span>${j().length}/${t.liveTraces.length} traces</span>
+          <span>${K().length}/${s.liveTraces.length} traces</span>
         </div>
         <canvas id="timeline-canvas" class="timeline-canvas"></canvas>
       </div>
       <aside class="pane detail-pane">
-        ${e?`
+        ${t?`
           <div class="pane-title"><span>Trace</span><button id="open-selected-live-trace-btn">Open Trace</button></div>
           <dl class="properties">
-            <dt>trace_id</dt><dd class="mono">${i(e.traceId)}</dd>
-            <dt>service</dt><dd style="color:${w(e.service)}">${i(e.service)}</dd>
-            <dt>operation</dt><dd>${i(e.operation)}</dd>
-            <dt>status</dt><dd class="${e.hasError?"danger":"ok"}">${e.hasError?"error":"ok"}</dd>
-            <dt>duration</dt><dd class="${A(e.durationMs)}">${e.durationMs.toFixed(2)}ms</dd>
-            <dt>spans</dt><dd>${e.spanCount}</dd>
+            <dt>trace_id</dt><dd class="mono">${i(t.traceId)}</dd>
+            <dt>service</dt><dd style="color:${C(t.service)}">${i(t.service)}</dd>
+            <dt>operation</dt><dd>${i(t.operation)}</dd>
+            <dt>status</dt><dd class="${t.hasError?"danger":"ok"}">${t.hasError?"error":"ok"}</dd>
+            <dt>duration</dt><dd class="${F(t.durationMs)}">${t.durationMs.toFixed(2)}ms</dd>
+            <dt>spans</dt><dd>${t.spanCount}</dd>
           </dl>
         `:'<div class="empty">No trace selected.</div>'}
       </aside>
     </section>
-  `}function We(){const e=g();return`
+  `}function ae(){const t=k();return`
     <section class="detail-grid">
       <div class="pane waterfall-pane">
         <div class="pane-title">
-          <span>${i(t.currentTraceId?`Trace ${k(t.currentTraceId)}`:"Trace")}</span>
+          <span>${i(s.currentTraceId?`Trace ${O(s.currentTraceId)}`:"Trace")}</span>
           <button id="back-btn">Back</button>
         </div>
         <canvas id="waterfall-canvas" class="waterfall-canvas"></canvas>
       </div>
       <aside class="pane span-side">
-        ${e?ne(e):'<div class="empty">No span selected.</div>'}
+        ${t?mt(t):'<div class="empty">No span selected.</div>'}
       </aside>
       <section class="pane comments-pane">
-        <div class="pane-title"><span>Comments</span><span>${t.comments.length}</span></div>
-        <div class="comment-list">${t.comments.map(ie).join("")||'<div class="empty compact">No comments.</div>'}</div>
+        <div class="pane-title"><span>Comments</span><span>${s.comments.length}</span></div>
+        <div class="comment-list">${s.comments.map(ht).join("")||'<div class="empty compact">No comments.</div>'}</div>
         <div class="comment-form">
-          <input id="comment-input" value="${i(t.commentDraft)}" />
+          <input id="comment-input" value="${i(s.commentDraft)}" />
           <button id="submit-comment-btn">Add</button>
         </div>
       </section>
     </section>
-  `}function ie(e){const s=se(e.createdAt).slice(0,8);return`
+  `}function ht(t){const e=J(t.createdAt).slice(0,8);return`
     <div class="comment">
-      <span class="muted">${i(s)}</span>
-      <strong>${i(e.author)}</strong>
-      ${e.spanId?`<span class="mono muted">${i(k(e.spanId,8))}</span>`:""}
-      <p>${i(e.body)}</p>
+      <span class="muted">${i(e)}</span>
+      <strong>${i(t.author)}</strong>
+      ${t.spanId?`<span class="mono muted">${i(O(t.spanId,8))}</span>`:""}
+      <p>${i(t.body)}</p>
     </div>
-  `}function qe(){const e=Me();return`
+  `}function ne(){const t=Ot();return`
     <div class="overlay">
       <section class="modal attr-modal">
         <div class="modal-title">
@@ -236,35 +396,35 @@
           <button id="close-attr-picker-btn">Close</button>
         </div>
         <div class="modal-body">
-          ${e.length?e.map(s=>`
+          ${t.length?t.map(e=>`
                 <label class="check-row">
-                  <input type="checkbox" data-attr-key="${i(s)}" ${t.pinnedColumns.includes(s)?"checked":""} />
-                  <span class="mono">${i(s)}</span>
+                  <input type="checkbox" data-attr-key="${i(e)}" ${s.pinnedColumns.includes(e)?"checked":""} />
+                  <span class="mono">${i(e)}</span>
                 </label>
               `).join(""):'<div class="empty compact">No attributes found.</div>'}
         </div>
       </section>
     </div>
-  `}function Pe(e){return`
+  `}function ie(t){return`
     <div class="overlay">
       <section class="modal span-modal">
         <div class="modal-title">
-          <span>${i(e.service)} / ${i(e.operation)}</span>
+          <span>${i(t.service)} / ${i(t.operation)}</span>
           <button id="close-span-viewer-btn">Close</button>
         </div>
         <div class="modal-body split-modal">
           <dl class="properties modal-properties">
-            <dt>trace_id</dt><dd class="mono">${i(e.traceId)}</dd>
-            <dt>span_id</dt><dd class="mono">${i(e.spanId)}</dd>
-            <dt>parent</dt><dd class="mono">${i(e.parentSpanId??"none")}</dd>
-            <dt>service</dt><dd style="color:${w(e.service)}">${i(e.service)}</dd>
-            <dt>operation</dt><dd>${i(e.operation)}</dd>
-            <dt>status</dt><dd class="${M(e.status)}">${i(e.status)}</dd>
-            <dt>duration</dt><dd class="${A(e.durationMs)}">${e.durationMs.toFixed(2)}ms</dd>
-            <dt>start</dt><dd>${i(e.startTime)}</dd>
+            <dt>trace_id</dt><dd class="mono">${i(t.traceId)}</dd>
+            <dt>span_id</dt><dd class="mono">${i(t.spanId)}</dd>
+            <dt>parent</dt><dd class="mono">${i(t.parentSpanId??"none")}</dd>
+            <dt>service</dt><dd style="color:${C(t.service)}">${i(t.service)}</dd>
+            <dt>operation</dt><dd>${i(t.operation)}</dd>
+            <dt>status</dt><dd class="${N(t.status)}">${i(t.status)}</dd>
+            <dt>duration</dt><dd class="${F(t.durationMs)}">${t.durationMs.toFixed(2)}ms</dd>
+            <dt>start</dt><dd>${i(t.startTime)}</dd>
           </dl>
-          <pre class="json-view modal-json">${i(JSON.stringify({attributes:e.attributes,events:e.events},null,2))}</pre>
+          <pre class="json-view modal-json">${i(JSON.stringify({attributes:t.attributes,events:t.events},null,2))}</pre>
         </div>
       </section>
     </div>
-  `}function Ve(){p.querySelector("#server-input")?.addEventListener("change",e=>{t.server=e.currentTarget.value.trim()}),p.querySelector("#service-input")?.addEventListener("change",e=>{t.serviceFilter=e.currentTarget.value.trim(),x()}),p.querySelector("#status-input")?.addEventListener("change",e=>{t.statusFilter=e.currentTarget.value,x()}),p.querySelector("#last-input")?.addEventListener("change",e=>{t.lastWindow=e.currentTarget.value.trim()||"1h",W().catch(s=>t.error=String(s)).finally(o)}),p.querySelector("#filter-input")?.addEventListener("input",e=>{t.textFilter=e.currentTarget.value,t.selectedSpanIdx=null,t.selectedTraceIdx=null,t.selectedEvalIdx=null,o()}),p.querySelector("#clear-filter-btn")?.addEventListener("click",()=>{t.textFilter="",o()}),p.querySelector("#connect-btn")?.addEventListener("click",x),p.querySelector("#refresh-btn")?.addEventListener("click",()=>{Promise.all([W(),Z(),B()]).catch(e=>t.error=String(e)).finally(o)}),p.querySelector("#pause-btn")?.addEventListener("click",()=>{t.paused=!t.paused,o()}),p.querySelectorAll("[data-tab]").forEach(e=>{e.addEventListener("click",()=>{t.tab=e.dataset.tab,o()})}),p.querySelectorAll("[data-span-idx]").forEach(e=>{e.addEventListener("click",()=>{t.selectedSpanIdx=Number(e.dataset.spanIdx),o()}),e.addEventListener("dblclick",()=>{const s=U()[Number(e.dataset.spanIdx)];s&&E(s.traceId)})}),p.querySelector("#open-selected-trace-btn")?.addEventListener("click",()=>{const e=C()??g();e&&E(e.traceId)}),p.querySelector("#pin-columns-btn")?.addEventListener("click",()=>{t.attrPickerOpen=!0,o()}),p.querySelector("#view-span-btn")?.addEventListener("click",()=>{const e=C()??g();e&&(t.spanViewer=e,o())}),p.querySelector("#close-attr-picker-btn")?.addEventListener("click",()=>{t.attrPickerOpen=!1,o()}),p.querySelectorAll("[data-attr-key]").forEach(e=>{e.addEventListener("change",()=>{const s=e.dataset.attrKey;s&&Ce(s),o()})}),p.querySelector("#close-span-viewer-btn")?.addEventListener("click",()=>{t.spanViewer=null,o()}),p.querySelectorAll("[data-service-idx]").forEach(e=>{e.addEventListener("click",()=>{const s=t.services[Number(e.dataset.serviceIdx)];s&&(t.selectedServiceIdx=Number(e.dataset.serviceIdx),t.serviceFilter=s.name,t.tab="traces",x())})}),p.querySelector("#failures-only-btn")?.addEventListener("click",()=>{t.evalFailuresOnly=!t.evalFailuresOnly,t.selectedEvalIdx=null,o()}),p.querySelectorAll("[data-eval-idx]").forEach(e=>{e.addEventListener("click",()=>{t.selectedEvalIdx=Number(e.dataset.evalIdx),o()}),e.addEventListener("dblclick",()=>{const s=D()[Number(e.dataset.evalIdx)];s?.traceId&&E(s.traceId)})}),p.querySelector("#open-eval-trace-btn")?.addEventListener("click",()=>{const e=t.selectedEvalIdx==null?null:D()[t.selectedEvalIdx];e?.traceId&&E(e.traceId)}),p.querySelector("#open-selected-live-trace-btn")?.addEventListener("click",()=>{const e=H();e&&E(e.traceId)}),p.querySelector("#back-btn")?.addEventListener("click",()=>{t.tab=t.prevTab,o()}),p.querySelector("#comment-input")?.addEventListener("input",e=>{t.commentDraft=e.currentTarget.value}),p.querySelector("#submit-comment-btn")?.addEventListener("click",xe)}function Ue(){const e=p.querySelector("#timeline-canvas");e&&je(e);const s=p.querySelector("#waterfall-canvas");s&&Ze(s)}function le(e){const s=e.getBoundingClientRect(),r=window.devicePixelRatio||1;e.width=Math.max(1,Math.floor(s.width*r)),e.height=Math.max(1,Math.floor(s.height*r));const a=e.getContext("2d");if(!a)throw new Error("2d canvas unavailable");return a.scale(r,r),a.clearRect(0,0,s.width,s.height),a}function je(e){const s=j(),r=le(e),a=e.getBoundingClientRect(),n=260,l=26,u=34,f=Math.max(a.width-n-96,1),d=s.reduce((c,S)=>Math.max(c,S.endTimeMs),0)-t.timelineWindowMs,m=d+t.timelineWindowMs*t.liveZoom.start,b=d+t.timelineWindowMs*t.liveZoom.end,y=Math.max(b-m,1);r.fillStyle=q,r.fillRect(0,0,a.width,a.height),oe(r,n,12,f,m,b);const T=s.filter(c=>c.endTimeMs>=m&&c.startTimeMs<=b);T.forEach((c,S)=>{const h=u+S*l;if(h>a.height-l)return;const pe=s.indexOf(c)===t.selectedTraceIdx;ce(r,0,h-3,a.width,l,pe),r.fillStyle=w(c.service),r.font=Y,r.fillText(`${c.service} ${c.operation}`.slice(0,34),18,h+13);const G=n+I((c.startTimeMs-m)/y,0,1)*f,fe=Math.max(2,c.durationMs/y*f);r.fillStyle=c.hasError?Q:w(c.service),de(r,G,h,Math.min(fe,n+f-G),14,3),r.fill(),r.fillStyle=J,r.fillText(`${c.durationMs.toFixed(0)}ms`,n+f+14,h+12),r.fillStyle=K,r.fillText(String(c.spanCount),n+f+68,h+12)}),e.onmousemove=c=>{const S=Math.floor((c.offsetY-u)/l),h=T[S];e.title=h?`${h.service} ${h.operation} ${h.durationMs.toFixed(1)}ms`:""},e.onclick=c=>{const S=Math.floor((c.offsetY-u)/l),h=T[S];h&&(t.selectedTraceIdx=s.indexOf(h),o())},e.ondblclick=()=>{const c=H();c&&E(c.traceId)},e.onwheel=c=>{c.preventDefault();const S=c.deltaY>0?1.18:.84;ue(t.liveZoom,S,c.offsetX/a.width),o()}}function Ze(e){const s=le(e),r=e.getBoundingClientRect(),a=t.waterfallRows,n=300,l=28,u=36,f=Math.max(r.width-n-92,1);s.fillStyle=q,s.fillRect(0,0,r.width,r.height),oe(s,n,12,f,t.detailZoom.start,t.detailZoom.end,!0),a.forEach((v,d)=>{const m=t.traceSpans[v.spanIdx],b=u+d*l;if(b>r.height-l)return;const y=t.selectedWaterfallIdx===d;ce(s,0,b-4,r.width,l,y),s.font=Y,s.fillStyle=w(m.service),s.fillText(`${" ".repeat(v.depth*2)}${m.service} ${m.operation}`.slice(0,42),18,b+13);const T=t.detailZoom.end-t.detailZoom.start,c=n+(v.offsetPct-t.detailZoom.start)/T*f,S=Math.max(2,v.widthPct/T*f);c+S<n||c>n+f||(s.fillStyle=m.status==="error"?Q:w(m.service),de(s,I(c,n,n+f),b,Math.min(S,n+f-c),15,3),s.fill(),s.fillStyle=J,s.fillText(`${m.durationMs.toFixed(0)}ms`,n+f+14,b+12))}),e.onclick=v=>{const d=Math.floor((v.offsetY-u)/l);a[d]&&(t.selectedWaterfallIdx=d,o())},e.ondblclick=()=>{const v=g();v&&(t.selectedSpanIdx=t.spans.findIndex(d=>d.spanId===v.spanId))},e.onwheel=v=>{v.preventDefault(),ue(t.detailZoom,v.deltaY>0?1.18:.84,v.offsetX/r.width),o()}}function oe(e,s,r,a,n,l,u=!1){e.strokeStyle=ye,e.fillStyle=K,e.font=he,e.beginPath(),e.moveTo(s,r+12),e.lineTo(s+a,r+12),e.stroke();for(let f=0;f<=4;f+=1){const v=s+a*f/4;e.beginPath(),e.moveTo(v,r+7),e.lineTo(v,r+17),e.stroke();const d=n+(l-n)*f/4,m=u?`${Math.round(d*100)}%`:f===4?"now":`-${Math.round((l-d)/1e3)}s`;e.fillText(m,v+4,r+7)}}function ce(e,s,r,a,n,l){e.fillStyle=l?Se:r%56===0?$e:q,e.fillRect(s,r,a,n)}function de(e,s,r,a,n,l){const u=Math.min(l,a/2,n/2);e.beginPath(),e.moveTo(s+u,r),e.arcTo(s+a,r,s+a,r+n,u),e.arcTo(s+a,r+n,s,r+n,u),e.arcTo(s,r+n,s,r,u),e.arcTo(s,r,s+a,r,u),e.closePath()}function ue(e,s,r){const a=e.end-e.start,n=I(a*s,.03,1),l=e.start+a*I(r,0,1);e.start=I(l-n*r,0,1-n),e.end=e.start+n}window.addEventListener("keydown",e=>{if(!(e.target instanceof HTMLInputElement||e.target instanceof HTMLSelectElement)){if(e.key==="Escape"&&t.spanViewer){t.spanViewer=null,o();return}if(e.key==="Escape"&&t.attrPickerOpen){t.attrPickerOpen=!1,o();return}if(e.key==="1"&&(t.tab="traces"),e.key==="2"&&(t.tab="services"),e.key==="3"&&(t.tab="evals"),e.key==="4"&&(t.tab="timeline"),e.key==="Escape"&&t.tab==="detail"&&(t.tab=t.prevTab),e.key===" "&&(t.paused=!t.paused),e.key==="a"&&(C()||g())&&(t.attrPickerOpen=!0),e.key==="v"){const s=C()??g();s&&(t.spanViewer=s)}o()}});window.addEventListener("resize",o);async function Be(){ae();try{const e=await $("initial_server");e.trim()&&(t.server=e.trim())}catch(e){console.warn("failed to load initial server",e)}try{await ke()}catch(e){t.error=`failed to install live listeners: ${String(e)}`,o()}x()}Be();F=window.setInterval(()=>{t.connection==="connected"&&Promise.all([Z(),B()]).catch(e=>{t.error=String(e),o()})},5e3);window.addEventListener("beforeunload",()=>{R?.(),O?.(),F!=null&&window.clearInterval(F)});
+  `}function oe(){p.querySelector("#server-input")?.addEventListener("change",e=>{s.server=e.currentTarget.value.trim()}),p.querySelector("#service-input")?.addEventListener("change",e=>{s.serviceFilter=e.currentTarget.value.trim(),q()}),p.querySelector("#status-input")?.addEventListener("change",e=>{s.statusFilter=e.currentTarget.value,q()}),p.querySelector("#last-input")?.addEventListener("change",e=>{s.lastWindow=e.currentTarget.value.trim()||"1h",Z().catch(r=>s.error=String(r)).finally(u)}),p.querySelector("#filter-input")?.addEventListener("input",e=>{s.textFilter=e.currentTarget.value,s.selectedSpanIdx=null,s.selectedTraceIdx=null,s.selectedEvalIdx=null,u()}),p.querySelector("#clear-filter-btn")?.addEventListener("click",()=>{s.textFilter="",u()}),p.querySelector("#connect-btn")?.addEventListener("click",q),p.querySelector("#refresh-btn")?.addEventListener("click",()=>{if(V(s.tab)){z(s.tab);return}Promise.all([Z(),tt(),et()]).catch(e=>s.error=String(e)).finally(u)}),p.querySelector("#pause-btn")?.addEventListener("click",()=>{s.paused=!s.paused,u()}),p.querySelectorAll("[data-tab]").forEach(e=>{e.addEventListener("click",()=>{const r=e.dataset.tab;if(V(r)){Vt(r);return}s.tab=r,u()})}),p.querySelectorAll("[data-cluster-trace]").forEach(e=>{e.addEventListener("click",()=>{M(e.dataset.clusterTrace)})}),p.querySelectorAll("[data-review-trace]").forEach(e=>{e.addEventListener("click",()=>{M(e.dataset.reviewTrace)})});const t=p.querySelector("#sql-input");t?.addEventListener("input",()=>{s.sqlQuery=t.value}),p.querySelector("#sql-run-btn")?.addEventListener("click",()=>{s.sqlQuery.trim()&&z("sql")}),p.querySelectorAll("[data-span-idx]").forEach(e=>{e.addEventListener("click",()=>{s.selectedSpanIdx=Number(e.dataset.spanIdx),u()}),e.addEventListener("dblclick",()=>{const r=X()[Number(e.dataset.spanIdx)];r&&M(r.traceId)})}),p.querySelector("#open-selected-trace-btn")?.addEventListener("click",()=>{const e=R()??k();e&&M(e.traceId)}),p.querySelector("#pin-columns-btn")?.addEventListener("click",()=>{s.attrPickerOpen=!0,u()}),p.querySelector("#view-span-btn")?.addEventListener("click",()=>{const e=R()??k();e&&(s.spanViewer=e,u())}),p.querySelector("#close-attr-picker-btn")?.addEventListener("click",()=>{s.attrPickerOpen=!1,u()}),p.querySelectorAll("[data-attr-key]").forEach(e=>{e.addEventListener("change",()=>{const r=e.dataset.attrKey;r&&Dt(r),u()})}),p.querySelector("#close-span-viewer-btn")?.addEventListener("click",()=>{s.spanViewer=null,u()}),p.querySelectorAll("[data-service-idx]").forEach(e=>{e.addEventListener("click",()=>{const r=s.services[Number(e.dataset.serviceIdx)];r&&(s.selectedServiceIdx=Number(e.dataset.serviceIdx),s.serviceFilter=r.name,s.tab="traces",q())})}),p.querySelector("#failures-only-btn")?.addEventListener("click",()=>{s.evalFailuresOnly=!s.evalFailuresOnly,s.selectedEvalIdx=null,u()}),p.querySelectorAll("[data-eval-idx]").forEach(e=>{e.addEventListener("click",()=>{s.selectedEvalIdx=Number(e.dataset.evalIdx),u()}),e.addEventListener("dblclick",()=>{const r=H()[Number(e.dataset.evalIdx)];r?.traceId&&M(r.traceId)})}),p.querySelector("#open-eval-trace-btn")?.addEventListener("click",()=>{const e=s.selectedEvalIdx==null?null:H()[s.selectedEvalIdx];e?.traceId&&M(e.traceId)}),p.querySelector("#open-selected-live-trace-btn")?.addEventListener("click",()=>{const e=st();e&&M(e.traceId)}),p.querySelector("#back-btn")?.addEventListener("click",()=>{s.tab=s.prevTab,u()}),p.querySelector("#comment-input")?.addEventListener("input",e=>{s.commentDraft=e.currentTarget.value}),p.querySelector("#submit-comment-btn")?.addEventListener("click",jt)}function le(){const t=p.querySelector("#timeline-canvas");t&&de(t);const e=p.querySelector("#waterfall-canvas");e&&ce(e)}function bt(t){const e=t.getBoundingClientRect(),r=window.devicePixelRatio||1;t.width=Math.max(1,Math.floor(e.width*r)),t.height=Math.max(1,Math.floor(e.height*r));const n=t.getContext("2d");if(!n)throw new Error("2d canvas unavailable");return n.scale(r,r),n.clearRect(0,0,e.width,e.height),n}function de(t){const e=K(),r=bt(t),n=t.getBoundingClientRect(),a=260,o=26,d=34,l=Math.max(n.width-a-96,1),f=e.reduce((v,g)=>Math.max(v,g.endTimeMs),0)-s.timelineWindowMs,b=f+s.timelineWindowMs*s.liveZoom.start,y=f+s.timelineWindowMs*s.liveZoom.end,S=Math.max(y-b,1);r.fillStyle=Q,r.fillRect(0,0,n.width,n.height),$t(r,a,12,l,b,y);const x=e.filter(v=>v.endTimeMs>=b&&v.startTimeMs<=y);x.forEach((v,g)=>{const w=d+g*o;if(w>n.height-o)return;const St=e.indexOf(v)===s.selectedTraceIdx;yt(r,0,w-3,n.width,o,St),r.fillStyle=C(v.service),r.font=it,r.fillText(`${v.service} ${v.operation}`.slice(0,34),18,w+13);const rt=a+T((v.startTimeMs-b)/S,0,1)*l,It=Math.max(2,v.durationMs/S*l);r.fillStyle=v.hasError?dt:C(v.service),wt(r,rt,w,Math.min(It,a+l-rt),14,3),r.fill(),r.fillStyle=ot,r.fillText(`${v.durationMs.toFixed(0)}ms`,a+l+14,w+12),r.fillStyle=lt,r.fillText(String(v.spanCount),a+l+68,w+12)}),t.onmousemove=v=>{const g=Math.floor((v.offsetY-d)/o),w=x[g];t.title=w?`${w.service} ${w.operation} ${w.durationMs.toFixed(1)}ms`:""},t.onclick=v=>{const g=Math.floor((v.offsetY-d)/o),w=x[g];w&&(s.selectedTraceIdx=e.indexOf(w),u())},t.ondblclick=()=>{const v=st();v&&M(v.traceId)},t.onwheel=v=>{v.preventDefault();const g=v.deltaY>0?1.18:.84;gt(s.liveZoom,g,v.offsetX/n.width),u()}}function ce(t){const e=bt(t),r=t.getBoundingClientRect(),n=s.waterfallRows,a=300,o=28,d=36,l=Math.max(r.width-a-92,1);e.fillStyle=Q,e.fillRect(0,0,r.width,r.height),$t(e,a,12,l,s.detailZoom.start,s.detailZoom.end,!0),n.forEach((c,f)=>{const b=s.traceSpans[c.spanIdx],y=d+f*o;if(y>r.height-o)return;const S=s.selectedWaterfallIdx===f;yt(e,0,y-4,r.width,o,S),e.font=it,e.fillStyle=C(b.service),e.fillText(`${" ".repeat(c.depth*2)}${b.service} ${b.operation}`.slice(0,42),18,y+13);const x=s.detailZoom.end-s.detailZoom.start,v=a+(c.offsetPct-s.detailZoom.start)/x*l,g=Math.max(2,c.widthPct/x*l);v+g<a||v>a+l||(e.fillStyle=b.status==="error"?dt:C(b.service),wt(e,T(v,a,a+l),y,Math.min(g,a+l-v),15,3),e.fill(),e.fillStyle=ot,e.fillText(`${b.durationMs.toFixed(0)}ms`,a+l+14,y+12))}),t.onclick=c=>{const f=Math.floor((c.offsetY-d)/o);n[f]&&(s.selectedWaterfallIdx=f,u())},t.ondblclick=()=>{const c=k();c&&(s.selectedSpanIdx=s.spans.findIndex(f=>f.spanId===c.spanId))},t.onwheel=c=>{c.preventDefault(),gt(s.detailZoom,c.deltaY>0?1.18:.84,c.offsetX/r.width),u()}}function $t(t,e,r,n,a,o,d=!1){t.strokeStyle=At,t.fillStyle=lt,t.font=Mt,t.beginPath(),t.moveTo(e,r+12),t.lineTo(e+n,r+12),t.stroke();for(let l=0;l<=4;l+=1){const c=e+n*l/4;t.beginPath(),t.moveTo(c,r+7),t.lineTo(c,r+17),t.stroke();const f=a+(o-a)*l/4,b=d?`${Math.round(f*100)}%`:l===4?"now":`-${Math.round((o-f)/1e3)}s`;t.fillText(b,c+4,r+7)}}function yt(t,e,r,n,a,o){t.fillStyle=o?xt:r%56===0?kt:Q,t.fillRect(e,r,n,a)}function wt(t,e,r,n,a,o){const d=Math.min(o,n/2,a/2);t.beginPath(),t.moveTo(e+d,r),t.arcTo(e+n,r,e+n,r+a,d),t.arcTo(e+n,r+a,e,r+a,d),t.arcTo(e,r+a,e,r,d),t.arcTo(e,r,e+n,r,d),t.closePath()}function gt(t,e,r){const n=t.end-t.start,a=T(n*e,.03,1),o=t.start+n*T(r,0,1);t.start=T(o-a*r,0,1-a),t.end=t.start+a}window.addEventListener("keydown",t=>{if(!(t.target instanceof HTMLInputElement||t.target instanceof HTMLSelectElement)){if(t.key==="Escape"&&s.spanViewer){s.spanViewer=null,u();return}if(t.key==="Escape"&&s.attrPickerOpen){s.attrPickerOpen=!1,u();return}if(t.key==="1"&&(s.tab="traces"),t.key==="2"&&(s.tab="services"),t.key==="3"&&(s.tab="evals"),t.key==="4"&&(s.tab="timeline"),t.key==="Escape"&&s.tab==="detail"&&(s.tab=s.prevTab),t.key===" "&&(s.paused=!s.paused),t.key==="a"&&(R()||k())&&(s.attrPickerOpen=!0),t.key==="v"){const e=R()??k();e&&(s.spanViewer=e)}u()}});window.addEventListener("resize",u);async function ue(){vt();try{const t=await h("initial_server");t.trim()&&(s.server=t.trim())}catch(t){console.warn("failed to load initial server",t)}try{await Bt()}catch(t){s.error=`failed to install live listeners: ${String(t)}`,u()}q()}ue();B=window.setInterval(()=>{s.connection==="connected"&&Promise.all([tt(),et()]).catch(t=>{s.error=String(t),u()})},5e3);window.addEventListener("beforeunload",()=>{j?.(),U?.(),B!=null&&window.clearInterval(B)});

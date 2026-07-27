@@ -37,6 +37,16 @@ struct AppState {
     /// Standby-side epoch gate for WAL replication (the coordinator's fencer).
     /// `None` keeps replication unfenced (single leader / tests).
     wal_fencer: Option<Arc<EpochFencer>>,
+    /// Alert rules and their live event feed.
+    alerts: Arc<crate::alerts::AlertStore>,
+    /// Online scoring rules.
+    scores: Arc<crate::scoring::ScoreRuleStore>,
+    /// Server-managed eval case suites.
+    suites: Arc<crate::suites::SuiteStore>,
+    /// Data directory, for the stores that read files directly.
+    data_dir: String,
+    /// Whether reads and writes are scoped by the caller's tenant.
+    multi_tenant: bool,
 }
 
 pub fn router(
@@ -45,6 +55,11 @@ pub fn router(
     bus: Arc<SpanBus>,
     log_bus: Arc<LogBus>,
     cluster: Option<Arc<ClusterCoordinator>>,
+    alerts: Arc<crate::alerts::AlertStore>,
+    scores: Arc<crate::scoring::ScoreRuleStore>,
+    suites: Arc<crate::suites::SuiteStore>,
+    data_dir: String,
+    multi_tenant: bool,
 ) -> Router {
     let wal_fencer = cluster.as_ref().map(|c| c.fencer());
     let state = AppState {
@@ -54,6 +69,11 @@ pub fn router(
         log_bus,
         cluster,
         wal_fencer,
+        alerts,
+        scores,
+        suites,
+        data_dir,
+        multi_tenant,
     };
     Router::new()
         .route("/api/v1/traces", get(query_traces))
@@ -69,15 +89,44 @@ pub fn router(
         .route("/api/v1/logs/live", get(live_logs))
         .route("/api/v1/metrics", get(query_metrics))
         .route("/api/v1/metrics/query", get(promql_query))
+        .route("/api/v1/metrics/rollups", get(query_rollups))
         .route("/api/v1/summary", get(query_summary))
         .route("/api/v1/anomalies", get(query_anomalies))
         .route("/api/v1/correlate", get(query_correlate))
+        .route("/api/v1/topology", get(query_topology))
+        .route("/api/v1/similar/{trace_id}", get(similar_traces))
+        .route("/api/v1/cluster", get(cluster_traces))
+        .route("/api/v1/embed", post(build_embeddings))
+        .route("/api/v1/diff", get(query_diff))
+        .route("/api/v1/metrics/{name}", get(get_metric))
         .route("/api/v1/sql", get(query_sql))
+        .route("/api/v1/alerts", get(list_alerts).post(create_alert))
+        .route("/api/v1/alerts/{name}", axum::routing::delete(delete_alert))
+        .route("/api/v1/alerts/events", get(alert_events))
+        .route("/api/v1/alerts/live", get(live_alerts))
+        .route(
+            "/api/v1/scores/rules",
+            get(list_score_rules).post(create_score_rule),
+        )
+        .route(
+            "/api/v1/scores/rules/{name}",
+            axum::routing::delete(delete_score_rule),
+        )
         .route("/api/v1/evals/runs", get(eval_runs))
         .route("/api/v1/evals/runs/{run_id}", get(eval_run))
         .route("/api/v1/evals/runs/{run_id}/cases", get(eval_cases))
         .route("/api/v1/evals/runs/{run_id}/scores", get(eval_scores))
         .route("/api/v1/evals/runs/{run_id}/compare", get(eval_compare))
+        .route("/api/v1/evals/suites", get(list_suites))
+        .route(
+            "/api/v1/evals/suites/{name}",
+            get(get_suite).post(push_suite),
+        )
+        .route(
+            "/api/v1/evals/suites/{name}/snapshots",
+            post(snapshot_suite),
+        )
+        .route("/api/v1/evals/suites/diff", get(diff_suites))
         .route("/api/v1/evals/scores", post(eval_add_score))
         .route("/api/v1/evals/runner-spans", post(eval_add_runner_span))
         .route("/api/v1/blobs", post(put_blob))
@@ -122,6 +171,22 @@ pub fn dd_router(
         log_bus,
         cluster: None,
         wal_fencer: None,
+        // The dd-trace listener serves ingest only; it never reads alerts, but
+        // shares AppState, so it gets an empty in-memory store.
+        alerts: Arc::new(
+            crate::alerts::AlertStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path alert store cannot fail to open")),
+        ),
+        scores: Arc::new(
+            crate::scoring::ScoreRuleStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path score store cannot fail to open")),
+        ),
+        suites: Arc::new(
+            crate::suites::SuiteStore::open("")
+                .unwrap_or_else(|_| unreachable!("empty-path suite store cannot fail to open")),
+        ),
+        data_dir: String::new(),
+        multi_tenant: false,
     };
     dd_routes()
         .route("/healthz", get(healthz))
@@ -177,6 +242,9 @@ struct TraceQueryParams {
     last: Option<String>,
     limit: Option<u32>,
     text: Option<String>,
+    /// When true, the response also carries an `explain` object describing how
+    /// the query executed. Off by default so the common path stays one scan.
+    explain: Option<bool>,
 }
 
 fn parse_duration_to_seconds(s: &str) -> Option<i64> {
@@ -198,7 +266,20 @@ async fn query_traces(
     State(state): State<AppState>,
     Query(params): Query<TraceQueryParams>,
     RawQuery(raw): RawQuery,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let attribute_filters = match parse_attribute_params(raw.as_deref()) {
+        Ok(f) => f,
+        // A malformed regex is the caller's mistake and must say so; silently
+        // matching nothing would look like "no such traces".
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
     let query = TraceQuery {
         service: params.service,
         operation: params.operation,
@@ -207,15 +288,27 @@ async fn query_traces(
         status: params.status,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
-        attributes: parse_attribute_params(raw.as_deref()),
+        attributes: attribute_filters.exact,
+        attributes_contains: attribute_filters.contains,
+        attributes_regex: attribute_filters.regex,
         text: params.text,
+        tenant: crate::tenancy::read_scope(state.multi_tenant, principal.as_ref()),
     };
 
     match state.store.query_traces(&query) {
-        Ok(spans) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "spans": spans })),
-        ),
+        Ok(spans) => {
+            let mut body = serde_json::json!({ "spans": spans });
+            if params.explain.unwrap_or(false) {
+                // An explain failure must not fail the query itself — the
+                // caller still wants its results.
+                let explain = state
+                    .store
+                    .explain_traces(&query)
+                    .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+                body["explain"] = explain;
+            }
+            (StatusCode::OK, axum::Json(body))
+        }
         Err(e) => {
             tracing::error!(error = %e, "query_traces failed");
             (
@@ -226,24 +319,53 @@ async fn query_traces(
     }
 }
 
-/// Pull repeated `attribute=key=value` pairs out of a raw query string.
+/// Span attribute filters, split by match kind.
+#[derive(Debug, Default)]
+struct AttributeFilters {
+    exact: Vec<(String, String)>,
+    contains: Vec<(String, String)>,
+    regex: Vec<(String, String)>,
+}
+
+/// Pull repeated `attribute=key<op>value` pairs out of a raw query string.
+///
 /// `serde_urlencoded` (axum's default Query parser) keeps only the last value
-/// for duplicate keys, so we re-parse the raw string to collect all of them.
-fn parse_attribute_params(raw: Option<&str>) -> Vec<(String, String)> {
+/// for duplicate keys, so the raw string is re-parsed to collect all of them.
+/// Three operators are recognized, longest first so `~=` is not read as `=`:
+/// `k~=v` (contains), `k=~v` (regex), `k=v` (exact).
+fn parse_attribute_params(raw: Option<&str>) -> anyhow::Result<AttributeFilters> {
+    let mut filters = AttributeFilters::default();
     let Some(raw) = raw else {
-        return Vec::new();
+        return Ok(filters);
     };
-    form_urlencoded::parse(raw.as_bytes())
-        .filter(|(k, _)| k == "attribute")
-        .filter_map(|(_, v)| {
-            let (key, value) = v.split_once('=')?;
-            let key = key.trim();
-            if key.is_empty() {
-                return None;
+    for (_, spec) in form_urlencoded::parse(raw.as_bytes()).filter(|(k, _)| k == "attribute") {
+        // `=~` must be tried before `=`, and `~=` before both, or the operator
+        // character ends up inside the key or value.
+        let parsed = if let Some((k, v)) = spec.split_once("~=") {
+            Some((k, v, 'c'))
+        } else if let Some((k, v)) = spec.split_once("=~") {
+            Some((k, v, 'r'))
+        } else {
+            spec.split_once('=').map(|(k, v)| (k, v, 'e'))
+        };
+        let Some((key, value, kind)) = parsed else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        match kind {
+            'c' => filters.contains.push((key.to_string(), value.to_string())),
+            'r' => {
+                regex::Regex::new(value)
+                    .map_err(|e| anyhow::anyhow!("invalid regex for attribute `{key}`: {e}"))?;
+                filters.regex.push((key.to_string(), value.to_string()));
             }
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
+            _ => filters.exact.push((key.to_string(), value.to_string())),
+        }
+    }
+    Ok(filters)
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,15 +401,15 @@ fn filter_span_batch(json: &str, service: Option<&str>, status: Option<&str>) ->
     let filtered: Vec<&serde_json::Value> = spans
         .iter()
         .filter(|s| {
-            if let Some(svc) = service {
-                if s["service"].as_str() != Some(svc) {
-                    return false;
-                }
+            if let Some(svc) = service
+                && s["service"].as_str() != Some(svc)
+            {
+                return false;
             }
-            if let Some(st) = status {
-                if s["status"].as_str() != Some(st) {
-                    return false;
-                }
+            if let Some(st) = status
+                && s["status"].as_str() != Some(st)
+            {
+                return false;
             }
             true
         })
@@ -429,6 +551,7 @@ async fn query_logs(
         trace_id: params.trace_id,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        tenant: None,
     };
 
     match state.store.query_logs(&query) {
@@ -479,15 +602,15 @@ fn filter_log_batch(json: &str, service: Option<&str>, severity: Option<&str>) -
     let filtered: Vec<&serde_json::Value> = logs
         .iter()
         .filter(|l| {
-            if let Some(svc) = service {
-                if l["service"].as_str() != Some(svc) {
-                    return false;
-                }
+            if let Some(svc) = service
+                && l["service"].as_str() != Some(svc)
+            {
+                return false;
             }
-            if let Some(sev) = severity {
-                if l["severity"].as_str() != Some(sev) {
-                    return false;
-                }
+            if let Some(sev) = severity
+                && l["severity"].as_str() != Some(sev)
+            {
+                return false;
             }
             true
         })
@@ -521,6 +644,7 @@ async fn query_metrics(
         metric_type: params.metric_type,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        tenant: None,
     };
 
     match state.store.query_metrics(&query) {
@@ -693,7 +817,20 @@ struct SqlParams {
 async fn query_sql(
     State(state): State<AppState>,
     Query(params): Query<SqlParams>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    // SQL runs against tables the query layer cannot filter per row without
+    // rewriting arbitrary user queries, so under tenancy it is admin-only.
+    // Refusing beats silently handing every tenant's rows to a `SELECT *`.
+    if !crate::tenancy::may_use_sql(state.multi_tenant, principal.as_ref()) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "SQL is restricted to admin keys while multi-tenancy is enabled,                           because a SQL query cannot be scoped to one tenant. Use the                           structured query commands, which are scoped.",
+            })),
+        );
+    }
     match state.store.query_sql(&params.q) {
         Ok(rows) => (
             StatusCode::OK,
@@ -993,6 +1130,7 @@ async fn eval_add_score(
         value: payload.value,
         unit: "score".to_string(),
         attributes: attrs,
+        histogram: None,
     };
 
     match state.store.insert_metrics(std::slice::from_ref(&point)) {
@@ -1607,13 +1745,19 @@ mod tests {
 
     fn test_state(store: Arc<OkApplyStore>, fencer: Option<Arc<EpochFencer>>) -> AppState {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
         AppState {
             store,
-            blobs: Arc::new(BlobStore::new(dir.path().to_str().unwrap()).unwrap()),
+            blobs: Arc::new(BlobStore::new(path).unwrap()),
             bus: Arc::new(SpanBus::new().unwrap()),
             log_bus: Arc::new(LogBus::new().unwrap()),
             cluster: None,
             wal_fencer: fencer,
+            alerts: Arc::new(crate::alerts::AlertStore::open(path).unwrap()),
+            scores: Arc::new(crate::scoring::ScoreRuleStore::open(path).unwrap()),
+            suites: Arc::new(crate::suites::SuiteStore::open(path).unwrap()),
+            data_dir: path.to_string(),
+            multi_tenant: false,
         }
     }
 
@@ -1771,6 +1915,7 @@ mod tests {
                 value: 1.0,
                 unit: "score".to_string(),
                 attributes: score_attrs,
+                histogram: None,
             }])
             .unwrap();
 
@@ -1790,5 +1935,914 @@ mod tests {
             .unwrap();
         assert_eq!(case.status, "pass");
         assert_eq!(case.trace_id.as_deref(), Some("trace-a"));
+    }
+}
+
+// ── Alerts ──────────────────────────────────────────────────────────
+
+/// Rules and their current state. This is the closest thing tael has to a
+/// dashboard, and it is JSON on purpose: the intended consumer polls or
+/// follows it, rather than looking at it.
+async fn list_alerts(State(state): State<AppState>) -> impl IntoResponse {
+    let states = state.alerts.states();
+    let rules: Vec<serde_json::Value> = state
+        .alerts
+        .list()
+        .into_iter()
+        .map(|rule| {
+            let current = states
+                .get(&rule.name)
+                .copied()
+                .unwrap_or(crate::alerts::AlertState::Ok);
+            serde_json::json!({
+                "name": rule.name,
+                "query": rule.query,
+                "for_seconds": rule.for_seconds,
+                "window_seconds": rule.window_seconds,
+                "sinks": rule.sinks,
+                "description": rule.description,
+                "created_at": rule.created_at,
+                "state": current,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "alerts": rules, "count": rules.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAlertPayload {
+    name: String,
+    query: String,
+    #[serde(default)]
+    for_seconds: i64,
+    #[serde(default)]
+    window_seconds: Option<i64>,
+    #[serde(default)]
+    sinks: Vec<crate::alerts::Sink>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn create_alert(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateAlertPayload>,
+) -> impl IntoResponse {
+    let rule = crate::alerts::AlertRule {
+        name: payload.name,
+        query: payload.query,
+        for_seconds: payload.for_seconds,
+        window_seconds: payload.window_seconds.unwrap_or(300),
+        sinks: payload.sinks,
+        description: payload.description,
+        created_at: Utc::now(),
+    };
+    match state.alerts.create(rule.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "created": rule.name, "query": rule.query })),
+        ),
+        // A rejected rule is the caller's mistake (bad query, duplicate name),
+        // not a server fault.
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn delete_alert(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.alerts.delete(&name) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": name }))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no alert named `{name}`") })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AlertEventParams {
+    limit: Option<usize>,
+}
+
+async fn alert_events(
+    State(state): State<AppState>,
+    Query(params): Query<AlertEventParams>,
+) -> impl IntoResponse {
+    let events = state.alerts.recent_events(params.limit.unwrap_or(50));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "events": events, "count": events.len() })),
+    )
+}
+
+/// Live alert feed. This is the long-poll primitive a babysitting agent blocks
+/// on: connect once and be woken when something changes, instead of polling.
+async fn live_alerts(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.alerts.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|result| result.ok().map(|json| Ok(Event::default().data(json))));
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ── Online scoring ──────────────────────────────────────────────────
+
+/// Score rules with their progress. `traces_seen` versus `traces_sampled`
+/// makes the effective sample rate visible, and `failures`/`last_error` mean a
+/// silently broken judge is diagnosable rather than just absent from the data.
+async fn list_score_rules(State(state): State<AppState>) -> impl IntoResponse {
+    let status = state.scores.status();
+    let rules: Vec<serde_json::Value> = state
+        .scores
+        .list()
+        .into_iter()
+        .map(|rule| {
+            let progress = status.get(&rule.name).cloned().unwrap_or_default();
+            serde_json::json!({
+                "name": rule.name,
+                "sample": rule.sample,
+                "matcher": rule.matcher,
+                "command": rule.command,
+                "description": rule.description,
+                "created_at": rule.created_at,
+                "status": progress,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "rules": rules, "count": rules.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateScoreRulePayload {
+    name: String,
+    #[serde(default)]
+    sample: Option<f64>,
+    #[serde(default)]
+    matcher: crate::scoring::TraceMatcher,
+    command: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn create_score_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateScoreRulePayload>,
+) -> impl IntoResponse {
+    let rule = crate::scoring::ScoreRule {
+        name: payload.name,
+        // A rule with no explicit rate scores a small slice rather than
+        // everything: the expensive default is the wrong one for a judge that
+        // may call a model per trace.
+        sample: payload.sample.unwrap_or(0.05),
+        matcher: payload.matcher,
+        command: payload.command,
+        description: payload.description,
+        created_at: Utc::now(),
+    };
+    match state.scores.create(rule.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "created": rule.name, "sample": rule.sample })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn delete_score_rule(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.scores.delete(&name) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "deleted": name }))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("no score rule named `{name}`") })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ── Topology, diff, and metric inspection (DESIGN.md M3) ────────────
+
+#[derive(Debug, Deserialize)]
+struct TopologyParams {
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Service dependency graph derived from span parent/child edges.
+///
+/// An edge exists when a span in service A is the parent of a span in service
+/// B. This is reconstructed from the spans themselves rather than declared
+/// anywhere, so it reflects what the system actually did rather than what an
+/// architecture diagram claims.
+async fn query_topology(
+    State(state): State<AppState>,
+    Query(params): Query<TopologyParams>,
+) -> impl IntoResponse {
+    let query = TraceQuery {
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(params.limit.unwrap_or(50_000)),
+        ..Default::default()
+    };
+
+    let spans = match state.store.query_traces(&query) {
+        Ok(spans) => spans,
+        Err(e) => {
+            tracing::error!(error = %e, "topology query failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    // span_id -> (service, is_error) so a child can find its parent's service.
+    let by_id: HashMap<&str, &Span> = spans.iter().map(|s| (s.span_id.as_str(), s)).collect();
+
+    #[derive(Default)]
+    struct Edge {
+        calls: i64,
+        errors: i64,
+        total_ms: f64,
+    }
+    let mut edges: BTreeMap<(String, String), Edge> = BTreeMap::new();
+    let mut nodes: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    // Spans whose parent is outside the queried window, which would otherwise
+    // look like roots and overstate entry points.
+    let mut dangling = 0usize;
+
+    for span in &spans {
+        let node = nodes.entry(span.service.clone()).or_insert((0, 0));
+        node.0 += 1;
+        if span.status == SpanStatus::Error {
+            node.1 += 1;
+        }
+
+        let Some(parent_id) = span.parent_span_id.as_deref() else {
+            continue;
+        };
+        let Some(parent) = by_id.get(parent_id) else {
+            dangling += 1;
+            continue;
+        };
+        // Only cross-service edges are dependencies; a span calling another
+        // span inside the same service is internal structure.
+        if parent.service == span.service {
+            continue;
+        }
+        let edge = edges
+            .entry((parent.service.clone(), span.service.clone()))
+            .or_default();
+        edge.calls += 1;
+        edge.total_ms += span.duration_ms;
+        if span.status == SpanStatus::Error {
+            edge.errors += 1;
+        }
+    }
+
+    let node_list: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|(name, (span_count, error_count))| {
+            serde_json::json!({
+                "service": name,
+                "span_count": span_count,
+                "error_count": error_count,
+                "error_rate": if *span_count > 0 {
+                    *error_count as f64 / *span_count as f64
+                } else {
+                    0.0
+                },
+            })
+        })
+        .collect();
+
+    let edge_list: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|((from, to), e)| {
+            serde_json::json!({
+                "from": from,
+                "to": to,
+                "calls": e.calls,
+                "errors": e.errors,
+                "error_rate": if e.calls > 0 { e.errors as f64 / e.calls as f64 } else { 0.0 },
+                "avg_duration_ms": if e.calls > 0 { e.total_ms / e.calls as f64 } else { 0.0 },
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "services": node_list,
+            "edges": edge_list,
+            "spans_examined": spans.len(),
+            "spans_with_parent_outside_window": dangling,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffParams {
+    last: Option<String>,
+    baseline: Option<String>,
+    service: Option<String>,
+}
+
+/// Compare two windows across every summary metric.
+///
+/// `anomalies` is the opinionated version of this — it applies fixed thresholds
+/// and reports only what it judges regressed. `diff` reports every delta and
+/// leaves the judgement to the caller, which is what an agent investigating a
+/// specific change actually wants.
+async fn query_diff(
+    State(state): State<AppState>,
+    Query(params): Query<DiffParams>,
+) -> impl IntoResponse {
+    let current_seconds = params
+        .last
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(3600);
+    let baseline_seconds = params
+        .baseline
+        .as_deref()
+        .and_then(parse_duration_to_seconds)
+        .unwrap_or(current_seconds * 6);
+
+    let service = params.service.as_deref();
+    let current = match state.store.query_summary(current_seconds, service) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let baseline = match state.store.query_summary(baseline_seconds, service) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    // The baseline window contains the current one, so raw counts are not
+    // comparable — rates are. Counts are still reported, labeled as totals.
+    let per_second = |count: i64, seconds: i64| {
+        if seconds > 0 {
+            count as f64 / seconds as f64
+        } else {
+            0.0
+        }
+    };
+    let delta = |current: f64, baseline: f64| {
+        serde_json::json!({
+            "current": current,
+            "baseline": baseline,
+            "delta": current - baseline,
+            "ratio": if baseline.abs() > f64::EPSILON { current / baseline } else { f64::NAN },
+        })
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "current_window_seconds": current_seconds,
+            "baseline_window_seconds": baseline_seconds,
+            "service_filter": service,
+            "note": "the baseline window contains the current one, so rates \
+                     compare directly but totals do not",
+            "spans_per_second": delta(
+                per_second(current.traces.span_count, current_seconds),
+                per_second(baseline.traces.span_count, baseline_seconds),
+            ),
+            "error_rate": delta(current.traces.error_rate, baseline.traces.error_rate),
+            "p50_ms": delta(current.traces.p50_ms, baseline.traces.p50_ms),
+            "p95_ms": delta(current.traces.p95_ms, baseline.traces.p95_ms),
+            "p99_ms": delta(current.traces.p99_ms, baseline.traces.p99_ms),
+            "avg_ms": delta(current.traces.avg_ms, baseline.traces.avg_ms),
+            "log_errors_per_second": delta(
+                per_second(current.logs.error, current_seconds),
+                per_second(baseline.logs.error, baseline_seconds),
+            ),
+            "totals": {
+                "current_span_count": current.traces.span_count,
+                "baseline_span_count": baseline.traces.span_count,
+                "current_error_count": current.traces.error_count,
+                "baseline_error_count": baseline.traces.error_count,
+            },
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricDetailParams {
+    last: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Everything known about one metric: its type, unit, label keys, series
+/// count, value range, and recent points. Answers "what is this metric and can
+/// I query it" without guessing at a filter that returns nothing.
+async fn get_metric(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<MetricDetailParams>,
+) -> impl IntoResponse {
+    let query = MetricQuery {
+        service: None,
+        name: Some(name.clone()),
+        metric_type: None,
+        last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(params.limit.unwrap_or(500)),
+        tenant: None,
+    };
+
+    let points = match state.store.query_metrics(&query) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    if points.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("no points found for metric `{name}`"),
+                "metric": name,
+            })),
+        );
+    }
+
+    let mut label_keys: HashSet<&str> = HashSet::new();
+    let mut services: HashSet<&str> = HashSet::new();
+    let mut series: HashSet<String> = HashSet::new();
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut with_histogram = 0usize;
+
+    for p in &points {
+        services.insert(p.service.as_str());
+        for k in p.attributes.keys() {
+            label_keys.insert(k.as_str());
+        }
+        let mut key: Vec<_> = p.attributes.iter().collect();
+        key.sort();
+        series.insert(format!("{}|{:?}", p.service, key));
+        min = min.min(p.value);
+        max = max.max(p.value);
+        if p.histogram.is_some() {
+            with_histogram += 1;
+        }
+    }
+
+    let mut sorted_labels: Vec<&str> = label_keys.into_iter().collect();
+    sorted_labels.sort_unstable();
+    let mut sorted_services: Vec<&str> = services.into_iter().collect();
+    sorted_services.sort_unstable();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "metric": name,
+            "type": points[0].metric_type.to_string(),
+            "unit": points[0].unit,
+            "point_count": points.len(),
+            "series_count": series.len(),
+            "services": sorted_services,
+            "label_keys": sorted_labels,
+            "value_min": min,
+            "value_max": max,
+            "latest_timestamp": points.first().map(|p| p.timestamp),
+            // Quantiles are only answerable for points that retained buckets.
+            "points_with_histogram_buckets": with_histogram,
+            "histogram_quantile_available": with_histogram > 0,
+            "recent_points": points.iter().take(20).collect::<Vec<_>>(),
+        })),
+    )
+}
+
+// ── Eval case suites ────────────────────────────────────────────────
+
+async fn list_suites(State(state): State<AppState>) -> impl IntoResponse {
+    let suites: Vec<serde_json::Value> = state
+        .suites
+        .list()
+        .into_iter()
+        .map(|(name, suite)| {
+            serde_json::json!({
+                "name": name,
+                "case_count": suite.cases.len(),
+                "snapshot_count": suite.snapshots.len(),
+                "updated_at": suite.updated_at,
+                "latest_snapshot": suite.snapshots.last().map(|s| s.id.clone()),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "suites": suites, "count": suites.len() })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SuiteReadParams {
+    /// Optional snapshot id; absent reads the working set.
+    snapshot: Option<String>,
+}
+
+async fn get_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<SuiteReadParams>,
+) -> impl IntoResponse {
+    let reference = match &params.snapshot {
+        Some(id) => format!("{name}@{id}"),
+        None => name.clone(),
+    };
+    match state.suites.resolve(&reference) {
+        Ok((suite, snapshot, cases)) => {
+            let snapshots = state
+                .suites
+                .get(&suite)
+                .map(|s| s.snapshots)
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "suite": suite,
+                    "snapshot": snapshot,
+                    "cases": cases,
+                    "count": cases.len(),
+                    "snapshots": snapshots,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PushSuiteBody {
+    cases: Vec<crate::suites::CaseRef>,
+}
+
+async fn push_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PushSuiteBody>,
+) -> impl IntoResponse {
+    match state.suites.push(&name, body.cases) {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "suite": name, "case_count": count })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SnapshotBody {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn snapshot_suite(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<SnapshotBody>>,
+) -> impl IntoResponse {
+    let note = body.and_then(|Json(b)| b.note);
+    match state.suites.snapshot(&name, note) {
+        Ok(snapshot) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "suite": name,
+                "snapshot": snapshot.id,
+                "case_count": snapshot.case_count(),
+                "created_at": snapshot.created_at,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SuiteDiffParams {
+    from: String,
+    to: String,
+}
+
+async fn diff_suites(
+    State(state): State<AppState>,
+    Query(params): Query<SuiteDiffParams>,
+) -> impl IntoResponse {
+    match state.suites.diff(&params.from, &params.to) {
+        Ok(diff) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "from": params.from,
+                "to": params.to,
+                "added": diff.added,
+                "removed": diff.removed,
+                "changed": diff.changed,
+                "unchanged": diff.unchanged,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RollupParams {
+    name: Option<String>,
+    service: Option<String>,
+    last: Option<String>,
+    limit: Option<usize>,
+}
+
+/// 5-minute downsampled metric aggregates.
+///
+/// Rollups are kept on a much longer clock than raw points, so this is the
+/// only surface that can answer a year-scale trend question. Each bucket
+/// carries min/max/avg/sum/count rather than a single value, because a
+/// downsample that kept only the mean would hide exactly the spikes a trend
+/// question is usually about.
+async fn query_rollups(
+    State(state): State<AppState>,
+    Query(params): Query<RollupParams>,
+) -> impl IntoResponse {
+    let last_seconds = params.last.as_deref().and_then(parse_duration_to_seconds);
+    match state.store.query_metric_rollups(
+        params.name.as_deref(),
+        params.service.as_deref(),
+        last_seconds,
+        params.limit.unwrap_or(1000),
+    ) {
+        Ok(rollups) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "rollups": rollups,
+                "count": rollups.len(),
+                "bucket_seconds": 300,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ── Similarity and clustering ───────────────────────────────────────
+
+/// The text an embedding represents for one trace.
+///
+/// Built from the operations, error types, and LLM payload hashes rather than
+/// raw attributes: a trace's identity for "have I seen this before" is what it
+/// tried to do and how it failed, not the request ids and timestamps that make
+/// every trace superficially unique.
+fn trace_signature(spans: &[Span]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for span in spans {
+        parts.push(format!("{} {}", span.service, span.operation));
+        if span.status == SpanStatus::Error {
+            parts.push(format!("error {}", span.operation));
+        }
+        for key in ["error.type", "exception.type", "rpc.grpc.status_code"] {
+            if let Some(v) = span.attributes.get(key) {
+                parts.push(format!("{key}={v}"));
+            }
+        }
+        if let Some(llm) = &span.llm {
+            parts.push(format!("llm {} {}", llm.provider, llm.model));
+            if let Some(reason) = &llm.finish_reason {
+                parts.push(format!("finish={reason}"));
+            }
+        }
+    }
+    parts.sort();
+    parts.dedup();
+    parts.join(" ")
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedBody {
+    /// Command that reads text on stdin and prints a JSON array of numbers.
+    embed_cmd: String,
+    #[serde(default)]
+    last: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Build embeddings for recent traces.
+///
+/// Explicit rather than automatic on ingest: embedding costs money per trace
+/// and most deployments will never want it, so it happens when asked.
+async fn build_embeddings(
+    State(state): State<AppState>,
+    Json(body): Json<EmbedBody>,
+) -> impl IntoResponse {
+    let query = TraceQuery {
+        last_seconds: body.last.as_deref().and_then(parse_duration_to_seconds),
+        limit: Some(body.limit.unwrap_or(1000)),
+        ..Default::default()
+    };
+    let spans = match state.store.query_traces(&query) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let mut by_trace: BTreeMap<String, Vec<Span>> = BTreeMap::new();
+    for span in spans {
+        by_trace
+            .entry(span.trace_id.clone())
+            .or_default()
+            .push(span);
+    }
+
+    let mut store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let (mut embedded, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let mut last_error: Option<String> = None;
+    for (trace_id, spans) in &by_trace {
+        // Already embedded traces are skipped: a trace is immutable once
+        // written, so re-embedding it would only spend money to get the same
+        // vector back.
+        if store.embeddings.contains_key(trace_id) {
+            skipped += 1;
+            continue;
+        }
+        let signature = trace_signature(spans);
+        if signature.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        match crate::similarity::embed(&body.embed_cmd, &signature).await {
+            Ok(vector) => {
+                store.embeddings.insert(trace_id.clone(), vector);
+                embedded += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    if let Err(e) = store.save(&state.data_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "embedded": embedded,
+            "skipped": skipped,
+            "failed": failed,
+            "total_embeddings": store.embeddings.len(),
+            "last_error": last_error,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SimilarParams {
+    limit: Option<usize>,
+    min_similarity: Option<f32>,
+}
+
+async fn similar_traces(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+    Query(params): Query<SimilarParams>,
+) -> impl IntoResponse {
+    let store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let Some(query) = store.get(&trace_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("trace `{trace_id}` has no embedding"),
+                "hint": "run `tael embed --cmd <embedder>` first",
+            })),
+        );
+    };
+
+    let neighbors = crate::similarity::nearest(
+        &query,
+        &store.to_vec(),
+        params.limit.unwrap_or(10),
+        params.min_similarity.unwrap_or(0.0),
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "trace_id": trace_id,
+            "neighbors": neighbors,
+            "count": neighbors.len(),
+            "corpus_size": store.embeddings.len(),
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterParams {
+    k: Option<usize>,
+}
+
+async fn cluster_traces(
+    State(state): State<AppState>,
+    Query(params): Query<ClusterParams>,
+) -> impl IntoResponse {
+    let store = match crate::similarity::EmbeddingStore::load(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let embeddings = store.to_vec();
+    match crate::similarity::cluster(&embeddings, params.k.unwrap_or(5), 50) {
+        Ok(clusters) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "clusters": clusters,
+                "count": clusters.len(),
+                "corpus_size": embeddings.len(),
+                "note": "cohesion below ~0.7 means the grouping is weak; read the exemplars before acting on it",
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }

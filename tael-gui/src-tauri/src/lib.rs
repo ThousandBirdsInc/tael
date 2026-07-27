@@ -91,18 +91,49 @@ fn to_string<E: std::fmt::Display>(err: E) -> String {
 
 async fn get_json(server: &str, path: &str, params: &[(String, String)]) -> Result<Value, String> {
     let target = target(server)?;
-    target
+    let response = target
         .http
         .get(format!("{}{}", target.base_url, path))
         .query(params)
         .send()
         .await
-        .map_err(to_string)?
-        .error_for_status()
-        .map_err(to_string)?
-        .json::<Value>()
-        .await
-        .map_err(to_string)
+        .map_err(to_string)?;
+
+    // The server explains its refusals in the body — a build without the SQL
+    // engine answers 400 with the feature to install, a bad PromQL expression
+    // answers with the parse error. `error_for_status` would throw all of that
+    // away and leave the user with a status code, so the body is read either
+    // way and its `error` field preferred over the status line.
+    let status = response.status();
+    let body = response.text().await.map_err(to_string)?;
+    if !status.is_success() {
+        return Err(error_message(status, &body));
+    }
+    serde_json::from_str::<Value>(&body).map_err(to_string)
+}
+
+/// The most useful thing that can be said about a failed request.
+///
+/// In order of preference: the server's own `error` field, the raw body, then
+/// the status line. Only the first is actually helpful — "this build has no SQL
+/// engine, reinstall with --features sql" versus "400 Bad Request" — which is
+/// why the body is read even on failure.
+fn error_message(status: reqwest::StatusCode, body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            if body.trim().is_empty() {
+                format!("request failed: {status}")
+            } else {
+                body.to_string()
+            }
+        })
 }
 
 #[tauri::command]
@@ -123,7 +154,10 @@ async fn healthz(server: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn query_traces(server: String, request: TraceQueryRequest) -> Result<Value, String> {
-    let mut params = vec![("limit".to_string(), request.limit.unwrap_or(200).to_string())];
+    let mut params = vec![(
+        "limit".to_string(),
+        request.limit.unwrap_or(200).to_string(),
+    )];
     if let Some(service) = request.service {
         params.push(("service".to_string(), service));
     }
@@ -142,15 +176,18 @@ async fn query_traces(server: String, request: TraceQueryRequest) -> Result<Valu
     if let Some(last) = request.last {
         params.push(("last".to_string(), last));
     }
-    if let Some(text) = request.text {
-        if !text.trim().is_empty() {
-            params.push(("text".to_string(), text));
-        }
+    if let Some(text) = request.text
+        && !text.trim().is_empty()
+    {
+        params.push(("text".to_string(), text));
     }
     if let Some(attributes) = request.attributes {
         for attr in attributes {
             if !attr.key.trim().is_empty() {
-                params.push(("attribute".to_string(), format!("{}={}", attr.key, attr.value)));
+                params.push((
+                    "attribute".to_string(),
+                    format!("{}={}", attr.key, attr.value),
+                ));
             }
         }
     }
@@ -170,12 +207,7 @@ async fn get_trace(server: String, trace_id: String) -> Result<Value, String> {
 
 #[tauri::command]
 async fn get_comments(server: String, trace_id: String) -> Result<Value, String> {
-    get_json(
-        &server,
-        &format!("/api/v1/traces/{trace_id}/comments"),
-        &[],
-    )
-    .await
+    get_json(&server, &format!("/api/v1/traces/{trace_id}/comments"), &[]).await
 }
 
 #[tauri::command]
@@ -218,12 +250,99 @@ async fn eval_status(server: String, run_id: String) -> Result<Value, String> {
 
 #[tauri::command]
 async fn eval_cases(server: String, run_id: String) -> Result<Value, String> {
-    get_json(
-        &server,
-        &format!("/api/v1/evals/runs/{run_id}/cases"),
-        &[],
-    )
-    .await
+    get_json(&server, &format!("/api/v1/evals/runs/{run_id}/cases"), &[]).await
+}
+
+// ── Panels beyond traces/services/evals ─────────────────────────────
+//
+// Each is a thin pass-through to the REST surface the CLI already uses, so the
+// GUI and `tael live` are looking at the same numbers. They are read-only:
+// creating an alert rule or filing a review request is an agent's job and stays
+// in the CLI where it can be scripted and its exit code checked.
+
+#[tauri::command]
+async fn query_summary(server: String, last: Option<String>) -> Result<Value, String> {
+    let params = last
+        .map(|l| vec![("last".to_string(), l)])
+        .unwrap_or_default();
+    get_json(&server, "/api/v1/summary", &params).await
+}
+
+#[tauri::command]
+async fn query_anomalies(
+    server: String,
+    last: Option<String>,
+    baseline: Option<String>,
+) -> Result<Value, String> {
+    let mut params = Vec::new();
+    if let Some(last) = last {
+        params.push(("last".to_string(), last));
+    }
+    if let Some(baseline) = baseline {
+        params.push(("baseline".to_string(), baseline));
+    }
+    get_json(&server, "/api/v1/anomalies", &params).await
+}
+
+#[tauri::command]
+async fn query_topology(server: String, last: Option<String>) -> Result<Value, String> {
+    let mut params = vec![("limit".to_string(), "50000".to_string())];
+    if let Some(last) = last {
+        params.push(("last".to_string(), last));
+    }
+    get_json(&server, "/api/v1/topology", &params).await
+}
+
+#[tauri::command]
+async fn list_alerts(server: String) -> Result<Value, String> {
+    get_json(&server, "/api/v1/alerts", &[]).await
+}
+
+#[tauri::command]
+async fn alert_events(server: String, limit: Option<u32>) -> Result<Value, String> {
+    let params = vec![("limit".to_string(), limit.unwrap_or(20).to_string())];
+    get_json(&server, "/api/v1/alerts/events", &params).await
+}
+
+#[tauri::command]
+async fn list_score_rules(server: String) -> Result<Value, String> {
+    get_json(&server, "/api/v1/scores/rules", &[]).await
+}
+
+#[tauri::command]
+async fn cluster_traces(server: String, k: Option<u32>) -> Result<Value, String> {
+    let params = vec![("k".to_string(), k.unwrap_or(5).to_string())];
+    get_json(&server, "/api/v1/cluster", &params).await
+}
+
+#[tauri::command]
+async fn similar_traces(
+    server: String,
+    trace_id: String,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    let params = vec![("limit".to_string(), limit.unwrap_or(10).to_string())];
+    get_json(&server, &format!("/api/v1/similar/{trace_id}"), &params).await
+}
+
+#[tauri::command]
+async fn list_comments(server: String, limit: Option<u32>) -> Result<Value, String> {
+    let params = vec![("limit".to_string(), limit.unwrap_or(500).to_string())];
+    get_json(&server, "/api/v1/comments", &params).await
+}
+
+#[tauri::command]
+async fn list_suites(server: String) -> Result<Value, String> {
+    get_json(&server, "/api/v1/evals/suites", &[]).await
+}
+
+/// Read-only SQL. The server answers a build without the engine with a 400
+/// whose body names the feature to install, so the error is forwarded verbatim
+/// rather than flattened into "request failed" — that message is the useful
+/// part.
+#[tauri::command]
+async fn query_sql(server: String, query: String) -> Result<Value, String> {
+    get_json(&server, "/api/v1/sql", &[("q".to_string(), query)]).await
 }
 
 #[tauri::command]
@@ -246,8 +365,14 @@ async fn start_live_stream(
                 },
             );
 
-            match sse_read_loop(&target, service.as_deref(), status.as_deref(), &app, &stream_id)
-                .await
+            match sse_read_loop(
+                &target,
+                service.as_deref(),
+                status.as_deref(),
+                &app,
+                &stream_id,
+            )
+            .await
             {
                 Ok(()) => {
                     let _ = app.emit(
@@ -379,8 +504,59 @@ pub fn run_with_server(server: String) {
             eval_runs,
             eval_status,
             eval_cases,
+            query_summary,
+            query_anomalies,
+            query_topology,
+            list_alerts,
+            alert_events,
+            list_score_rules,
+            cluster_traces,
+            similar_traces,
+            list_comments,
+            list_suites,
+            query_sql,
             start_live_stream
         ])
         .run(tauri::generate_context!())
         .expect("error while running tael gui");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn a_servers_own_error_message_survives_to_the_ui() {
+        // The case this exists for: a build without the SQL engine answers 400
+        // with the feature to install. `error_for_status` would replace that
+        // with the status line, leaving the user a number instead of the fix.
+        let body = r#"{"error":"this build has no SQL engine. Reinstall with `--features sql`"}"#;
+        assert_eq!(
+            error_message(StatusCode::BAD_REQUEST, body),
+            "this build has no SQL engine. Reinstall with `--features sql`"
+        );
+    }
+
+    #[test]
+    fn a_body_without_an_error_field_is_shown_verbatim() {
+        // Better a raw body than a status code: an HTML error page from a proxy
+        // at least says a proxy answered.
+        assert_eq!(
+            error_message(StatusCode::BAD_GATEWAY, "upstream connect error"),
+            "upstream connect error"
+        );
+        assert_eq!(
+            error_message(StatusCode::BAD_REQUEST, r#"{"detail":"nope"}"#),
+            r#"{"detail":"nope"}"#
+        );
+    }
+
+    #[test]
+    fn an_empty_body_falls_back_to_the_status() {
+        assert_eq!(
+            error_message(StatusCode::NOT_FOUND, "   "),
+            "request failed: 404 Not Found"
+        );
+    }
 }

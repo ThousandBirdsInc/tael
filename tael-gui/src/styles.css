@@ -786,6 +786,97 @@ tbody tr.selected {
   padding: 10px 12px;
 }
 
+/* ─── Panels: health, topology, automation, clusters, review, SQL ── */
+
+/* Panels stack a header, optional stat row, and a scrolling body. The body is
+   the only part that scrolls, so a long result set never pushes the query line
+   or the stat row off screen. */
+.panel-note {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 12px;
+}
+
+.stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  background: var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.stat {
+  flex: 1 1 110px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--canvas);
+}
+
+.stat-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: var(--text);
+}
+
+.panel-subhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px 6px;
+  background: var(--canvas);
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sql-bar {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sql-input {
+  flex: 1;
+  min-height: 54px;
+  padding: 8px 10px;
+  resize: vertical;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sql-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.accent {
+  color: var(--info);
+}
+
+/* Clusters and review rows open the trace they name. */
+tr[data-cluster-trace],
+tr[data-review-trace] {
+  cursor: pointer;
+}
+
 .mono {
   font-family: var(--font-mono);
 }

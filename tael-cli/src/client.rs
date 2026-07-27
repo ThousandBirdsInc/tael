@@ -10,29 +10,72 @@ pub struct TaelClient {
     http: Client,
 }
 
+/// Finish a client builder, attaching the API key as a default header so every
+/// request — including the SSE live streams — carries it without each call site
+/// remembering to.
+fn build_client(builder: reqwest::ClientBuilder, api_key: Option<&str>) -> Client {
+    let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) => {
+            let mut headers = reqwest::header::HeaderMap::new();
+            match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+                Ok(mut value) => {
+                    value.set_sensitive(true);
+                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                    builder.default_headers(headers)
+                }
+                // A key with non-ASCII bytes can't be a header; sending nothing
+                // yields a clean 401 rather than a panic here.
+                Err(_) => builder,
+            }
+        }
+        None => builder,
+    };
+    builder.build().expect("failed to build HTTP client")
+}
+
 impl TaelClient {
+    /// Connect to a tael server, authenticating with `TAEL_API_KEY` when it is
+    /// set. A server running with auth off ignores the header, so reading the
+    /// environment unconditionally is safe and means embedders inherit
+    /// credentials the same way the CLI does.
     pub fn new(base_url: &str) -> Self {
+        Self::with_api_key(base_url, std::env::var("TAEL_API_KEY").ok().as_deref())
+    }
+
+    /// Connect with an explicit API key, overriding the environment. Backs the
+    /// CLI's `--api-key` flag.
+    pub fn with_api_key(base_url: &str, api_key: Option<&str>) -> Self {
         if let Some(socket_path) = base_url.strip_prefix("unix://") {
-            return Self::new_unix_socket(socket_path)
+            return Self::new_unix_socket_with_key(socket_path, api_key)
                 .expect("failed to build Unix-socket HTTP client");
         }
 
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: Client::new(),
+            http: build_client(Client::builder(), api_key),
         }
     }
 
     #[cfg(unix)]
     pub fn new_unix_socket(socket_path: &str) -> Result<Self> {
+        Self::new_unix_socket_with_key(socket_path, std::env::var("TAEL_API_KEY").ok().as_deref())
+    }
+
+    #[cfg(unix)]
+    fn new_unix_socket_with_key(socket_path: &str, api_key: Option<&str>) -> Result<Self> {
         Ok(Self {
             base_url: "http://tael".to_string(),
-            http: Client::builder().unix_socket(socket_path).build()?,
+            http: build_client(Client::builder().unix_socket(socket_path), api_key),
         })
     }
 
     #[cfg(not(unix))]
     pub fn new_unix_socket(_socket_path: &str) -> Result<Self> {
+        anyhow::bail!("Unix sockets are only supported on Unix platforms");
+    }
+
+    #[cfg(not(unix))]
+    fn new_unix_socket_with_key(_socket_path: &str, _api_key: Option<&str>) -> Result<Self> {
         anyhow::bail!("Unix sockets are only supported on Unix platforms");
     }
 
@@ -76,8 +119,12 @@ impl TaelClient {
         limit: u32,
         attributes: &[(String, String)],
         text: Option<&str>,
+        explain: bool,
     ) -> Result<Value> {
         let mut params = vec![("limit", limit.to_string())];
+        if explain {
+            params.push(("explain", "true".to_string()));
+        }
         if let Some(s) = service {
             params.push(("service", s.to_string()));
         }
@@ -96,8 +143,10 @@ impl TaelClient {
         if let Some(l) = last {
             params.push(("last", l.to_string()));
         }
-        for (k, v) in attributes {
-            params.push(("attribute", format!("{k}={v}")));
+        for (key, op_and_value) in attributes {
+            // `op_and_value` already carries its operator (`=`, `~=`, `=~`),
+            // so it is concatenated rather than joined with another `=`.
+            params.push(("attribute", format!("{key}{op_and_value}")));
         }
         if let Some(t) = text {
             params.push(("text", t.to_string()));
@@ -127,6 +176,328 @@ impl TaelClient {
             .send()
             .await?
             .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn create_alert(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/alerts", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_alerts(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/alerts", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn delete_alert(&self, name: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/v1/alerts/{name}", self.base_url))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn alert_events(&self, limit: u32) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/alerts/events", self.base_url))
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Subscribe to the live alert feed. Reconnects on transport failure so a
+    /// long-running `--follow` survives a server restart.
+    pub fn subscribe_alerts(&self) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let http = self.http.clone();
+        let url = format!("{}/api/v1/alerts/live", self.base_url);
+        tokio::spawn(async move {
+            loop {
+                match sse_lines(&http, &url, &tx).await {
+                    Ok(()) => break,
+                    Err(_) => {
+                        if tx.is_closed() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        });
+        rx
+    }
+
+    pub async fn create_score_rule(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/scores/rules", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_score_rules(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/scores/rules", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn delete_score_rule(&self, name: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/v1/scores/rules/{name}", self.base_url))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn topology(&self, last: Option<&str>, limit: u32) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/topology", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn diff(
+        &self,
+        last: Option<&str>,
+        baseline: Option<&str>,
+        service: Option<&str>,
+    ) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        if let Some(b) = baseline {
+            params.push(("baseline", b.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/diff", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn get_metric(&self, name: &str, last: Option<&str>, limit: u32) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics/{name}", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_suites(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn get_suite(&self, name: &str, snapshot: Option<&str>) -> Result<Value> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = snapshot {
+            params.push(("snapshot", s.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites/{name}", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn push_suite(&self, name: &str, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/evals/suites/{name}", self.base_url))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn snapshot_suite(&self, name: &str, note: Option<&str>) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/v1/evals/suites/{name}/snapshots",
+                self.base_url
+            ))
+            .json(&serde_json::json!({ "note": note }))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn diff_suites(&self, from: &str, to: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/evals/suites/diff", self.base_url))
+            .query(&[("from", from), ("to", to)])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Fetch a content-addressed blob as text (case bodies, LLM payloads).
+    pub async fn get_blob(&self, sha256: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/blobs/{sha256}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn metric_rollups(
+        &self,
+        name: Option<&str>,
+        service: Option<&str>,
+        last: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let mut params = vec![("limit", limit.to_string())];
+        if let Some(n) = name {
+            params.push(("name", n.to_string()));
+        }
+        if let Some(s) = service {
+            params.push(("service", s.to_string()));
+        }
+        if let Some(l) = last {
+            params.push(("last", l.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/metrics/rollups", self.base_url))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn build_embeddings(&self, payload: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/embed", self.base_url))
+            // Embedding a batch runs one subprocess per trace, so the default
+            // client timeout is far too short.
+            .timeout(Duration::from_secs(1800))
+            .json(payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn similar_traces(
+        &self,
+        trace_id: &str,
+        limit: u32,
+        min_similarity: f32,
+    ) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/similar/{trace_id}", self.base_url))
+            .query(&[
+                ("limit", limit.to_string()),
+                ("min_similarity", min_similarity.to_string()),
+            ])
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn cluster_traces(&self, k: usize) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/cluster", self.base_url))
+            .query(&[("k", k.to_string())])
+            .send()
+            .await?
             .json::<Value>()
             .await?;
         Ok(resp)
@@ -512,30 +883,47 @@ async fn sse_read_loop(
         .error_for_status()?;
 
     let mut buffer = String::new();
-    loop {
-        match response.chunk().await? {
-            Some(chunk) => {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+    while let Some(chunk) = response.chunk().await? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event_block = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
 
-                    for line in event_block.lines() {
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if !data.is_empty() {
-                                if tx.send(data.to_string()).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
+            for line in event_block.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() && tx.send(data.to_string()).is_err() {
+                        return Ok(());
                     }
                 }
             }
-            None => break,
         }
     }
 
+    Ok(())
+}
+
+/// Read `data:` lines from an SSE endpoint until the stream ends or the
+/// receiver is dropped. Shared by the alert feed; the trace feed has its own
+/// loop because it also applies server-side filters.
+async fn sse_lines(http: &Client, url: &str, tx: &mpsc::UnboundedSender<String>) -> Result<()> {
+    let mut response = http.get(url).send().await?.error_for_status()?;
+    let mut buffer = String::new();
+    while let Some(chunk) = response.chunk().await? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buffer.find("\n\n") {
+            let block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+            for line in block.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() && tx.send(data.to_string()).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

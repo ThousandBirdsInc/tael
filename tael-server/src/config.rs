@@ -24,6 +24,11 @@ impl StorageBackend {
 
 pub struct ServerConfig {
     pub otlp_grpc_addr: String,
+    /// OTLP/HTTP (`http/protobuf`) listen address. Many SDKs default to this
+    /// protocol, so it is on by default at the spec's port. `None` disables the
+    /// dedicated listener; the same routes stay mounted on the REST listener.
+    /// Set via `TAEL_OTLP_HTTP_ADDR` (`off` to disable).
+    pub otlp_http_addr: Option<String>,
     pub rest_api_addr: String,
     pub rest_api_socket: Option<String>,
     /// Dedicated Datadog trace-agent listener address, so dd-trace clients
@@ -58,6 +63,19 @@ pub struct ServerConfig {
     /// Where trace comments are stored. Defaults to the local JSONL file;
     /// Postgres (Cloud SQL) is opt-in and needs the `cloud` build feature.
     pub comments: CommentsConfig,
+    /// Explicit auth mode (`TAEL_AUTH`, `--auth`). `None` lets the server
+    /// decide from its listen addresses: off for loopback-only, required for
+    /// anything reachable off-box. See [`crate::auth::AuthMode::resolve`].
+    pub auth: Option<crate::auth::AuthMode>,
+    /// Path to a TOML config file (`--config`, `TAEL_CONFIG`). `None` looks for
+    /// `config.toml` beside the data directory and proceeds without one if it
+    /// is absent.
+    pub config_path: Option<String>,
+    /// Scope reads and writes by the caller's tenant (`TAEL_MULTI_TENANT`).
+    /// Off by default — a single-tenant deployment should pay nothing for a
+    /// feature it does not use. See [`crate::tenancy`] for what this does and
+    /// does not guarantee.
+    pub multi_tenant: bool,
 }
 
 /// Object-storage selection for the cold (Parquet) tier and the blob store.
@@ -101,7 +119,7 @@ impl ObjectStoreConfig {
     /// Whether the blob store is shared across nodes (object storage rather
     /// than a node-local directory). Drives the blob-GC single-owner guard.
     pub fn blobs_shared(&self) -> bool {
-        self.blobs == StoreLocation::Gcs
+        self.blobs.is_shared()
     }
 }
 
@@ -164,6 +182,10 @@ impl ServerConfig {
         let mut config = Self {
             otlp_grpc_addr: std::env::var("TAEL_OTLP_GRPC_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:4317".into()),
+            otlp_http_addr: parse_optional_addr(
+                std::env::var("TAEL_OTLP_HTTP_ADDR").ok(),
+                DEFAULT_OTLP_HTTP_ADDR,
+            ),
             rest_api_addr: std::env::var("TAEL_REST_API_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7701".into()),
             rest_api_socket: std::env::var("TAEL_REST_API_SOCKET")
@@ -186,6 +208,25 @@ impl ServerConfig {
             cluster: cluster_from_env(),
             object_store: ObjectStoreConfig::from_env(),
             comments: CommentsConfig::from_env(),
+            // An unparseable TAEL_AUTH is ignored here rather than panicking in
+            // a `from_env`; the server logs and falls back to the address-based
+            // default.
+            config_path: non_empty_env("TAEL_CONFIG"),
+            multi_tenant: std::env::var("TAEL_MULTI_TENANT")
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes"
+                    )
+                })
+                .unwrap_or(false),
+            auth: non_empty_env("TAEL_AUTH").and_then(|s| match crate::auth::AuthMode::parse(&s) {
+                Ok(mode) => Some(mode),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring TAEL_AUTH");
+                    None
+                }
+            }),
         };
         // A `--storage <duckdb|tael-backend>` flag (or `--storage=…`) takes
         // precedence over the env var.
@@ -248,12 +289,29 @@ fn cluster_from_env() -> Option<ClusterSettings> {
 /// here when `DD_TRACE_AGENT_URL`/`DD_AGENT_HOST` are unset.
 pub const DEFAULT_DD_AGENT_ADDR: &str = "127.0.0.1:8126";
 
+/// The OTLP/HTTP spec's default port. On by default so an SDK configured with
+/// `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (the default in several
+/// languages) needs no server-side configuration.
+pub const DEFAULT_OTLP_HTTP_ADDR: &str = "127.0.0.1:4318";
+
 /// Resolve `TAEL_DD_AGENT_ADDR` (or the `--dd-agent-addr` flag): unset defaults
 /// to the agent's standard port so dd-trace clients work zero-config;
 /// `off`/`none`/`disabled`/`false`/`0` (or empty) disables the listener.
 pub fn parse_dd_agent_addr(value: Option<String>) -> Option<String> {
+    parse_optional_addr(value, DEFAULT_DD_AGENT_ADDR)
+}
+
+/// Resolve `TAEL_OTLP_HTTP_ADDR` (or the `--otlp-http-addr` flag). Same
+/// unset-means-default, `off`-means-disabled contract as the Datadog listener.
+pub fn parse_otlp_http_addr(value: Option<String>) -> Option<String> {
+    parse_optional_addr(value, DEFAULT_OTLP_HTTP_ADDR)
+}
+
+/// Shared "optional listener address" parse: unset takes `default`, an explicit
+/// off-switch disables, anything else is used verbatim.
+fn parse_optional_addr(value: Option<String>, default: &str) -> Option<String> {
     match value {
-        None => Some(DEFAULT_DD_AGENT_ADDR.to_string()),
+        None => Some(default.to_string()),
         Some(v) => {
             let v = v.trim().to_string();
             match v.to_lowercase().as_str() {

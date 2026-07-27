@@ -36,6 +36,7 @@ pub async fn compare(
             50_000,
             &[],
             None,
+            false,
         )
         .await?;
     let mut variants: BTreeMap<String, VariantStats> = BTreeMap::new();
@@ -101,10 +102,10 @@ pub async fn compare(
             if !comment_matches_signal(&comment, signal_name) {
                 continue;
             }
-            if let Some(variant) = trace_to_variant.get(field(&comment, "trace_id")) {
-                if let Some(stats) = variants.get_mut(variant) {
-                    stats.signal_count += 1;
-                }
+            if let Some(variant) = trace_to_variant.get(field(&comment, "trace_id"))
+                && let Some(stats) = variants.get_mut(variant)
+            {
+                stats.signal_count += 1;
             }
         }
     }

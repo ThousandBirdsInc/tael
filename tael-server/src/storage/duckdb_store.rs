@@ -527,6 +527,10 @@ impl DuckDbStore {
                 value: row.get(4)?,
                 unit: row.get(5)?,
                 attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+                // The legacy DuckDB schema has no bucket column, so histograms
+                // read back without a distribution here. `histogram_quantile`
+                // is a tael-backend capability.
+                histogram: None,
             })
         })?;
 
@@ -908,6 +912,7 @@ impl DuckDbStore {
                     value: row.get(4)?,
                     unit: row.get(5)?,
                     attributes: serde_json::from_str(&attrs_str).unwrap_or_default(),
+                    histogram: None,
                 })
             })?;
             let mut out = Vec::new();

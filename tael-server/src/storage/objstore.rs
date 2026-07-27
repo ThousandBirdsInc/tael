@@ -50,21 +50,33 @@ pub trait ObjectBackend: Send + Sync {
 pub type DynObjectBackend = Arc<dyn ObjectBackend>;
 
 /// Where a tier's objects live. Parsed from `TAEL_COLD_STORE` / `TAEL_BLOB_STORE`
-/// (`fs` | `gcs`); `fs` is the default so a bare local run is unchanged.
+/// (`fs` | `gcs` | `s3`); `fs` is the default so a bare local run is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StoreLocation {
     #[default]
     Fs,
     Gcs,
+    S3,
 }
 
 impl StoreLocation {
-    /// Parse a location name. Anything that isn't explicitly `gcs` is `fs`.
+    /// Parse a location name. Anything unrecognized is `fs`.
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "gcs" | "google" | "gs" => StoreLocation::Gcs,
+            // `minio` is accepted because S3-compatible stores are the common
+            // way to run this without AWS, and being told `minio` is not a
+            // thing would be a pointless dead end.
+            "s3" | "aws" | "minio" => StoreLocation::S3,
             _ => StoreLocation::Fs,
         }
+    }
+
+    /// Whether this location is shared across nodes, which drives the blob-GC
+    /// single-owner guard: per-node mark-and-sweep over a shared store would
+    /// delete blobs another node still references.
+    pub fn is_shared(self) -> bool {
+        matches!(self, StoreLocation::Gcs | StoreLocation::S3)
     }
 }
 
@@ -89,7 +101,26 @@ pub fn open_object_backend(
                 .context("GCS store selected but no bucket URL configured")?;
             open_gcs_backend(url)
         }
+        StoreLocation::S3 => {
+            let url = bucket_url
+                .filter(|u| !u.trim().is_empty())
+                .context("S3 store selected but no bucket URL configured")?;
+            open_s3_backend(url)
+        }
     }
+}
+
+#[cfg(feature = "cloud")]
+fn open_s3_backend(bucket_url: &str) -> Result<DynObjectBackend> {
+    Ok(Arc::new(cloud_store::s3_from_url(bucket_url)?))
+}
+
+#[cfg(not(feature = "cloud"))]
+fn open_s3_backend(_bucket_url: &str) -> Result<DynObjectBackend> {
+    anyhow::bail!(
+        "S3 object storage is not included in this build; rebuild with `--features cloud` \
+         to use TAEL_COLD_STORE=s3 / TAEL_BLOB_STORE=s3"
+    )
 }
 
 #[cfg(feature = "cloud")]
@@ -186,16 +217,16 @@ fn collect_keys(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         let path = entry?.path();
         if path.is_dir() {
             collect_keys(root, &path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) != Some("tmp") {
-            if let Ok(rel) = path.strip_prefix(root) {
-                // Normalize to '/'-separated keys regardless of OS separator.
-                let key = rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.push(key);
-            }
+        } else if path.extension().and_then(|e| e.to_str()) != Some("tmp")
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            // Normalize to '/'-separated keys regardless of OS separator.
+            let key = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push(key);
         }
     }
     Ok(())
@@ -209,11 +240,34 @@ mod cloud_store {
 
     use anyhow::{Context, Result};
     use bytes::Bytes;
-    use object_store::{ObjectStore, gcp::GoogleCloudStorageBuilder, path::Path as ObjPath};
+    use object_store::{
+        ObjectStore, aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, path::Path as ObjPath,
+    };
     use tokio::runtime::Runtime;
     use tokio_stream::StreamExt;
 
     use super::ObjectBackend;
+
+    /// Build an [`ObjStoreBackend`] over S3 from an `s3://bucket[/prefix]` URL.
+    ///
+    /// Authentication and region come from the environment the AWS SDK already
+    /// reads (`AWS_*`, instance/pod roles), so tael never handles credentials.
+    /// `AWS_ENDPOINT_URL` points at an S3-compatible store such as MinIO or
+    /// R2, which `from_env` picks up.
+    pub fn s3_from_url(url: &str) -> Result<ObjStoreBackend> {
+        let rest = url.strip_prefix("s3://").unwrap_or(url);
+        let mut parts = rest.splitn(2, '/');
+        let bucket = parts
+            .next()
+            .filter(|b| !b.is_empty())
+            .context("S3 bucket URL missing bucket name")?;
+        let prefix = parts.next().unwrap_or("").trim_matches('/');
+        let store = AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .build()
+            .with_context(|| format!("opening S3 bucket {bucket}"))?;
+        Ok(ObjStoreBackend::new(Arc::new(store), prefix))
+    }
 
     /// Build an [`ObjStoreBackend`] over Google Cloud Storage from a
     /// `gs://bucket[/prefix]` URL. Authentication is ambient (ADC / Workload
