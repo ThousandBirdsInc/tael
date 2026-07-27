@@ -15,9 +15,7 @@ pub use comments::{CommentsStore, JsonlComments, open as open_comments};
 #[cfg(feature = "duckdb")]
 pub use duckdb_store::DuckDbStore;
 pub use fanout::FanoutStore;
-pub use objstore::{
-    DynObjectBackend, FsBackend, ObjectBackend, StoreLocation, open_object_backend,
-};
+pub use objstore::{DynObjectBackend, FsBackend, StoreLocation, open_object_backend};
 pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};
 pub use search::SearchIndex;
 

@@ -423,12 +423,16 @@ metrics_rollups = "730d"
 
     #[test]
     fn negative_retention_is_rejected() {
-        let mut policy = RetentionPolicy::default();
-        policy.logs = -1;
+        let policy = RetentionPolicy {
+            logs: -1,
+            ..Default::default()
+        };
         assert!(policy.validate().is_err());
 
-        let mut policy = RetentionPolicy::default();
-        policy.compact_interval_secs = 0;
+        let policy = RetentionPolicy {
+            compact_interval_secs: 0,
+            ..Default::default()
+        };
         assert!(policy.validate().is_err());
     }
 

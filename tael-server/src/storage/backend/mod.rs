@@ -9,6 +9,7 @@
 //! `duckdb` Cargo feature, but the default backend is self-contained so the
 //! default CLI install does not compile or link DuckDB.
 
+mod codec;
 mod cold;
 mod hot;
 mod wal;
@@ -276,6 +277,26 @@ impl TaelBackend {
         }
     }
 
+    /// Redeem a WAL ticket once its record is in the projection, and checkpoint
+    /// if enough have accumulated.
+    ///
+    /// The checkpoint runs on whichever writer happens to trip the threshold,
+    /// which costs that one call the drain (a few ms per thousand records)
+    /// while every other write pays nothing. A background thread would smooth
+    /// that out, but it would need a self-reference the `Arc<dyn Store>` this
+    /// is held behind does not give us, and the tail it removes is small.
+    fn applied(&self, ticket: wal::WalTicket) -> Result<()> {
+        if self.wal.mark_applied(ticket) {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    /// Flush the hot tier durably and let the WAL forget everything applied.
+    pub fn checkpoint(&self) -> Result<usize> {
+        self.wal.checkpoint(|| self.hot.flush())
+    }
+
     /// Re-apply any WAL records left unconsumed by a crash, then advance past
     /// them (they are consumed by `drain`).
     fn replay(&self) -> Result<()> {
@@ -310,24 +331,21 @@ impl TaelBackend {
 impl Store for TaelBackend {
     // ── Writes: WAL → apply (hot + projection) → mark applied ───────
     fn insert_spans(&self, spans: &[Span]) -> Result<()> {
-        self.wal.append_spans(spans)?;
+        let ticket = self.wal.append_spans(spans)?;
         self.apply_spans(spans)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     fn insert_logs(&self, logs: &[LogRecord]) -> Result<()> {
-        self.wal.append_logs(logs)?;
+        let ticket = self.wal.append_logs(logs)?;
         self.apply_logs(logs)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     fn insert_metrics(&self, metrics: &[MetricPoint]) -> Result<()> {
-        self.wal.append_metrics(metrics)?;
+        let ticket = self.wal.append_metrics(metrics)?;
         self.apply_metrics(metrics)?;
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 
     // ── Core reads: hot tier, unioned with the cold tier ────────────
@@ -372,7 +390,7 @@ impl Store for TaelBackend {
 
         // Mirror the real access paths so the counts describe what a query
         // actually does, not an idealized plan.
-        let (path, tiers, scanned, text_matches) = if let Some(ref text) = query.text {
+        let (path, tiers, scanned, text_matches, index) = if let Some(ref text) = query.text {
             let trace_ids = self.search.search_trace_ids(text, 1000)?;
             let mut scanned = 0usize;
             for tid in &trace_ids {
@@ -383,12 +401,28 @@ impl Store for TaelBackend {
                 vec!["search", "hot", "cold"],
                 scanned,
                 Some(trace_ids.len()),
+                None,
             )
         } else {
-            let hot_rows = self.hot.query_traces(query)?.len();
-            if hot_rows >= limit {
+            let hot = self.hot.scan_spans(query)?;
+            // `rows_scanned` counts index entries visited, which is the number
+            // that says whether the chosen index was selective. `rows_decoded`
+            // is how many survived the covering header far enough to be read
+            // back in full.
+            let index = serde_json::json!({
+                "keyspace": hot.index.keyspace(),
+                "rows_scanned": hot.rows_scanned,
+                "rows_decoded": hot.rows_decoded,
+            });
+            if hot.spans.len() >= limit {
                 // The hot tier filled the limit, so cold was never opened.
-                ("hot_scan", vec!["hot"], hot_rows, None)
+                (
+                    "hot_scan",
+                    vec!["hot"],
+                    hot.rows_scanned as usize,
+                    None,
+                    Some(index),
+                )
             } else {
                 let cold_rows = self
                     .cold
@@ -399,8 +433,9 @@ impl Store for TaelBackend {
                 (
                     "hot_then_cold_scan",
                     vec!["hot", "cold"],
-                    hot_rows + cold_rows,
+                    hot.rows_scanned as usize + cold_rows,
                     None,
+                    Some(index),
                 )
             }
         };
@@ -410,6 +445,7 @@ impl Store for TaelBackend {
             "supported": true,
             "engine": "tael-backend",
             "access_path": path,
+            "hot_index": index,
             "tiers_consulted": tiers,
             "rows_scanned": scanned,
             "rows_returned": returned,
@@ -658,9 +694,12 @@ impl Store for TaelBackend {
     }
 
     fn flush(&self) -> Result<()> {
-        // Graceful-shutdown flush: tighten the hot tier so a restart/standby
-        // replays less WAL. WAL fsync already guarantees durability.
-        self.hot.flush()
+        // Graceful-shutdown flush: checkpoint, which makes the hot tier durable
+        // and consumes the applied WAL, so a restart replays at most the last
+        // cursor-persist chunk instead of everything since the last threshold
+        // checkpoint.
+        self.checkpoint()?;
+        Ok(())
     }
 
     /// Standby entrypoint: durably accept a framed WAL record shipped from a
@@ -670,14 +709,13 @@ impl Store for TaelBackend {
     /// promotion on leader loss (§5.1).
     fn apply_framed_wal(&self, framed: &[u8]) -> Result<()> {
         let record = WalRecord::decode(framed)?;
-        self.wal.append_framed(framed)?;
+        let ticket = self.wal.append_framed(framed)?;
         match &record {
             WalRecord::Spans(s) => self.apply_spans(s)?,
             WalRecord::Logs(l) => self.apply_logs(l)?,
             WalRecord::Metrics(m) => self.apply_metrics(m)?,
         }
-        self.wal.mark_applied()?;
-        Ok(())
+        self.applied(ticket)
     }
 }
 
@@ -958,6 +996,41 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     } else {
         numerator as f64 / denominator as f64
     }
+}
+
+/// Human-readable hints for an `explain` result.
+///
+/// These target the mistakes that actually produce confusing query results:
+/// silently hitting the row limit, filtering on an attribute value that only
+/// matches exactly, or asking for payload text on data that has none.
+fn explain_notes(query: &TraceQuery, returned: usize, limit: usize) -> Vec<String> {
+    let mut notes = Vec::new();
+    if returned >= limit {
+        notes.push(format!(
+            "result hit the limit of {limit}; there may be more matches — raise --limit or narrow the window"
+        ));
+    }
+    if returned == 0 && !query.attributes.is_empty() {
+        notes.push(
+            "no matches with attribute filters applied; attribute matching is exact — \
+             check the value, or drop the filter to confirm the spans exist"
+                .to_string(),
+        );
+    }
+    if query.text.is_some() {
+        notes.push(
+            "--text searches indexed LLM prompt/completion payloads and log bodies only, \
+             not span attributes"
+                .to_string(),
+        );
+    }
+    if query.last_seconds.is_none() {
+        notes.push(
+            "no time window given; the scan covers all retained data — pass --last to bound it"
+                .to_string(),
+        );
+    }
+    notes
 }
 
 #[cfg(test)]
@@ -1321,39 +1394,4 @@ mod tests {
         assert_eq!(b2.get_trace("t1").unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(format!("wal_files/{key}"));
     }
-}
-
-/// Human-readable hints for an `explain` result.
-///
-/// These target the mistakes that actually produce confusing query results:
-/// silently hitting the row limit, filtering on an attribute value that only
-/// matches exactly, or asking for payload text on data that has none.
-fn explain_notes(query: &TraceQuery, returned: usize, limit: usize) -> Vec<String> {
-    let mut notes = Vec::new();
-    if returned >= limit {
-        notes.push(format!(
-            "result hit the limit of {limit}; there may be more matches — raise --limit or narrow the window"
-        ));
-    }
-    if returned == 0 && !query.attributes.is_empty() {
-        notes.push(
-            "no matches with attribute filters applied; attribute matching is exact — \
-             check the value, or drop the filter to confirm the spans exist"
-                .to_string(),
-        );
-    }
-    if query.text.is_some() {
-        notes.push(
-            "--text searches indexed LLM prompt/completion payloads and log bodies only, \
-             not span attributes"
-                .to_string(),
-        );
-    }
-    if query.last_seconds.is_none() {
-        notes.push(
-            "no time window given; the scan covers all retained data — pass --last to bound it"
-                .to_string(),
-        );
-    }
-    notes
 }

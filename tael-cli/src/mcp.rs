@@ -646,14 +646,12 @@ mod tests {
     async fn unknown_methods_and_tools_are_reported_distinctly() {
         let err = dispatch(&client(), "nope/nope", &json!({}))
             .await
-            .err()
-            .expect("unknown method should fail");
+            .expect_err("unknown method should fail");
         assert_eq!(err.code, METHOD_NOT_FOUND);
 
         let err = call_tool(&client(), &json!({ "name": "not_a_tool" }))
             .await
-            .err()
-            .expect("unknown tool should fail");
+            .expect_err("unknown tool should fail");
         assert_eq!(err.code, METHOD_NOT_FOUND);
     }
 
@@ -661,8 +659,7 @@ mod tests {
     async fn missing_required_arguments_are_rejected_before_any_request() {
         let err = call_tool(&client(), &json!({ "name": "get_trace", "arguments": {} }))
             .await
-            .err()
-            .expect("get_trace without a trace_id should fail");
+            .expect_err("get_trace without a trace_id should fail");
         assert_eq!(err.code, INVALID_PARAMS);
         assert!(err.message.contains("trace_id"), "{}", err.message);
     }

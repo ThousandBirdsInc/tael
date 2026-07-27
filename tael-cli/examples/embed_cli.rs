@@ -20,6 +20,9 @@ struct MyApp {
 }
 
 #[derive(Subcommand)]
+// The whole point of the example is mounting `Commands` as it comes; boxing it
+// to even out the variant sizes would misrepresent how a host app writes this.
+#[allow(clippy::large_enum_variant)]
 enum MyCommand {
     /// A command of the host application itself
     Deploy,
