@@ -53,6 +53,7 @@ pub mod exit;
 pub mod mcp;
 pub mod output;
 pub mod tui;
+pub mod tui_panels;
 
 pub use client::TaelClient;
 /// Re-export of the server crate so embedders can run an in-process tael

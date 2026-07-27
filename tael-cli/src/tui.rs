@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::TaelClient;
+use crate::tui_panels::{Panel, Panels};
 
 #[derive(Clone)]
 struct Comment {
@@ -75,6 +76,7 @@ struct App {
     eval_cases: Vec<EvalCaseRow>,
     eval_state: TableState,
     eval_failures_only: bool,
+    panels: Panels,
 }
 
 struct SpanViewer {
@@ -94,6 +96,38 @@ enum Tab {
     Evals,
     Timeline,
     Detail,
+    /// The panels in `tui_panels` — everything added after the original four
+    /// views. Held as one variant so adding a panel does not mean touching the
+    /// tab enum, the header, and the key handler separately.
+    Panel(Panel),
+}
+
+/// Tabs in the order the number keys select them. `Detail` is absent because it
+/// is reached by opening a trace, not by asking for it.
+const TAB_ORDER: [Tab; 10] = [
+    Tab::Traces,
+    Tab::Services,
+    Tab::Evals,
+    Tab::Timeline,
+    Tab::Panel(Panel::Health),
+    Tab::Panel(Panel::Topology),
+    Tab::Panel(Panel::Automation),
+    Tab::Panel(Panel::Clusters),
+    Tab::Panel(Panel::Review),
+    Tab::Panel(Panel::Sql),
+];
+
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Traces => "Traces",
+            Tab::Services => "Services",
+            Tab::Evals => "Evals",
+            Tab::Timeline => "Timeline",
+            Tab::Detail => "Trace",
+            Tab::Panel(panel) => panel.label(),
+        }
+    }
 }
 
 const MAX_LIVE_TRACES: usize = 500;
@@ -239,6 +273,7 @@ impl App {
             eval_cases: Vec::new(),
             eval_state: TableState::default(),
             eval_failures_only: false,
+            panels: Panels::new("1h"),
         }
     }
 
@@ -661,6 +696,25 @@ impl App {
             return None;
         }
 
+        // SQL query line. Like the filter and comment inputs, this claims every
+        // key while it is open so typing `q` writes a `q` instead of quitting.
+        if let Tab::Panel(Panel::Sql) = self.tab
+            && self.panels.sql_editing()
+        {
+            match code {
+                KeyCode::Enter => {
+                    if self.panels.sql_submit() {
+                        return Some("refresh_panel");
+                    }
+                }
+                KeyCode::Esc => self.panels.sql_cancel_edit(),
+                KeyCode::Backspace => self.panels.sql_backspace(),
+                KeyCode::Char(c) => self.panels.sql_key(c),
+                _ => {}
+            }
+            return None;
+        }
+
         // Filter input mode
         if self.filter_input.is_some() {
             match code {
@@ -726,23 +780,37 @@ impl App {
                     self.eval_state.select(None);
                 }
             }
-            KeyCode::Char('1') => {
-                self.tab = Tab::Traces;
-                self.table_state.select(None);
-            }
-            KeyCode::Char('2') => {
-                self.tab = Tab::Services;
-                if self.services_state.selected().is_none() && !self.services.is_empty() {
-                    self.services_state.select(Some(0));
+            // '1'..'9' then '0' select the tabs in `TAB_ORDER`, so the digit
+            // shown in the header is the digit that gets you there.
+            KeyCode::Char(digit @ '0'..='9') => {
+                let idx = if digit == '0' {
+                    9
+                } else {
+                    digit as usize - '1' as usize
+                };
+                if let Some(&tab) = TAB_ORDER.get(idx) {
+                    self.tab = tab;
+                    match tab {
+                        Tab::Traces => self.table_state.select(None),
+                        Tab::Services => {
+                            if self.services_state.selected().is_none() && !self.services.is_empty()
+                            {
+                                self.services_state.select(Some(0));
+                            }
+                        }
+                        Tab::Evals => self.eval_state.select(None),
+                        Tab::Timeline => self.timeline_state.select(None),
+                        // Panels fetch on first open rather than all at once on
+                        // connect: six extra requests at startup would be paid
+                        // by every user for views most sessions never open.
+                        Tab::Panel(panel) => {
+                            if self.panels.needs_load(panel) {
+                                return Some("load_panel");
+                            }
+                        }
+                        Tab::Detail => {}
+                    }
                 }
-            }
-            KeyCode::Char('3') => {
-                self.tab = Tab::Evals;
-                self.eval_state.select(None);
-            }
-            KeyCode::Char('4') => {
-                self.tab = Tab::Timeline;
-                self.timeline_state.select(None);
             }
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char('/') => {
@@ -759,6 +827,14 @@ impl App {
             KeyCode::Char('r') => {
                 if self.tab == Tab::Evals {
                     return Some("refresh_evals");
+                }
+                if matches!(self.tab, Tab::Panel(_)) {
+                    return Some("refresh_panel");
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Tab::Panel(Panel::Sql) = self.tab {
+                    self.panels.sql_begin_edit();
                 }
             }
             KeyCode::Char('\\') => {
@@ -793,7 +869,9 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.tab == Tab::Detail {
+                if let Tab::Panel(panel) = self.tab {
+                    self.panels.move_selection(panel, 1);
+                } else if self.tab == Tab::Detail {
                     let len = self.waterfall_rows.len();
                     if len > 0 {
                         let i = self.waterfall_state.selected().map(|i| i + 1).unwrap_or(0);
@@ -826,7 +904,9 @@ impl App {
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.tab == Tab::Detail {
+                if let Tab::Panel(panel) = self.tab {
+                    self.panels.move_selection(panel, -1);
+                } else if self.tab == Tab::Detail {
                     let i = self
                         .waterfall_state
                         .selected()
@@ -864,6 +944,14 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                // A cluster exemplar or a review request names a trace; opening
+                // it is the point of looking at either list.
+                if let Tab::Panel(panel) = self.tab {
+                    if self.panels.selected_trace_id(panel).is_some() {
+                        return Some("load_panel_trace");
+                    }
+                    return None;
+                }
                 if self.tab == Tab::Traces && self.table_state.selected().is_some() {
                     return Some("load_trace");
                 }
@@ -1153,6 +1241,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             }
         }
         Tab::Detail => draw_trace_detail(frame, chunks[1], app),
+        Tab::Panel(panel) => app.panels.draw(frame, chunks[1], panel),
     }
 
     draw_footer(frame, chunks[2], app);
@@ -1164,49 +1253,28 @@ fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    let tabs: Vec<Span> = vec![
-        if app.tab == Tab::Traces {
-            Span::styled(
-                " 1:Traces ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            )
+    // Built by iterating `TAB_ORDER` rather than unrolled per tab: with ten of
+    // them the unrolled form was most of this function and had to be edited in
+    // three places to add one.
+    let mut tabs: Vec<Span> = Vec::new();
+    for (idx, tab) in TAB_ORDER.iter().enumerate() {
+        if idx > 0 {
+            tabs.push(Span::raw(" "));
+        }
+        let label = format!(" {}:{} ", idx + 1, tab.label());
+        tabs.push(if app.tab == *tab {
+            Span::styled(label, Style::default().fg(Color::Black).bg(Color::Cyan))
         } else {
-            Span::styled(" 1:Traces ", Style::default().fg(Color::DarkGray))
-        },
-        Span::raw("  "),
-        if app.tab == Tab::Services {
-            Span::styled(
-                " 2:Services ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            )
-        } else {
-            Span::styled(" 2:Services ", Style::default().fg(Color::DarkGray))
-        },
-        Span::raw("  "),
-        if app.tab == Tab::Evals {
-            Span::styled(
-                " 3:Evals ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            )
-        } else {
-            Span::styled(" 3:Evals ", Style::default().fg(Color::DarkGray))
-        },
-        Span::raw("  "),
-        if app.tab == Tab::Timeline {
-            Span::styled(
-                " 4:Timeline ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            )
-        } else {
-            Span::styled(" 4:Timeline ", Style::default().fg(Color::DarkGray))
-        },
-        Span::raw("  "),
-        if app.tab == Tab::Detail {
-            Span::styled(" Trace ", Style::default().fg(Color::Black).bg(Color::Cyan))
-        } else {
-            Span::raw("")
-        },
-    ];
+            Span::styled(label, Style::default().fg(Color::DarkGray))
+        });
+    }
+    if app.tab == Tab::Detail {
+        tabs.push(Span::raw(" "));
+        tabs.push(Span::styled(
+            " Trace ",
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
+    }
 
     let mut title_parts = vec![Span::styled(
         " tael ",
@@ -2453,6 +2521,35 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("esc", Style::default().fg(Color::Cyan)),
             Span::raw(":cancel  "),
         ])
+    } else if let Tab::Panel(Panel::Sql) = app.tab {
+        Line::from(vec![
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
+            Span::raw(":quit  "),
+            Span::styled("e", Style::default().fg(Color::Cyan)),
+            Span::raw(":edit query  "),
+            Span::styled("r", Style::default().fg(Color::Cyan)),
+            Span::raw(":run  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":navigate  "),
+            Span::styled("1-0", Style::default().fg(Color::Cyan)),
+            Span::raw(":tabs  "),
+        ])
+    } else if let Tab::Panel(panel) = app.tab {
+        let mut spans = vec![
+            Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
+            Span::raw(":quit  "),
+            Span::styled("r", Style::default().fg(Color::Cyan)),
+            Span::raw(":refresh  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":navigate  "),
+        ];
+        if matches!(panel, Panel::Clusters | Panel::Review) {
+            spans.push(Span::styled("enter", Style::default().fg(Color::Cyan)));
+            spans.push(Span::raw(":open trace  "));
+        }
+        spans.push(Span::styled("1-0", Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(":tabs  "));
+        Line::from(spans)
     } else if app.tab == Tab::Detail {
         Line::from(vec![
             Span::styled(" ctrl-c", Style::default().fg(Color::Cyan)),
@@ -2686,6 +2783,22 @@ async fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                 }
                                 Some("refresh_evals") => {
                                     app.poll_evals().await;
+                                }
+                                Some("load_panel") | Some("refresh_panel") => {
+                                    if let Tab::Panel(panel) = app.tab {
+                                        app.panels.refresh(&app.client, panel).await;
+                                    }
+                                }
+                                Some("load_panel_trace") => {
+                                    let trace_id = match current_tab {
+                                        Tab::Panel(panel) => app.panels.selected_trace_id(panel),
+                                        _ => None,
+                                    };
+                                    if let Some(trace_id) = trace_id {
+                                        app.prev_tab = current_tab;
+                                        app.tab = Tab::Detail;
+                                        app.load_trace(&trace_id).await;
+                                    }
                                 }
                                 _ => {}
                             }
