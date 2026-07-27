@@ -376,7 +376,7 @@ impl Store for TaelBackend {
             })
             .collect();
         // Newest first, matching every other query surface.
-        out.sort_by(|a, b| b.bucket_start.cmp(&a.bucket_start));
+        out.sort_by_key(|b| std::cmp::Reverse(b.bucket_start));
         out.truncate(limit);
         Ok(out)
     }
@@ -487,7 +487,7 @@ impl Store for TaelBackend {
                     }
                 }
             }
-            matched.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            matched.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             matched.truncate(limit);
             return Ok(matched);
         }
@@ -505,7 +505,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|s| hot::span_matches(s, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for s in cold {
                 if results.len() >= limit {
                     break;
@@ -545,7 +545,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|l| hot::log_matches(l, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for l in cold {
                 if results.len() >= limit {
                     break;
@@ -568,7 +568,7 @@ impl Store for TaelBackend {
                 .into_iter()
                 .filter(|m| hot::metric_matches(m, query, cutoff))
                 .collect();
-            cold.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for m in cold {
                 if results.len() >= limit {
                     break;
@@ -958,7 +958,7 @@ impl SpanWindow {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| b.span_count.cmp(&a.span_count));
+        rows.sort_by_key(|b| std::cmp::Reverse(b.span_count));
         rows.truncate(10);
         rows
     }
@@ -967,7 +967,7 @@ impl SpanWindow {
         let mut rows: Vec<((String, String), i64)> = std::mem::take(&mut self.error_operations)
             .into_iter()
             .collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        rows.sort_by_key(|b| std::cmp::Reverse(b.1));
         rows.truncate(10);
         rows.into_iter()
             .map(|((service, operation), error_count)| ErrorOperation {

@@ -319,7 +319,7 @@ impl HotTier {
                 },
             })
             .collect();
-        services.sort_by(|a, b| b.span_count.cmp(&a.span_count));
+        services.sort_by_key(|b| std::cmp::Reverse(b.span_count));
         Ok(services)
     }
 

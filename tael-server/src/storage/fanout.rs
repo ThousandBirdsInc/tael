@@ -118,7 +118,7 @@ impl Store for FanoutStore {
             .flatten()
             .collect();
         // Each shard returned newest-first; merge by re-sorting and re-limiting.
-        all.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+        all.sort_by_key(|b| std::cmp::Reverse(b.start_time));
         all.truncate(limit);
         Ok(all)
     }
@@ -186,7 +186,7 @@ impl Store for FanoutStore {
             .into_iter()
             .flatten()
             .collect();
-        all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         all.truncate(limit);
         Ok(all)
     }
@@ -210,7 +210,7 @@ impl Store for FanoutStore {
             .into_iter()
             .flatten()
             .collect();
-        all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         all.truncate(limit);
         Ok(all)
     }
@@ -350,7 +350,7 @@ fn merge_services(per_shard: Vec<Vec<ServiceInfo>>) -> Vec<ServiceInfo> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.span_count.cmp(&a.span_count));
+    out.sort_by_key(|b| std::cmp::Reverse(b.span_count));
     out
 }
 
@@ -453,7 +453,7 @@ fn merge_summaries(
             }
         })
         .collect();
-    top_services.sort_by(|a, b| b.span_count.cmp(&a.span_count));
+    top_services.sort_by_key(|b| std::cmp::Reverse(b.span_count));
     top_services.truncate(10);
 
     let mut top_error_operations: Vec<ErrorOperation> = errops
@@ -464,7 +464,7 @@ fn merge_summaries(
             error_count,
         })
         .collect();
-    top_error_operations.sort_by(|a, b| b.error_count.cmp(&a.error_count));
+    top_error_operations.sort_by_key(|b| std::cmp::Reverse(b.error_count));
     top_error_operations.truncate(10);
 
     SummaryReport {
@@ -540,7 +540,7 @@ mod tests {
         }
         fn query_traces(&self, query: &TraceQuery) -> Result<Vec<Span>> {
             let mut v = self.spans.lock().unwrap().clone();
-            v.sort_by(|a, b| b.start_time.cmp(&a.start_time)); // newest-first contract
+            v.sort_by_key(|b| std::cmp::Reverse(b.start_time)); // newest-first contract
             v.truncate(query.limit.unwrap_or(100) as usize);
             Ok(v)
         }

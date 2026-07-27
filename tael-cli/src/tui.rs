@@ -883,10 +883,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                if self.tab == Tab::Detail {
-                    self.tab = self.prev_tab;
-                }
+            // Backspace leaves the detail view; anywhere else it does nothing,
+            // which the catch-all arm below already handles.
+            KeyCode::Backspace if self.tab == Tab::Detail => {
+                self.tab = self.prev_tab;
             }
             _ => {}
         }

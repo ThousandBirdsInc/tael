@@ -208,7 +208,7 @@ pub fn cluster(
         });
     }
     // Biggest first: the largest cluster is usually the most worth naming.
-    clusters.sort_by(|a, b| b.size.cmp(&a.size));
+    clusters.sort_by_key(|b| std::cmp::Reverse(b.size));
     for (i, c) in clusters.iter_mut().enumerate() {
         c.id = i;
     }
