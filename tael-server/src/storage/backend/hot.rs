@@ -535,10 +535,17 @@ pub enum SpanIndex {
 
 impl SpanIndex {
     fn choose(query: &TraceQuery) -> Self {
-        if query.service.is_some() {
-            SpanIndex::Service
-        } else if query.status.as_deref() == Some("error") {
+        // Errors win over service when a query asks for both. The error index
+        // holds a fraction of the tier; the service index holds the tier
+        // divided by the number of services, which for a single-service
+        // deployment is the whole thing. And the covering header rejects the
+        // wrong service for free, so nothing is lost by narrowing on errors
+        // first. This is the triage query — "what is failing in api" — so it
+        // is the one worth getting right.
+        if query.status.as_deref() == Some("error") {
             SpanIndex::Errors
+        } else if query.service.is_some() {
+            SpanIndex::Service
         } else {
             SpanIndex::Time
         }
@@ -994,6 +1001,35 @@ mod tests {
         assert_eq!(scan.index, SpanIndex::Errors);
         assert_eq!(scan.spans.len(), 1);
         assert_eq!(scan.rows_scanned, 1);
+    }
+
+    #[test]
+    fn a_service_scoped_error_query_narrows_on_errors_first() {
+        // Both filters have an index. The error index is a fraction of the
+        // tier while the service index is the tier divided by the number of
+        // services, so errors is the narrower one — and the covering header
+        // rejects the other services for free.
+        let (tier, _dir) = tier();
+        let mut spans = vec![span("bad", "api", SpanStatus::Error, 1.0)];
+        for i in 0..200 {
+            spans.push(span(&format!("ok{i}"), "api", SpanStatus::Ok, 1.0));
+            spans.push(span(&format!("other{i}"), "worker", SpanStatus::Error, 1.0));
+        }
+        tier.insert_spans(&spans).unwrap();
+
+        let scan = tier
+            .scan_spans(&TraceQuery {
+                service: Some("api".into()),
+                status: Some("error".into()),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(scan.index, SpanIndex::Errors);
+        assert_eq!(scan.spans.len(), 1);
+        // 201 error spans exist; only api's is read back in full.
+        assert_eq!(scan.rows_scanned, 201);
+        assert_eq!(scan.rows_decoded, 1);
     }
 
     #[test]
