@@ -71,11 +71,21 @@ jobs:
       # The bundled front-end is committed (that is how the app ships without a
       # build step), so a stale build is a real defect: type-check the source
       # and rebuild to prove the committed assets can be regenerated.
+      #
+      # `working-directory` rather than `npm --prefix`: the latter picks the
+      # package to install but still runs the command in the checkout root,
+      # where tsc finds no tsconfig.json and prints its help instead.
+      - name: Front-end install
+        run: npm ci
+        working-directory: tael-gui
+
       - name: Front-end types
-        run: npm --prefix tael-gui ci && npm --prefix tael-gui exec tsc -- --noEmit
+        run: npx tsc --noEmit
+        working-directory: tael-gui
 
       - name: Front-end build
-        run: npm --prefix tael-gui exec vite build
+        run: npx vite build
+        working-directory: tael-gui
 
       - name: Clippy
         run: cargo clippy -p tael-gui --all-targets -- -D warnings
