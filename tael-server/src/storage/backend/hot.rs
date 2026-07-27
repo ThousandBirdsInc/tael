@@ -181,6 +181,53 @@ impl HotTier {
         Ok(scan)
     }
 
+    /// Visit every span in a window without reading a single span.
+    ///
+    /// The aggregates behind `summarize` and `anomalies` need five things from
+    /// each span — trace id, service, operation, duration, whether it errored —
+    /// and all five live in a span index: four in the covering header and the
+    /// trace id in the key. So the whole report can be computed from an index
+    /// scan, which is the difference between decoding every span in the window
+    /// and touching none of them. The numbers stay exact; nothing here samples
+    /// or estimates.
+    ///
+    /// Returns the number of entries visited.
+    pub fn for_each_span_fact(
+        &self,
+        service: Option<&str>,
+        cutoff_ns: i64,
+        mut visit: impl FnMut(SpanFacts<'_>),
+    ) -> Result<u64> {
+        let mut visited = 0u64;
+        let entries: Box<dyn Iterator<Item = fjall::Guard>> = match service {
+            Some(service) => {
+                let (lo, hi) = service_bounds(service, cutoff_ns);
+                Box::new(self.spans_svc.range(lo..hi))
+            }
+            None => Box::new(self.spans_time.range(time_lower_bound(cutoff_ns)..)),
+        };
+        for kv in entries {
+            let (key, value) = kv.into_inner()?;
+            let Some(entry) = decode_index_entry(&value) else {
+                continue;
+            };
+            let trace_id = match service {
+                Some(_) => trace_id_of_service_key(&key),
+                None => trace_id_of_time_key(&key),
+            };
+            let Some(trace_id) = trace_id else { continue };
+            visited += 1;
+            visit(SpanFacts {
+                trace_id,
+                service: entry.service,
+                operation: entry.operation,
+                duration_ms: entry.duration_ms,
+                is_error: entry.status == STATUS_ERROR,
+            });
+        }
+        Ok(visited)
+    }
+
     /// Remove and return all spans whose `start_ns` is before `cutoff_ns`.
     /// Used by the compactor to roll aged spans into the cold tier.
     pub fn evict_spans_before(&self, cutoff_ns: i64) -> Result<Vec<Span>> {
@@ -507,6 +554,17 @@ impl SpanIndex {
     }
 }
 
+/// Everything an aggregate needs about one span, read straight out of a span
+/// index. Borrowed from the index entry, so a visitor that wants to keep a
+/// string has to say so.
+pub struct SpanFacts<'a> {
+    pub trace_id: &'a str,
+    pub service: &'a str,
+    pub operation: &'a str,
+    pub duration_ms: f64,
+    pub is_error: bool,
+}
+
 /// The result of a span scan, including what it cost.
 ///
 /// `rows_scanned` versus `rows_decoded` is the number an agent needs to tell a
@@ -549,7 +607,13 @@ fn span_service_key(span: &Span) -> Vec<u8> {
 /// fetching the span. `service\0` + `be(ts)` + `trace_id` + `\0` + `span_id`.
 fn trace_id_of_service_key(key: &[u8]) -> Option<&str> {
     let sep = key.iter().position(|&b| b == SEP)?;
-    let rest = key.get(sep + 1 + 8..)?;
+    trace_id_of_time_key(key.get(sep + 1..)?)
+}
+
+/// The trace id embedded in a `spans_time` (or `spans_err`) key:
+/// `be(ts)` + `trace_id` + `\0` + `span_id`.
+fn trace_id_of_time_key(key: &[u8]) -> Option<&str> {
+    let rest = key.get(8..)?;
     let end = rest.iter().position(|&b| b == SEP)?;
     std::str::from_utf8(&rest[..end]).ok()
 }
@@ -607,25 +671,33 @@ fn status_code(status: &SpanStatus) -> u8 {
 /// A span index's value: the filters worth answering without touching the span,
 /// followed by the primary key of the span itself.
 ///
-/// `[status: u8][duration_ms: f64 le][service_len: u16 le][service][primary]`.
+/// `[status: u8][duration_ms: f64 le][service_len: u16 le][service]`
+/// `[operation_len: u16 le][operation][primary]`.
 ///
 /// Storing the whole span here instead would remove the second lookup entirely,
 /// but at three indexes it would also quadruple the hot tier. This is the small
-/// part of a span that filters actually ask about.
+/// part of a span that filters and aggregates actually ask about — between
+/// these four fields and the trace id in the key, `summarize` never has to read
+/// a span at all.
 struct IndexEntry<'a> {
     status: u8,
     duration_ms: f64,
     service: &'a str,
+    operation: &'a str,
     primary: &'a [u8],
 }
 
 fn encode_index_entry(span: &Span, primary: &[u8]) -> Vec<u8> {
     let service = span.service.as_bytes();
-    let mut v = Vec::with_capacity(INDEX_HEADER_LEN + service.len() + primary.len());
+    let operation = span.operation.as_bytes();
+    let mut v =
+        Vec::with_capacity(INDEX_HEADER_LEN + service.len() + 2 + operation.len() + primary.len());
     v.push(status_code(&span.status));
     v.extend_from_slice(&span.duration_ms.to_le_bytes());
     v.extend_from_slice(&(service.len() as u16).to_le_bytes());
     v.extend_from_slice(service);
+    v.extend_from_slice(&(operation.len() as u16).to_le_bytes());
+    v.extend_from_slice(operation);
     v.extend_from_slice(primary);
     v
 }
@@ -638,11 +710,16 @@ fn decode_index_entry(bytes: &[u8]) -> Option<IndexEntry<'_>> {
     let service_len = u16::from_le_bytes(bytes[9..11].try_into().ok()?) as usize;
     let service_end = INDEX_HEADER_LEN + service_len;
     let service = std::str::from_utf8(bytes.get(INDEX_HEADER_LEN..service_end)?).ok()?;
+    let operation_len =
+        u16::from_le_bytes(bytes.get(service_end..service_end + 2)?.try_into().ok()?) as usize;
+    let operation_end = service_end + 2 + operation_len;
+    let operation = std::str::from_utf8(bytes.get(service_end + 2..operation_end)?).ok()?;
     Some(IndexEntry {
         status: bytes[0],
         duration_ms,
         service,
-        primary: bytes.get(service_end..)?,
+        operation,
+        primary: bytes.get(operation_end..)?,
     })
 }
 
@@ -670,6 +747,11 @@ impl IndexEntry<'_> {
         }
         if let Some(max) = query.max_duration_ms
             && self.duration_ms > max
+        {
+            return false;
+        }
+        if let Some(operation) = &query.operation
+            && !self.operation.contains(operation.as_str())
         {
             return false;
         }
