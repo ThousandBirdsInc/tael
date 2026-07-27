@@ -1,8 +1,14 @@
 //! Serialization benchmarks for the core telemetry models.
 //!
-//! Every span/log/metric is JSON-serialized on the ingest write path (and
-//! deserialized on the read path), so these are pure-CPU hot paths that gate
-//! ingest and query throughput independent of any storage backend.
+//! Every span/log/metric is encoded on the ingest write path and decoded on
+//! every scan-based read path, so this is a pure-CPU floor under both,
+//! independent of any storage backend.
+//!
+//! Two codecs are measured. MessagePack is what the storage engine writes:
+//! `storage::backend::codec` encodes with `rmp_serde::to_vec_named`, and these
+//! cases mirror that call exactly. JSON is kept alongside it because it is
+//! still the API's wire format, and because the gap between the two is the
+//! reason storage stopped using it.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tael_server::Span;
@@ -15,8 +21,11 @@ fn bench_serialize_spans(c: &mut Criterion) {
     for &n in &[1usize, 100, 1_000] {
         let spans = make_spans(n);
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &spans, |b, spans| {
+        group.bench_with_input(BenchmarkId::new("json", n), &spans, |b, spans| {
             b.iter(|| serde_json::to_vec(black_box(spans)).unwrap());
+        });
+        group.bench_with_input(BenchmarkId::new("msgpack", n), &spans, |b, spans| {
+            b.iter(|| rmp_serde::to_vec_named(black_box(spans)).unwrap());
         });
     }
     group.finish();
@@ -25,10 +34,15 @@ fn bench_serialize_spans(c: &mut Criterion) {
 fn bench_deserialize_spans(c: &mut Criterion) {
     let mut group = c.benchmark_group("deserialize_spans");
     for &n in &[1usize, 100, 1_000] {
-        let bytes = serde_json::to_vec(&make_spans(n)).unwrap();
+        let spans = make_spans(n);
+        let json = serde_json::to_vec(&spans).unwrap();
+        let msgpack = rmp_serde::to_vec_named(&spans).unwrap();
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &bytes, |b, bytes| {
+        group.bench_with_input(BenchmarkId::new("json", n), &json, |b, bytes| {
             b.iter(|| serde_json::from_slice::<Vec<Span>>(black_box(bytes)).unwrap());
+        });
+        group.bench_with_input(BenchmarkId::new("msgpack", n), &msgpack, |b, bytes| {
+            b.iter(|| rmp_serde::from_slice::<Vec<Span>>(black_box(bytes)).unwrap());
         });
     }
     group.finish();
@@ -40,11 +54,17 @@ fn bench_serialize_logs_metrics(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("serialize_signals");
     group.throughput(Throughput::Elements(1_000));
-    group.bench_function("logs/1000", |b| {
+    group.bench_function("json/logs/1000", |b| {
         b.iter(|| serde_json::to_vec(black_box(&logs)).unwrap());
     });
-    group.bench_function("metrics/1000", |b| {
+    group.bench_function("msgpack/logs/1000", |b| {
+        b.iter(|| rmp_serde::to_vec_named(black_box(&logs)).unwrap());
+    });
+    group.bench_function("json/metrics/1000", |b| {
         b.iter(|| serde_json::to_vec(black_box(&metrics)).unwrap());
+    });
+    group.bench_function("msgpack/metrics/1000", |b| {
+        b.iter(|| rmp_serde::to_vec_named(black_box(&metrics)).unwrap());
     });
     group.finish();
 }

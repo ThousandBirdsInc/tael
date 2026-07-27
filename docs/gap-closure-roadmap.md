@@ -73,17 +73,35 @@ documented as such rather than sold as more than it is.
 
 ### Findings that were not in the plan
 
-The benchmarks turned up three things worth their own work: unbatched ingest
-is 367 spans/s because the WAL fsync barrier dominates below ~1000 records per
-call; `query_traces` has no secondary indexes, so cost scales inversely with
-filter selectivity; and `query_summary` takes 65ms per 10k spans, which puts a
-million-span hot tier into multi-second territory for the command SKILL.md
-tells agents to run first.
+The benchmarks turned up three performance problems worth their own work, all
+since fixed. Numbers and the full explanation are in BENCHMARKS.md.
 
-Two defects surfaced along the way: the PromQL lexer rejected dotted
+| Finding | Was | Now |
+|---|---|---|
+| Unbatched ingest was 367 spans/s — a fixed per-call cost dominated below ~1000 records | 2.72 ms/call | 16.7 us/call, and throughput no longer depends on batch size |
+| `query_traces` had no secondary index, so cost scaled inversely with filter selectivity | 18.5 ms for an error query | 331 us; a selective filter is now the fast case |
+| `query_summary` took 65 ms per 10k spans, for the command SKILL.md tells agents to run first | 64.9 ms | 5.35 ms, still exact |
+
+The first was not what it looked like. The fsync theory was wrong: the WAL
+append cost 8 us and the hot-tier write cost 8 us, while *marking the record
+applied* cost 1.9 ms, because walrus persists its read cursor by rewriting and
+fsyncing an index file. Moving that to a checkpoint every 1024 records is the
+whole fix, and it made idempotent apply load-bearing — log and metric hot-tier
+keys carried a process sequence number and are now derived from record
+content, so replay overwrites instead of duplicating.
+
+The other two were closed by putting three time-ordered indexes over the spans
+keyspace (by time, by service, errors only), each entry carrying a covering
+header with the span's service, operation, duration and status. `summarize`
+and `anomalies` read those entries and never materialize a span.
+
+Three defects surfaced along the way: the PromQL lexer rejected dotted
 OpenTelemetry metric names, making the subset unusable for semconv metrics;
-and the 5-minute metric rollups were written and expired but never readable,
-which made downsampling pure cost until `query metrics --rollups` landed.
+the 5-minute metric rollups were written and expired but never readable, which
+made downsampling pure cost until `query metrics --rollups` landed; and a
+`read_next` that ran one entry past the end of the WAL made walrus re-persist
+the *start* of the current block, silently undoing a drain as far as a restart
+was concerned. The last one had been latent in the crash-replay path.
 
 ## Thesis guardrails (won't build)
 

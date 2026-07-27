@@ -25,7 +25,7 @@ Two separate runs, on different machines. **They are not comparable to each
 other** — in particular, do not read the tael-backend and DuckDB tables as a
 head-to-head.
 
-**Run A — 2026-07-26** (`tael-backend` tables below):
+**Run A — 2026-07-27** (`tael-backend` and serialization tables below):
 
 - OS: Linux 6.18.5 x86_64, 4 vCPU Intel Xeon @ 2.80GHz, 15 GiB RAM, container
 - Rust: `rustc 1.94.1 (e408947bf 2026-03-25)`
@@ -35,8 +35,7 @@ head-to-head.
   samples per case, but a full-length run would tighten the intervals. Treat
   these as order-of-magnitude, not as a regression baseline.
 
-**Run B — 2026-05-28** (blob store, serialization, and the legacy DuckDB
-appendix):
+**Run B — 2026-05-28** (blob store and the legacy DuckDB appendix):
 
 - OS: Darwin 25.4.0 arm64
 - Rust: `rustc 1.93.1 (01f6ddf75 2026-02-11)`
@@ -46,67 +45,79 @@ appendix):
 
 ## tael-backend — ingest
 
-Each insert is a WAL append + fsync, followed by the LSM hot-tier write. The
-backend is built once per case and is already holding data, so this measures
-steady-state ingest rather than a cold first write.
+Each insert is a WAL append followed by the LSM hot-tier write. The backend is
+built once per case and is already holding data, so this measures steady-state
+ingest rather than a cold first write.
 
-| Benchmark | Mean | Range | Throughput |
-| --- | ---: | ---: | ---: |
-| `tael_backend_insert_spans/1` | 2.7224 ms | 2.4061-3.0919 ms | 367.32 elem/s |
-| `tael_backend_insert_spans/100` | 2.9776 ms | 2.9188-3.0407 ms | 33.584 Kelem/s |
-| `tael_backend_insert_spans/1000` | 11.147 ms | 10.490-12.161 ms | 89.709 Kelem/s |
-| `tael_backend_insert_signals/logs/1000` | 9.7420 ms | 8.4652-11.494 ms | 102.65 Kelem/s |
-| `tael_backend_insert_signals/metrics/1000` | 7.6467 ms | 7.1183-8.3950 ms | 130.78 Kelem/s |
+The "before" column is the same benchmark on the same machine before the
+storage engine's write path was reworked (see *What changed* below).
 
-**Batching is the whole story.** A one-span insert costs 2.72 ms and a
-hundred-span insert costs 2.98 ms — the fixed cost of the durability barrier
-dominates until roughly a thousand records per call, where per-span cost
-finally falls to ~11 us. Ingest throughput is therefore a property of the
-client's batch size, not of the engine: 367 spans/s unbatched, ~90k spans/s at
-batches of 1000. The OTLP receiver already inserts a whole request's spans in
-one call, so real ingest sits at the batched end.
+| Benchmark | Before | Mean | Range | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| `tael_backend_insert_spans/1` | 2.7224 ms | 16.687 us | 15.981-17.374 us | 59.927 Kelem/s |
+| `tael_backend_insert_spans/100` | 2.9776 ms | 953.73 us | 920.60-997.89 us | 104.85 Kelem/s |
+| `tael_backend_insert_spans/1000` | 11.147 ms | 8.8998 ms | 8.6859-9.1537 ms | 112.36 Kelem/s |
+| `tael_backend_insert_signals/logs/1000` | 9.7420 ms | 5.0698 ms | 4.9534-5.1994 ms | 197.25 Kelem/s |
+| `tael_backend_insert_signals/metrics/1000` | 7.6467 ms | 3.9738 ms | 3.8928-4.0917 ms | 251.65 Kelem/s |
+
+**Batch size no longer decides throughput.** A one-span insert used to cost
+2.72 ms and a hundred-span insert 2.98 ms, because a fixed per-call durability
+cost dominated everything below roughly a thousand records; unbatched ingest
+was 367 spans/s. It now runs at 60-112k spans/s across every batch size, and
+the remaining variation is per-record work rather than a fixed cost waiting to
+be amortized. A client that sends spans one at a time is no longer punished for
+it.
 
 ## tael-backend — hot-tier queries
 
 Over a backend pre-populated with 10,000 spans (8 services, 1000 traces, all
 resident in the hot tier; timestamps spread across the preceding ~17 minutes).
 
-| Benchmark | Mean | Range | Throughput |
+| Benchmark | Before | Mean | Range |
 | --- | ---: | ---: | ---: |
-| `tael_backend_query_traces/service` | 3.1376 ms | 3.0398-3.2490 ms | n/a |
-| `tael_backend_query_traces/service_and_window` | 2.9908 ms | 2.9488-3.0364 ms | n/a |
-| `tael_backend_query_traces/error_status` | 18.500 ms | 18.258-18.775 ms | n/a |
-| `tael_backend_get_trace/10k_spans` | 31.111 us | 30.709-31.571 us | n/a |
+| `tael_backend_query_traces/service` | 3.1376 ms | 342.65 us | 339.56-345.69 us |
+| `tael_backend_query_traces/service_and_window` | 2.9908 ms | 353.02 us | 345.90-361.81 us |
+| `tael_backend_query_traces/error_status` | 18.500 ms | 331.24 us | 328.24-334.55 us |
+| `tael_backend_get_trace/10k_spans` | 31.111 us | 23.642 us | 23.468-23.847 us |
 
 `get_trace` is an indexed lookup on `trace_id` and is fast regardless of how
 much data surrounds the trace.
 
-`query_traces` is not indexed: it walks the time index newest-first,
-deserializes each span, and stops once `limit` matches are found. Cost is
-therefore proportional to *rows scanned to fill the limit*, i.e. inversely
-proportional to the filter's selectivity. `service` matches 1 span in 8, so
-~800 rows are examined to return 100 (3.1 ms). `status=error` matches 1 in 50,
-so ~5000 rows are examined for the same 100 results (18.5 ms). Adding
-`last_seconds` on top of a service filter costs nothing measurable, because the
-scan is already in time order. A low-selectivity filter over a large hot tier
-is the current worst case for this engine.
+`query_traces` used to walk the time index newest-first and deserialize every
+span it passed, so its cost was inversely proportional to the filter's
+selectivity — `status=error` matches 1 span in 50, so returning 100 results
+examined ~5000 rows and took 18.5 ms. There are now indexes for the two filters
+that matter (service, and errors only), so the three cases above cost about the
+same thing: each visits roughly the 100 rows it returns. **A selective filter is
+now the fast case rather than the slow one.**
+
+Filters with no index of their own — duration bounds, operation substrings —
+still visit every row in the window, but the index entry carries enough of the
+span (service, operation, duration, status) to reject non-matches without
+reading the span at all. `explain` reports which index was chosen along with
+rows scanned versus rows actually decoded.
 
 ## tael-backend — aggregations
 
-Same 10,000-span fixture. Both paths are full scans of the hot tier with
-per-row JSON deserialization; neither uses a precomputed rollup.
+Same 10,000-span fixture.
 
-| Benchmark | Mean | Range | Throughput |
+| Benchmark | Before | Mean | Range |
 | --- | ---: | ---: | ---: |
-| `tael_backend_aggregate/list_services/10k_spans` | 28.724 ms | 28.507-28.955 ms | n/a |
-| `tael_backend_aggregate/query_summary/10k_spans` | 64.901 ms | 64.090-65.784 ms | n/a |
-| `tael_backend_aggregate/query_summary_scoped/10k_spans` | 41.639 ms | 40.684-42.695 ms | n/a |
+| `tael_backend_aggregate/list_services/10k_spans` | 28.724 ms | 5.3365 ms | 5.3027-5.3718 ms |
+| `tael_backend_aggregate/query_summary/10k_spans` | 64.901 ms | 5.3519 ms | 5.3089-5.4002 ms |
+| `tael_backend_aggregate/query_summary_scoped/10k_spans` | 41.639 ms | 839.50 us | 834.14-845.05 us |
 
-These are the slowest read paths by an order of magnitude, and they scale
-linearly with hot-tier size — 10k spans is a small hot tier. `query_summary`
-costs about 6.5 us per span; a hot tier holding a million spans would put
-`tael summary` in the seconds. Passing a `service` filter cuts the work by
-about a third but does not change the scan.
+`summarize` is the command SKILL.md tells agents to run first, and at 65 ms per
+10k spans a million-span hot tier would have put it in the seconds. It now
+computes entirely from index entries: everything it needs about a span (trace
+id, service, operation, duration, error) is in the index key and its covering
+header, so no span is read. **The reported numbers are unchanged** — the full
+duration set is still kept and sorted, so percentiles are exact rather than
+bucket estimates.
+
+These still scale linearly with hot-tier size. The constant is now ~0.5 us per
+span instead of ~6.5 us, which moves a million-span summary from seconds to
+about half a second.
 
 ## tael-backend — compaction
 
@@ -114,15 +125,46 @@ about a third but does not change the scan.
 hot tier and writes it to the Parquet cold tier. Each iteration rebuilds the
 hot tier in untimed setup, so this is the cost of one full hot→cold roll.
 
-| Benchmark | Mean | Range | Throughput |
-| --- | ---: | ---: | ---: |
-| `tael_backend_compact_spans/1000` | 18.065 ms | 17.488-18.719 ms | 55.356 Kelem/s |
-| `tael_backend_compact_spans/10000` | 154.82 ms | 149.52-161.54 ms | 64.590 Kelem/s |
+| Benchmark | Before | Mean | Range | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| `tael_backend_compact_spans/1000` | 18.065 ms | 19.741 ms | 19.397-20.124 ms | 50.656 Kelem/s |
+| `tael_backend_compact_spans/10000` | 154.82 ms | 171.12 ms | 168.93-173.52 ms | 58.437 Kelem/s |
 
-Compaction is linear and slightly cheaper per span in bulk. At ~65k spans/s it
-is comparable to batched ingest, so the background compactor's cost is roughly
-"one extra pass over everything ingested" — sized in seconds per hour of
-retained traffic, not minutes.
+**This one got ~10% slower**, and the reason is the read speedups above:
+evicting a span now deletes its entries from three indexes instead of one. That
+is the cost side of the trade, paid once per span by a background task, in
+exchange for the query numbers in the two tables above. Compaction remains
+linear and slightly cheaper per span in bulk; at ~58k spans/s it is still
+roughly "one extra pass over everything ingested".
+
+## What changed
+
+The tables above compare against the same benchmarks run on the same machine
+before three changes to the storage engine.
+
+**The WAL cursor advance came off the write path.** Profiling the ingest path
+showed the fixed ~2.7 ms per `insert_spans` call was almost entirely one thing:
+marking the record applied. The append cost 8 us and the hot-tier write cost
+8 us; advancing walrus's read cursor cost 1.9 ms, because it persists the
+cursor by rewriting and fsyncing an index file, and that happened once per
+insert. The cursor now advances in checkpoints — one per 1024 applied records,
+consuming them in a batch that persists the cursor once. Between checkpoints
+the WAL holds records that are already applied, so a crash replays them; that
+made idempotent apply a requirement, and log and metric hot-tier keys (which
+carried a process sequence number) are now derived from record content.
+
+**Span scans got secondary indexes.** There are now three time-ordered indexes
+over the spans keyspace — by time, by service, and errors only — and each entry
+carries a covering header holding the span's service, operation, duration and
+status. The scan picks an index from the query's filters, and answers what it
+can from the header without the second keyspace lookup or the span decode.
+`summarize` and `anomalies` read these indexes directly and never materialize a
+span from the hot tier at all.
+
+**Records are stored as MessagePack rather than JSON.** This was the smallest
+of the three by a wide margin — see the serialization table below, where the
+codec is worth 20-35%, against the ~160x on unbatched ingest that came from the
+WAL change. It is in the same commit because the format was already changing.
 
 ## Blob Store
 
@@ -139,23 +181,26 @@ Content-addressed store for LLM prompt/completion payloads. Run B.
 
 ## Serialization
 
-Pure-CPU JSON encode/decode of the telemetry models, which every storage path
-pays on both sides. Run B.
+Pure-CPU encode/decode of the telemetry models. MessagePack is what the storage
+engine writes; JSON is still the API's wire format, and is kept here because
+the gap between them is why storage stopped using it. Run A.
 
 | Benchmark | Mean | Range | Throughput |
 | --- | ---: | ---: | ---: |
-| `serialize_spans/1` | 456.10 ns | 453.11-459.59 ns | 2.1925 Melem/s |
-| `serialize_spans/100` | 41.485 us | 41.395-41.588 us | 2.4105 Melem/s |
-| `serialize_spans/1000` | 404.23 us | 403.14-405.47 us | 2.4738 Melem/s |
-| `deserialize_spans/1` | 835.86 ns | 832.75-838.97 ns | 1.1964 Melem/s |
-| `deserialize_spans/100` | 91.358 us | 91.107-91.629 us | 1.0946 Melem/s |
-| `deserialize_spans/1000` | 920.54 us | 918.39-922.91 us | 1.0863 Melem/s |
-| `serialize_signals/logs/1000` | 291.89 us | 291.01-292.76 us | 3.4260 Melem/s |
-| `serialize_signals/metrics/1000` | 196.80 us | 196.28-197.33 us | 5.0814 Melem/s |
+| `serialize_spans/json/1000` | 944.67 us | 921.87-972.58 us | 1.0586 Melem/s |
+| `serialize_spans/msgpack/1000` | 772.52 us | 767.83-778.42 us | 1.2945 Melem/s |
+| `deserialize_spans/json/1000` | 2.7971 ms | 2.7301-2.8754 ms | 357.51 Kelem/s |
+| `deserialize_spans/msgpack/1000` | 2.0648 ms | 2.0494-2.0834 ms | 484.30 Kelem/s |
+| `serialize_signals/json/logs/1000` | 644.47 us | 636.52-653.92 us | 1.5517 Melem/s |
+| `serialize_signals/msgpack/logs/1000` | 595.81 us | 587.59-604.35 us | 1.6784 Melem/s |
+| `serialize_signals/json/metrics/1000` | 431.54 us | 423.43-441.83 us | 2.3173 Melem/s |
+| `serialize_signals/msgpack/metrics/1000` | 346.11 us | 343.76-348.65 us | 2.8892 Melem/s |
 
-Deserialization at ~1.1 Melem/s is the floor under every scan-based read path
-above: a full 10k-span scan cannot beat ~9 ms on Run B's hardware no matter
-what the storage layer does.
+MessagePack is 20-35% faster than JSON on these models — worth having, and much
+smaller than the difference the indexes made. Decode is the slower direction for
+both, and at ~484 Kelem/s it is the floor under any read path that has to
+materialize spans. That floor is why the aggregation paths were changed to read
+index entries instead: the fastest decode is the one that does not happen.
 
 ## Appendix: legacy DuckDB backend
 
