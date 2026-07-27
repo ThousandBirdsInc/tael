@@ -113,8 +113,11 @@ tael live --evals
 tael live --eval-run <run_id>
 ```
 
-Interactive ratatui feed of incoming spans. Primarily a human tool — not
-useful from an agent. Skip unless explicitly asked.
+Interactive ratatui feed of incoming spans, with tabs for services, evals,
+health, topology, automation (alerts + scoring), clusters, review, and SQL.
+Read-only throughout — every action it can take has a CLI command that is
+scriptable and returns an exit code, which is what an agent should use.
+Primarily a human tool. Skip unless explicitly asked.
 
 ### Evals
 

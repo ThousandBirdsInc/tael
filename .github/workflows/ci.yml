@@ -46,6 +46,43 @@ jobs:
       - name: Build benchmarks
         run: cargo build -p tael-server --benches
 
+  # The desktop GUI is behind an optional feature and needs GTK/WebKit system
+  # libraries, so the main job cannot build it — which meant nothing built it at
+  # all, and it accumulated a clippy failure nobody saw. Its own job, with its
+  # own dependencies, so that stops being possible.
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+
+      # The bundled front-end is committed (that is how the app ships without a
+      # build step), so a stale build is a real defect: type-check the source
+      # and rebuild to prove the committed assets can be regenerated.
+      - name: Front-end types
+        run: npm --prefix tael-gui ci && npm --prefix tael-gui exec tsc -- --noEmit
+
+      - name: Front-end build
+        run: npm --prefix tael-gui exec vite build
+
+      - name: Clippy
+        run: cargo clippy -p tael-gui --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p tael-gui
+
   # Kept separate so a docs-only drift failure is obvious in the checks list
   # rather than buried in the test job's output.
   agent-contract:

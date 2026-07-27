@@ -85,7 +85,49 @@ type LiveStatusPayload = {
   message: string | null
 }
 
-type Tab = 'traces' | 'services' | 'evals' | 'timeline' | 'detail'
+type Tab =
+  | 'traces'
+  | 'services'
+  | 'evals'
+  | 'timeline'
+  | 'detail'
+  | 'health'
+  | 'topology'
+  | 'automation'
+  | 'clusters'
+  | 'review'
+  | 'sql'
+
+/// The tabs backed by `panels`, which fetch on first open rather than on
+/// connect — eleven requests at startup would be paid by every session for
+/// views most never open.
+const PANEL_TABS = ['health', 'topology', 'automation', 'clusters', 'review', 'sql'] as const
+type PanelTab = (typeof PANEL_TABS)[number]
+
+function isPanelTab(tab: Tab): tab is PanelTab {
+  return (PANEL_TABS as readonly string[]).includes(tab)
+}
+
+type ReviewRow = {
+  reviewId: string
+  state: 'open' | 'answered'
+  traceId: string | null
+  question: string
+  answer: string | null
+}
+
+/// Per-panel fetch bookkeeping. A panel that failed shows why instead of an
+/// empty table: SQL on a build without the engine answers with the feature to
+/// install, and that message is the useful part.
+type PanelState = {
+  loaded: boolean
+  error: string | null
+  data: any
+}
+
+function emptyPanel(): PanelState {
+  return {loaded: false, error: null, data: null}
+}
 
 type AppState = {
   server: string
@@ -122,6 +164,9 @@ type AppState = {
   evalFailuresOnly: boolean
   detailZoom: {start: number; end: number}
   liveZoom: {start: number; end: number}
+  panels: Record<PanelTab, PanelState>
+  sqlQuery: string
+  suites: any[]
 }
 
 const MAX_LIVE_SPANS = 200
@@ -178,6 +223,16 @@ const state: AppState = {
   evalFailuresOnly: false,
   detailZoom: {start: 0, end: 1},
   liveZoom: {start: 0, end: 1},
+  panels: {
+    health: emptyPanel(),
+    topology: emptyPanel(),
+    automation: emptyPanel(),
+    clusters: emptyPanel(),
+    review: emptyPanel(),
+    sql: emptyPanel(),
+  },
+  sqlQuery: 'SELECT service, count(*) AS spans FROM spans GROUP BY service ORDER BY spans DESC',
+  suites: [],
 }
 
 let liveUnlisten: UnlistenFn | null = null
@@ -511,6 +566,102 @@ async function refreshEvals() {
   state.evalCases = parseEvalCases(await invoke<Json>('eval_cases', {server: state.server, runId}))
 }
 
+// ── Panels ──────────────────────────────────────────────────────────
+
+/// Baseline window for the health comparison: four times the current one, the
+/// same shape `tael anomalies` defaults to. Falls back to the window itself
+/// when it cannot be parsed, so a comparison finds nothing rather than
+/// silently comparing against the wrong span of time.
+function multiplyWindow(window: string, factor: number): string {
+  const match = /^(\d+)([a-z]+)$/i.exec(window.trim())
+  if (!match) return window
+  return `${Number(match[1]) * factor}${match[2]}`
+}
+
+/// Derive the review queue from trace comments.
+///
+/// Requests and answers are both structured comments and an answer references
+/// its request rather than mutating it, because comments are append-only. So
+/// the effective state is computed here exactly as `tael review list` computes
+/// it, never read from a field.
+function parseReviews(value: any): ReviewRow[] {
+  const bodies: any[] = (Array.isArray(value?.comments) ? value.comments : [])
+    .map((comment: any) => {
+      try {
+        return JSON.parse(String(comment?.body ?? ''))
+      } catch {
+        return null
+      }
+    })
+    .filter((body: any) => body && typeof body === 'object')
+
+  const answers = new Map<string, any>()
+  for (const body of bodies) {
+    if (body.kind === 'review_answer') answers.set(String(body.review_id ?? ''), body)
+  }
+
+  const reviews: ReviewRow[] = bodies
+    .filter(body => body.kind === 'review_request')
+    .map(body => {
+      const reviewId = String(body.review_id ?? '')
+      const answer = answers.get(reviewId)
+      return {
+        reviewId,
+        state: answer ? 'answered' : 'open',
+        traceId: body.trace_id ? String(body.trace_id) : null,
+        question: String(body.question ?? ''),
+        answer: answer ? String(answer.answer ?? '') : null,
+      }
+    })
+  // Open questions first: they are the ones that need a human.
+  reviews.sort((a, b) =>
+    a.state === b.state ? a.reviewId.localeCompare(b.reviewId) : a.state === 'open' ? -1 : 1,
+  )
+  return reviews
+}
+
+async function refreshPanel(tab: PanelTab) {
+  const panel = state.panels[tab]
+  panel.loaded = true
+  panel.error = null
+  const server = state.server
+  const last = state.lastWindow || '1h'
+  try {
+    if (tab === 'health') {
+      const [summary, anomalies] = await Promise.all([
+        invoke<Json>('query_summary', {server, last}),
+        invoke<Json>('query_anomalies', {server, last, baseline: multiplyWindow(last, 4)}),
+      ])
+      panel.data = {summary, anomalies}
+    } else if (tab === 'topology') {
+      panel.data = await invoke<Json>('query_topology', {server, last})
+    } else if (tab === 'automation') {
+      const [alerts, events, scoreRules] = await Promise.all([
+        invoke<Json>('list_alerts', {server}),
+        invoke<Json>('alert_events', {server, limit: 20}),
+        invoke<Json>('list_score_rules', {server}),
+      ])
+      panel.data = {alerts, events, scoreRules}
+    } else if (tab === 'clusters') {
+      panel.data = await invoke<Json>('cluster_traces', {server, k: 5})
+    } else if (tab === 'review') {
+      panel.data = parseReviews(await invoke<Json>('list_comments', {server, limit: 500}))
+    } else if (tab === 'sql') {
+      panel.data = await invoke<Json>('query_sql', {server, query: state.sqlQuery})
+    }
+  } catch (error) {
+    panel.error = String(error)
+    panel.data = null
+  }
+  queueRender()
+}
+
+async function openPanel(tab: PanelTab) {
+  state.tab = tab
+  queueRender()
+  if (!state.panels[tab].loaded) await refreshPanel(tab)
+}
+
 async function loadTrace(traceId: string) {
   state.prevTab = state.tab === 'detail' ? state.prevTab : state.tab
   state.tab = 'detail'
@@ -666,6 +817,12 @@ function render() {
           ${tabButton('services', 'Services')}
           ${tabButton('evals', 'Evals')}
           ${tabButton('timeline', 'Timeline')}
+          ${tabButton('health', 'Health')}
+          ${tabButton('topology', 'Topology')}
+          ${tabButton('automation', 'Automation')}
+          ${tabButton('clusters', 'Clusters')}
+          ${tabButton('review', 'Review')}
+          ${tabButton('sql', 'SQL')}
           ${state.tab === 'detail' ? tabButton('detail', 'Trace') : ''}
         </div>
         <div class="filter-box">
@@ -688,7 +845,339 @@ function renderTab(): string {
   if (state.tab === 'evals') return renderEvals()
   if (state.tab === 'timeline') return renderTimeline()
   if (state.tab === 'detail') return renderDetail()
+  if (isPanelTab(state.tab)) return renderPanel(state.tab)
   return renderTraces()
+}
+
+// ── Panel rendering ─────────────────────────────────────────────────
+
+function panelNote(title: string, body: string, tone = 'muted'): string {
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>${escapeHtml(title)}</span></div>
+      <p class="panel-note ${tone}">${escapeHtml(body)}</p>
+    </section>
+  `
+}
+
+function renderPanel(tab: PanelTab): string {
+  const panel = state.panels[tab]
+  if (panel.error) return panelNote(tab, panel.error, 'danger')
+  if (!panel.loaded) return panelNote(tab, 'Loading…')
+  if (tab === 'health') return renderHealth(panel.data)
+  if (tab === 'topology') return renderTopology(panel.data)
+  if (tab === 'automation') return renderAutomation(panel.data)
+  if (tab === 'clusters') return renderClusters(panel.data)
+  if (tab === 'review') return renderReview(panel.data)
+  return renderSql(panel.data)
+}
+
+function num(value: any, key: string): number {
+  const raw = value?.[key]
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
+}
+
+function str(value: any, key: string): string {
+  const raw = value?.[key]
+  if (raw == null) return ''
+  return typeof raw === 'string' ? raw : String(raw)
+}
+
+function arr(value: any, key: string): any[] {
+  return Array.isArray(value?.[key]) ? value[key] : []
+}
+
+function rateClass(rate: number): string {
+  if (rate > 0.05) return 'danger'
+  if (rate > 0) return 'warn'
+  return 'ok'
+}
+
+function statCard(label: string, value: string, tone = ''): string {
+  return `
+    <div class="stat">
+      <span class="stat-label">${escapeHtml(label)}</span>
+      <span class="stat-value ${tone}">${escapeHtml(value)}</span>
+    </div>
+  `
+}
+
+function renderHealth(data: any): string {
+  const summary = data?.summary
+  if (!summary) return panelNote('Health', 'No summary yet.')
+  const traces = summary.traces ?? {}
+  const logs = summary.logs ?? {}
+  const errorRate = num(traces, 'error_rate')
+  const anomalies = arr(data.anomalies, 'anomalies')
+
+  const errorOps = arr(summary, 'top_error_operations')
+    .slice(0, 5)
+    .map(
+      op => `<tr>
+        <td class="danger">${escapeHtml(num(op, 'error_count'))}</td>
+        <td class="accent">${escapeHtml(str(op, 'service'))}</td>
+        <td>${escapeHtml(str(op, 'operation'))}</td>
+      </tr>`,
+    )
+    .join('')
+
+  const anomalyRows = anomalies
+    .map(
+      a => `<tr>
+        <td class="accent">${escapeHtml(str(a, 'service'))}</td>
+        <td>${escapeHtml(str(a, 'kind'))}</td>
+        <td class="${str(a, 'severity') === 'high' ? 'danger' : 'warn'}">${escapeHtml(str(a, 'severity'))}</td>
+        <td>${num(a, 'baseline').toFixed(2)}</td>
+        <td>${num(a, 'current').toFixed(2)}</td>
+        <td>${escapeHtml(str(a, 'description'))}</td>
+      </tr>`,
+    )
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Health</span><span>last ${escapeHtml(state.lastWindow || '1h')}</span></div>
+      <div class="stat-row">
+        ${statCard('spans', String(num(traces, 'span_count')))}
+        ${statCard('traces', String(num(traces, 'trace_count')))}
+        ${statCard('errors', String(num(traces, 'error_count')), rateClass(errorRate))}
+        ${statCard('error rate', `${(errorRate * 100).toFixed(2)}%`, rateClass(errorRate))}
+        ${statCard('p50', `${num(traces, 'p50_ms').toFixed(1)}ms`)}
+        ${statCard('p95', `${num(traces, 'p95_ms').toFixed(1)}ms`)}
+        ${statCard('p99', `${num(traces, 'p99_ms').toFixed(1)}ms`)}
+        ${statCard('logs', `${num(logs, 'total')} / ${num(logs, 'error')} err`)}
+      </div>
+      <div class="table-wrap">
+        <div class="panel-subhead">Top error operations</div>
+        <table>
+          <thead><tr><th>Errors</th><th>Service</th><th>Operation</th></tr></thead>
+          <tbody>${errorOps || '<tr><td colspan="3" class="muted">No errors in this window.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Anomalies vs ${escapeHtml(multiplyWindow(state.lastWindow || '1h', 4))} baseline</div>
+        <table>
+          <thead><tr><th>Service</th><th>Kind</th><th>Severity</th><th>Baseline</th><th>Current</th><th>Description</th></tr></thead>
+          <tbody>${anomalyRows || '<tr><td colspan="6" class="ok">Nothing regressed against the baseline window.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderTopology(data: any): string {
+  const edges = arr(data, 'edges')
+  if (edges.length === 0) {
+    return panelNote(
+      'Topology',
+      'No parent/child edges in this window. A single-service trace has no graph.',
+    )
+  }
+  // A span whose parent fell outside the window looks like an entry point and
+  // would overstate the roots, so the count is stated rather than buried — it
+  // is the number that says whether to widen the window.
+  const dangling = num(data, 'spans_with_parent_outside_window')
+  const rows = edges
+    .map(e => {
+      const rate = num(e, 'error_rate')
+      return `<tr>
+        <td class="accent">${escapeHtml(str(e, 'from'))}</td>
+        <td class="muted">→</td>
+        <td class="accent">${escapeHtml(str(e, 'to'))}</td>
+        <td>${num(e, 'calls')}</td>
+        <td class="${rateClass(rate)}">${num(e, 'errors')}</td>
+        <td class="${rateClass(rate)}">${(rate * 100).toFixed(1)}%</td>
+        <td>${num(e, 'avg_duration_ms').toFixed(1)}ms</td>
+      </tr>`
+    })
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title">
+        <span>Topology</span>
+        <span>${edges.length} edges over ${num(data, 'spans_examined')} spans${
+          dangling > 0 ? ` · <b class="warn">${dangling} with a parent outside the window</b>` : ''
+        }</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>From</th><th></th><th>To</th><th>Calls</th><th>Errors</th><th>Rate</th><th>Avg</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderAutomation(data: any): string {
+  const alerts = arr(data?.alerts, 'alerts')
+  const events = arr(data?.events, 'events')
+  const scoreRules = arr(data?.scoreRules, 'rules')
+
+  const alertRows = alerts
+    .map(a => {
+      const alertState = str(a, 'state')
+      return `<tr>
+        <td class="accent">${escapeHtml(str(a, 'name'))}</td>
+        <td class="${alertState === 'firing' ? 'danger' : alertState === 'pending' ? 'warn' : 'ok'}">${escapeHtml(alertState)}</td>
+        <td>${num(a, 'for_seconds')}s</td>
+        <td>${arr(a, 'sinks').length}</td>
+        <td class="mono">${escapeHtml(str(a, 'query'))}</td>
+      </tr>`
+    })
+    .join('')
+
+  const eventRows = events
+    .map(e => {
+      const evState = str(e, 'state')
+      return `<tr>
+        <td class="muted">${escapeHtml(shortTime(str(e, 'at')))}</td>
+        <td class="accent">${escapeHtml(str(e, 'rule'))}</td>
+        <td class="${evState === 'firing' ? 'danger' : 'ok'}">${escapeHtml(str(e, 'previous_state'))} → ${escapeHtml(evState)}</td>
+        <td>${arr(e, 'matched').length} series</td>
+      </tr>`
+    })
+    .join('')
+
+  const scoreRows = scoreRules
+    .map(r => {
+      const status = r?.status ?? {}
+      const lastError = str(status, 'last_error')
+      return `<tr>
+        <td class="accent">${escapeHtml(str(r, 'name'))}</td>
+        <td>${(num(r, 'sample') * 100).toFixed(0)}%</td>
+        <td>${num(status, 'scored')}</td>
+        <td class="danger">${escapeHtml(lastError || '—')}</td>
+        <td class="mono">${escapeHtml(str(r, 'command'))}</td>
+      </tr>`
+    })
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Automation</span><span>${alerts.length} alert rules · ${scoreRules.length} scoring rules</span></div>
+      <div class="table-wrap">
+        <div class="panel-subhead">Alert rules (${alerts.length})</div>
+        <table>
+          <thead><tr><th>Rule</th><th>State</th><th>For</th><th>Sinks</th><th>Query</th></tr></thead>
+          <tbody>${alertRows || '<tr><td colspan="5" class="muted">No alert rules. Create one with <code>tael alert create</code>.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Alert feed (${events.length})</div>
+        <table>
+          <thead><tr><th>When</th><th>Rule</th><th>Transition</th><th>Matched</th></tr></thead>
+          <tbody>${eventRows || '<tr><td colspan="4" class="ok">Nothing has fired.</td></tr>'}</tbody>
+        </table>
+        <div class="panel-subhead">Scoring rules (${scoreRules.length})</div>
+        <table>
+          <thead><tr><th>Rule</th><th>Sample</th><th>Scored</th><th>Last error</th><th>Command</th></tr></thead>
+          <tbody>${scoreRows || '<tr><td colspan="5" class="muted">No scoring rules. Create one with <code>tael score rule create</code>.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderClusters(data: any): string {
+  const clusters = arr(data, 'clusters')
+  if (clusters.length === 0) {
+    return panelNote(
+      'Clusters',
+      'Nothing embedded yet. Run `tael embed --command <your embedder>` first.',
+    )
+  }
+  const rows = clusters
+    .map(c => {
+      // Cohesion is the honest part of this view: a tight number means the
+      // grouping is real, a loose one means read the exemplar before believing
+      // it.
+      const cohesion = num(c, 'cohesion')
+      const tone = cohesion >= 0.85 ? 'ok' : cohesion >= 0.7 ? 'warn' : 'danger'
+      const exemplar = str(c, 'exemplar')
+      return `<tr data-cluster-trace="${escapeHtml(exemplar)}">
+        <td class="accent">#${num(c, 'id')}</td>
+        <td>${num(c, 'size')}</td>
+        <td class="${tone}">${cohesion.toFixed(3)}</td>
+        <td class="danger">${cohesion >= 0.7 ? '' : 'weak'}</td>
+        <td class="mono muted">${escapeHtml(exemplar)}</td>
+      </tr>`
+    })
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title">
+        <span>Clusters</span>
+        <span>${clusters.length} over ${num(data, 'corpus_size')} embedded traces · cohesion below 0.7 is weak</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Cluster</th><th>Size</th><th>Cohesion</th><th></th><th>Exemplar (click to open)</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderReview(reviews: ReviewRow[]): string {
+  if (!reviews || reviews.length === 0) {
+    return panelNote('Review queue', 'Nothing waiting on a human.', 'ok')
+  }
+  const open = reviews.filter(r => r.state === 'open').length
+  const rows = reviews
+    .map(
+      r => `<tr ${r.traceId ? `data-review-trace="${escapeHtml(r.traceId)}"` : ''}>
+        <td class="${r.state === 'open' ? 'warn' : 'ok'}">${escapeHtml(r.state)}</td>
+        <td class="mono muted">${escapeHtml(r.traceId ? shortId(r.traceId, 12) : '—')}</td>
+        <td>${escapeHtml(r.question)}</td>
+        <td class="ok">${escapeHtml(r.answer ?? '')}</td>
+      </tr>`,
+    )
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>Review queue</span><span>${open} open of ${reviews.length}</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>State</th><th>Trace</th><th>Question (click to open)</th><th>Answer</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderSql(data: any): string {
+  const rows: any[] = arr(data, 'rows')
+  const columns = rows.length > 0 && rows[0] && typeof rows[0] === 'object' ? Object.keys(rows[0]) : []
+  const body = rows
+    .map(
+      row =>
+        `<tr>${columns
+          .map(c => {
+            const cell = row?.[c]
+            const value = cell == null ? '' : typeof cell === 'string' ? cell : JSON.stringify(cell)
+            return `<td>${escapeHtml(value)}</td>`
+          })
+          .join('')}</tr>`,
+    )
+    .join('')
+
+  return `
+    <section class="pane table-pane full">
+      <div class="pane-title"><span>SQL</span><span>${rows.length} rows</span></div>
+      <div class="sql-bar">
+        <textarea id="sql-input" class="sql-input" rows="3" spellcheck="false">${escapeHtml(state.sqlQuery)}</textarea>
+        <button id="sql-run-btn" class="primary">Run</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('') || '<th></th>'}</tr></thead>
+          <tbody>${body || '<tr><td class="muted">No rows.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+  `
 }
 
 function renderTraces(): string {
@@ -1013,6 +1502,10 @@ function bindShell() {
   })
   app.querySelector('#connect-btn')?.addEventListener('click', connect)
   app.querySelector('#refresh-btn')?.addEventListener('click', () => {
+    if (isPanelTab(state.tab)) {
+      void refreshPanel(state.tab)
+      return
+    }
     Promise.all([refreshTraces(), refreshServices(), refreshEvals()])
       .catch(error => (state.error = String(error)))
       .finally(queueRender)
@@ -1023,9 +1516,31 @@ function bindShell() {
   })
   app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button => {
     button.addEventListener('click', () => {
-      state.tab = button.dataset.tab as Tab
+      const tab = button.dataset.tab as Tab
+      if (isPanelTab(tab)) {
+        void openPanel(tab)
+        return
+      }
+      state.tab = tab
       queueRender()
     })
+  })
+
+  // Refresh re-runs whichever panel is open, so the button means the same
+  // thing on every tab.
+  app.querySelectorAll<HTMLTableRowElement>('[data-cluster-trace]').forEach(row => {
+    row.addEventListener('click', () => void loadTrace(row.dataset.clusterTrace!))
+  })
+  app.querySelectorAll<HTMLTableRowElement>('[data-review-trace]').forEach(row => {
+    row.addEventListener('click', () => void loadTrace(row.dataset.reviewTrace!))
+  })
+  const sqlInput = app.querySelector<HTMLTextAreaElement>('#sql-input')
+  sqlInput?.addEventListener('input', () => {
+    state.sqlQuery = sqlInput.value
+  })
+  app.querySelector('#sql-run-btn')?.addEventListener('click', () => {
+    if (!state.sqlQuery.trim()) return
+    void refreshPanel('sql')
   })
   app.querySelectorAll<HTMLTableRowElement>('[data-span-idx]').forEach(row => {
     row.addEventListener('click', () => {
