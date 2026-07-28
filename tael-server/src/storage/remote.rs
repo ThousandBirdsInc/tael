@@ -129,6 +129,12 @@ impl Store for RemoteStore {
         for (k, v) in &query.attributes {
             params.push(("attribute", format!("{k}={v}")));
         }
+        for (k, v) in &query.attributes_contains {
+            params.push(("attribute", format!("{k}~={v}")));
+        }
+        for (k, v) in &query.attributes_regex {
+            params.push(("attribute", format!("{k}=~{v}")));
+        }
         if let Some(ref t) = query.text {
             params.push(("text", t.clone()));
         }
@@ -213,6 +219,15 @@ impl Store for RemoteStore {
         last_param(&mut params, query.last_seconds);
         if let Some(l) = query.limit {
             params.push(("limit", l.to_string()));
+        }
+        for (k, v) in &query.attributes {
+            params.push(("attribute", format!("{k}={v}")));
+        }
+        for (k, v) in &query.attributes_contains {
+            params.push(("attribute", format!("{k}~={v}")));
+        }
+        for (k, v) in &query.attributes_regex {
+            params.push(("attribute", format!("{k}=~{v}")));
         }
         let body = self.get_json("/api/v1/logs", &params)?;
         field(body, "logs")

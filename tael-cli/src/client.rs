@@ -559,6 +559,7 @@ impl TaelClient {
         severity: Option<&str>,
         body_contains: Option<&str>,
         trace_id: Option<&str>,
+        attributes: &[(String, String)],
         last: Option<&str>,
         limit: u32,
     ) -> Result<Value> {
@@ -574,6 +575,10 @@ impl TaelClient {
         }
         if let Some(t) = trace_id {
             params.push(("trace_id", t.to_string()));
+        }
+        for (key, op_and_value) in attributes {
+            // `op_and_value` already carries its operator (`=`, `~=`, `=~`).
+            params.push(("attribute", format!("{key}{op_and_value}")));
         }
         if let Some(l) = last {
             params.push(("last", l.to_string()));

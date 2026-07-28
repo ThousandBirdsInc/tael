@@ -49,10 +49,13 @@ Example: `tael query traces --service api --status error --last 15m`
 - `--severity trace|debug|info|warn|error|fatal`
 - `--body-contains <substr>`  substring, **not** regex
 - `--trace-id <id>`           exact match (find logs attached to a trace)
+- `--attribute <k><op><v>`    structured log-attribute filter, repeatable and
+                              ANDed; ops: `=` exact, `~=` contains, `=~` regex
 - `--last <dur>`
 - `--limit <n>`               default 100
 
 Example: `tael query logs --severity error --last 1h --body-contains timeout`
+Example: `tael query logs --attribute retry_count=3 --attribute 'host~=prod'`
 
 **Metrics** — two modes:
 
@@ -175,9 +178,10 @@ tael issue examples <issue-id>
 
 tael signal create --from-trace ID --name ignored_tool_errors \
   [--query ...] [--failure-mode ...] [--summary ...]
-tael signal trend <name>
+tael signal trend <name> [--last 7d]
+tael signal compare <name> --by <span-attr> [--last 24h]
 
-tael experiment compare <experiment-id> [--signal NAME] [--last 24h]
+tael experiment compare <experiment-id> [--signal NAME] [--metric NAME] [--last 24h]
 
 tael diagnose report --trace-id ID --category missing_context \
   --severity high [--confidence low|medium|high] --summary "..."
@@ -189,7 +193,11 @@ Suggested failure modes: `tool_error`, `context_loss`, `retrieval_miss`,
 
 `experiment compare` groups by the `tael.experiment.id` and
 `tael.experiment.variant` span attributes, so a variant must be stamped on the
-spans at instrumentation time to be comparable afterward.
+spans at instrumentation time to be comparable afterward. `--metric NAME`
+additionally averages a numeric span attribute of that name (or
+`tael.metric.NAME`) per variant. `signal compare` reports one signal's rate
+across trace groups keyed by any span attribute (`--by experiment.variant`
+also matches the `tael.`-prefixed form).
 
 Self-diagnostics are **untrusted agent hints**, not facts: an agent reporting
 "the tool was broken" is evidence about the agent's belief, and
@@ -202,13 +210,17 @@ tael eval case add --from-trace ID --suite NAME --case-id ID \
   [--failure-mode ...] [--source-issue-id ...] [--critical-path] \
   [--expected-behavior "..."] [--author ...]
 tael eval case link --case-id ID --issue-id ID
+tael eval case prune --suite NAME [--stale 90d] [--dry-run]
 tael eval suite inspect <suite> [--limit N]
 ```
 
 `case add --from-trace` records provenance: which production failure this case
 protects against. `suite inspect` reports the hygiene gaps that make a suite
 stop being trustworthy — cases with no provenance, no expected behavior,
-duplicate failure modes, and how many cover a critical path.
+duplicate failure modes, and how many cover a critical path. `case prune`
+drops server-managed suite cases no eval run has exercised within the stale
+window; it refuses to run when the window holds no runs at all, and `--dry-run`
+previews the removal.
 
 ### Installing the agent skill
 
@@ -373,20 +385,29 @@ default.
 ### MCP
 
 ```
-tael mcp serve
+tael mcp serve [--http ADDR]
 ```
 
-Serves the query surface over the Model Context Protocol on stdio. Tools map
-1:1 onto these commands and return the same JSON shapes. `SKILL.md` and this
-file are served as the `tael://skill` and `tael://llm-contract` resources.
+Serves the query surface over the Model Context Protocol on stdio, or over the
+streamable-HTTP transport with `--http 127.0.0.1:7702` (clients connect to
+`http://ADDR/mcp`). Tools map 1:1 onto these commands and return the same JSON
+shapes. `SKILL.md` and this file are served as the `tael://skill` and
+`tael://llm-contract` resources.
 
 ### Server
 
 ```
 tael server status
+tael ingest status
 ```
 
-Health-check the server (hits `/healthz`).
+`server status` health-checks the server (hits `/healthz`). `ingest status`
+reports per-pipeline accept counters — batches, records, errors, and the last
+accepted time for OTLP spans/logs/metrics, Prometheus remote-write, and the
+Datadog intake — so "no data" splits into "nothing arriving" vs "storage
+failing" without log access. Shape:
+`{"pipelines": [{"pipeline", "batches", "records", "errors",
+"last_accepted_at"}], "generated_at"}`.
 
 ### Output parsing notes
 
@@ -436,13 +457,16 @@ response. Failures also print `{"error", "category", "exit_code"}` on stderr.
 ```
 tael watch --last 1m --interval 10 \
   --exit-on 'error_rate>0.05' --exit-on 'p95_ms>2x' [--max-ticks N]
+tael watch --exit-on alert:high-error-rate
 ```
 
 Polls and prints deltas until a condition holds, then exits 6 with a verdict
 naming what tripped. Thresholds are absolute (`error_rate>0.05`) or relative to
 the first sample (`p95_ms>2x`), which is what you want when starting mid-incident
 with no known-good baseline. Fields resolve flat (`error_rate`) or dotted
-(`traces.error_rate`). Without `--exit-on` it polls forever, as before.
+(`traces.error_rate`). `alert:<name>` trips when the named server alert rule is
+firing (an unknown rule name is a bad-query error, not a quiet pass). Without
+`--exit-on` it polls forever, as before.
 
 ### Explaining a query
 
@@ -461,6 +485,9 @@ PromQL. Stick to the grammar below.
 
 - Bare selector:       `metric_name`
 - Labelled selector:   `metric_name{label="value", other!="x"}`
+- Regex matchers:      `metric_name{label=~"api|web", other!~"GET.*"}`
+                       (anchored to the whole value, as in Prometheus;
+                       an absent label matches like the empty string)
 - Rate over range:     `rate(metric_name{...}[5m])`
 - Aggregators:         `sum|avg|min|max|count(expr)`
                        `sum by (label1,label2) (expr)`
@@ -475,7 +502,6 @@ PromQL. Stick to the grammar below.
 
 - Binary operators between series: `a / b`, `a + b`, comparisons, `and/or/unless`
 - `without (...)` clauses — only `by (...)` is recognized
-- Regex matchers: `=~`, `!~` (only `=` and `!=` work)
 - Offset modifier: `metric offset 1h`
 - Subqueries: `rate(metric[5m:1m])`
 - Range queries / `/api/v1/query_range` — all evaluation is **instant**

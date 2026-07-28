@@ -12,10 +12,13 @@
 //! response, and both documents are served as MCP resources so a freshly
 //! connected agent can read them without being told to.
 //!
-//! The transport is line-delimited JSON-RPC 2.0 over stdio, which is what MCP
-//! clients spawn by default.
+//! The default transport is line-delimited JSON-RPC 2.0 over stdio, which is
+//! what MCP clients spawn by default. `--http <addr>` serves the same method
+//! set over the streamable-HTTP transport instead, for clients that connect to
+//! a URL rather than spawning a process.
 
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -83,6 +86,70 @@ pub async fn serve(client: TaelClient, server_url: &str) -> Result<()> {
         stdout.flush()?;
     }
 
+    Ok(())
+}
+
+/// Serve MCP over the streamable-HTTP transport: JSON-RPC 2.0 requests arrive
+/// as POST bodies on `/mcp` and are answered with `application/json`.
+/// Notifications get `202 Accepted`. The server never initiates messages, so
+/// the optional GET/SSE stream is not offered (`405`), which the transport
+/// spec permits.
+pub async fn serve_http(client: TaelClient, server_url: &str, addr: &str) -> Result<()> {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+
+    let client = Arc::new(client);
+
+    async fn rpc(
+        axum::extract::State(client): axum::extract::State<Arc<TaelClient>>,
+        body: String,
+    ) -> axum::response::Response {
+        let request: Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32700, "message": format!("parse error: {e}") },
+                });
+                return (StatusCode::BAD_REQUEST, axum::Json(err)).into_response();
+            }
+        };
+        let id = request.get("id").cloned();
+        // Notifications carry no id and must not be answered.
+        if id.is_none() {
+            return StatusCode::ACCEPTED.into_response();
+        }
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let params = request.get("params").cloned().unwrap_or(json!({}));
+        let response = match dispatch(&client, &method, &params).await {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err(err) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": err.code, "message": err.message },
+            }),
+        };
+        axum::Json(response).into_response()
+    }
+
+    // Methods other than POST on these paths get axum's automatic 405,
+    // which is the "no server-initiated stream" answer the spec allows.
+    let app = axum::Router::new()
+        .route("/mcp", post(rpc))
+        // The bare root works too, so a client configured with just the
+        // address does not 404.
+        .route("/", post(rpc))
+        .with_state(client);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    eprintln!("tael MCP server listening on http://{addr}/mcp (target {server_url})");
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
@@ -202,12 +269,18 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "query_logs",
-            "Search logs by service, severity, body substring, or trace ID.",
+            "Search logs by service, severity, body substring, trace ID, or \
+             structured log attributes.",
             json!({
                 "service": s("Exact service name"),
                 "severity": s("trace, debug, info, warn, error, or fatal"),
                 "body_contains": s("Substring match on the log body (not a regex)"),
                 "trace_id": s("Only logs belonging to this trace"),
+                "attributes": json!({
+                    "type": "object",
+                    "description": "Log attribute equality filters, ANDed. Matching is exact.",
+                    "additionalProperties": { "type": "string" },
+                }),
                 "last": s("Time window, e.g. 15m, 1h, 7d"),
                 "limit": n("Max records to return (default 100)"),
             }),
@@ -351,6 +424,21 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
+/// Turn a tool call's `attributes` object into the `(key, op+value)` pairs the
+/// REST client expects. The wire format carries the operator with the value, so
+/// the equality operator is prefixed here — without it the server-side parser
+/// finds no operator and silently drops the filter.
+fn attribute_pairs(args: &Value) -> Vec<(String, String)> {
+    args.get("attributes")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), format!("={v}"))))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn call_tool(client: &TaelClient, params: &Value) -> Result<Value, RpcError> {
     let name = params
         .get("name")
@@ -367,15 +455,7 @@ async fn call_tool(client: &TaelClient, params: &Value) -> Result<Value, RpcErro
 
     let result: Result<Value> = match name {
         "query_traces" => {
-            let attributes: Vec<(String, String)> = args
-                .get("attributes")
-                .and_then(Value::as_object)
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let attributes = attribute_pairs(&args);
             client
                 .query_traces(
                     str_arg("service").as_deref(),
@@ -396,12 +476,14 @@ async fn call_tool(client: &TaelClient, params: &Value) -> Result<Value, RpcErro
         "get_trace" => client.get_trace(&required("trace_id")?).await,
         "correlate" => client.correlate(&required("trace_id")?).await,
         "query_logs" => {
+            let attributes = attribute_pairs(&args);
             client
                 .query_logs(
                     str_arg("service").as_deref(),
                     str_arg("severity").as_deref(),
                     str_arg("body_contains").as_deref(),
                     str_arg("trace_id").as_deref(),
+                    &attributes,
                     str_arg("last").as_deref(),
                     num_arg("limit").unwrap_or(100.0) as u32,
                 )

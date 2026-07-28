@@ -16,6 +16,8 @@ struct VariantStats {
     error_count: usize,
     duration_sum: f64,
     signal_count: usize,
+    metric_sum: f64,
+    metric_count: usize,
 }
 
 pub async fn compare(
@@ -23,6 +25,7 @@ pub async fn compare(
     format: &OutputFormat,
     experiment_id: &str,
     signal: Option<String>,
+    metric: Option<String>,
     last: Option<String>,
 ) -> Result<()> {
     let traces = client
@@ -92,6 +95,22 @@ pub async fn compare(
             .get("duration_ms")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
+        // `--metric task_completion` averages a numeric span attribute of that
+        // name (or `tael.metric.<name>`) across each variant's spans, so a
+        // task-level outcome stamped on spans compares directly.
+        if let Some(metric_name) = &metric {
+            let value = attrs
+                .get(metric_name.as_str())
+                .or_else(|| attrs.get(&format!("tael.metric.{metric_name}")))
+                .and_then(|v| {
+                    v.as_f64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                });
+            if let Some(value) = value {
+                entry.metric_sum += value;
+                entry.metric_count += 1;
+            }
+        }
     }
 
     if let Some(signal_name) = &signal {
@@ -136,6 +155,13 @@ pub async fn compare(
                 } else {
                     0.0
                 },
+                "metric": metric,
+                "metric_count": stats.metric_count,
+                "metric_avg": if stats.metric_count > 0 {
+                    Value::from(stats.metric_sum / stats.metric_count as f64)
+                } else {
+                    Value::Null
+                },
             })
         })
         .collect();
@@ -170,12 +196,19 @@ fn print_experiment_compare(value: &Value) {
         "Experiment {}",
         value["experiment_id"].as_str().unwrap_or("-")
     );
-    let mut table = Table::new();
-    table.set_header(vec![
+    let has_metric = variants
+        .iter()
+        .any(|v| v.get("metric").is_some_and(|m| !m.is_null()));
+    let mut header = vec![
         "Variant", "Traces", "Spans", "Errors", "Error %", "Avg ms", "Signal", "Signal %",
-    ]);
+    ];
+    if has_metric {
+        header.push("Metric avg");
+    }
+    let mut table = Table::new();
+    table.set_header(header);
     for variant in variants {
-        table.add_row(vec![
+        let mut row = vec![
             Cell::new(field(variant, "variant")),
             Cell::new(variant["trace_count"].as_u64().unwrap_or(0).to_string()),
             Cell::new(variant["span_count"].as_u64().unwrap_or(0).to_string()),
@@ -193,7 +226,16 @@ fn print_experiment_compare(value: &Value) {
                 "{:.2}",
                 variant["signal_rate"].as_f64().unwrap_or(0.0) * 100.0
             )),
-        ]);
+        ];
+        if has_metric {
+            row.push(Cell::new(
+                variant["metric_avg"]
+                    .as_f64()
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ));
+        }
+        table.add_row(row);
     }
     println!("{table}");
 }

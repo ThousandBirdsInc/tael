@@ -544,7 +544,19 @@ struct LogQueryParams {
 async fn query_logs(
     State(state): State<AppState>,
     Query(params): Query<LogQueryParams>,
+    RawQuery(raw): RawQuery,
 ) -> impl IntoResponse {
+    let attribute_filters = match parse_attribute_params(raw.as_deref()) {
+        Ok(f) => f,
+        // A malformed regex is the caller's mistake and must say so; silently
+        // matching nothing would look like "no such logs".
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
     let query = LogQuery {
         service: params.service,
         severity: params.severity,
@@ -552,6 +564,9 @@ async fn query_logs(
         trace_id: params.trace_id,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        attributes: attribute_filters.exact,
+        attributes_contains: attribute_filters.contains,
+        attributes_regex: attribute_filters.regex,
         tenant: None,
     };
 

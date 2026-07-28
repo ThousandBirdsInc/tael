@@ -528,7 +528,12 @@ pub enum IngestAction {
 pub enum McpAction {
     /// Serve MCP over stdio. Configure this as an MCP server in your agent:
     /// {"command": "tael", "args": ["mcp", "serve"]}
-    Serve,
+    Serve {
+        /// Serve the streamable-HTTP transport on this address instead of
+        /// stdio, e.g. 127.0.0.1:7702. Clients connect to http://<addr>/mcp.
+        #[arg(long)]
+        http: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -644,6 +649,11 @@ pub enum QuerySignal {
         /// Filter by trace ID
         #[arg(long)]
         trace_id: Option<String>,
+        /// Filter by log attribute, repeatable and ANDed. Three operators:
+        /// = exact, ~= contains, =~ anchored-less regex.
+        /// e.g. --attribute retry_count=3 --attribute 'host~=prod'
+        #[arg(long = "attribute")]
+        attribute: Vec<String>,
         /// Time window (e.g. 1h, 30m, 7d)
         #[arg(long)]
         last: Option<String>,
@@ -813,6 +823,18 @@ pub enum EvalCaseAction {
         #[arg(long)]
         trace_id: Option<String>,
     },
+    /// Drop cases from a server-managed suite that no run exercised recently
+    Prune {
+        /// Suite name
+        #[arg(long)]
+        suite: String,
+        /// Staleness window: prune cases unseen in runs within it (e.g. 90d)
+        #[arg(long, default_value = "90d")]
+        stale: String,
+        /// Report what would be pruned without changing the suite
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -931,6 +953,23 @@ pub enum SignalAction {
         /// Maximum comments to scan
         #[arg(long, default_value = "50000")]
         limit: u32,
+        /// Time window to count within (e.g. 7d, 24h). Default: all history.
+        #[arg(long)]
+        last: Option<String>,
+    },
+    /// Compare a signal's rate across span-attribute groups
+    Compare {
+        /// Signal name, failure mode, or self-diagnostic category
+        name: String,
+        /// Span attribute to group traces by, e.g. experiment.variant
+        #[arg(long)]
+        by: String,
+        /// Time window (e.g. 1h, 24h, 7d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
     },
 }
 
@@ -943,6 +982,9 @@ pub enum ExperimentAction {
         /// Optional signal/failure mode/category to count by variant
         #[arg(long)]
         signal: Option<String>,
+        /// Numeric span attribute (or tael.metric.<name>) to average by variant
+        #[arg(long)]
+        metric: Option<String>,
         /// Time window (e.g. 1h, 24h, 7d)
         #[arg(long)]
         last: Option<String>,
@@ -1270,6 +1312,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 severity,
                 body_contains,
                 trace_id,
+                attribute,
                 last,
                 limit,
             } => {
@@ -1280,6 +1323,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     severity,
                     body_contains,
                     trace_id,
+                    attribute,
                     last,
                     limit,
                 )
@@ -1467,6 +1511,13 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     commands::eval::case_link(&client, &opts.format, &case_id, &issue_id, trace_id)
                         .await?;
                 }
+                EvalCaseAction::Prune {
+                    suite,
+                    stale,
+                    dry_run,
+                } => {
+                    commands::suite::prune(&client, &opts.format, &suite, &stale, dry_run).await?;
+                }
             },
             EvalAction::Suite { action } => match action {
                 EvalSuiteAction::Inspect { suite, limit } => {
@@ -1541,18 +1592,34 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 )
                 .await?;
             }
-            SignalAction::Trend { name, limit } => {
-                commands::signal::trend(&client, &opts.format, &name, limit).await?;
+            SignalAction::Trend { name, limit, last } => {
+                commands::signal::trend(&client, &opts.format, &name, limit, last).await?;
+            }
+            SignalAction::Compare {
+                name,
+                by,
+                last,
+                limit,
+            } => {
+                commands::signal::compare(&client, &opts.format, &name, &by, last, limit).await?;
             }
         },
         Commands::Experiment { action } => match action {
             ExperimentAction::Compare {
                 experiment_id,
                 signal,
+                metric,
                 last,
             } => {
-                commands::experiment::compare(&client, &opts.format, &experiment_id, signal, last)
-                    .await?;
+                commands::experiment::compare(
+                    &client,
+                    &opts.format,
+                    &experiment_id,
+                    signal,
+                    metric,
+                    last,
+                )
+                .await?;
             }
         },
         Commands::Review { action } => match action {
@@ -1631,9 +1698,10 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             }
         },
         Commands::Mcp { action } => match action {
-            McpAction::Serve => {
-                mcp::serve(client, &server_url).await?;
-            }
+            McpAction::Serve { http } => match http {
+                Some(addr) => mcp::serve_http(client, &server_url, &addr).await?,
+                None => mcp::serve(client, &server_url).await?,
+            },
         },
         Commands::Score { action } => match action {
             ScoreAction::Rule { action } => match action {

@@ -18,14 +18,23 @@ pub async fn status(client: &TaelClient, format: &OutputFormat) -> Result<()> {
         OutputFormat::Table => {
             let pipelines = result["pipelines"].as_array().cloned().unwrap_or_default();
             let mut table = comfy_table::Table::new();
-            table.set_header(vec!["PIPELINE", "BATCHES", "RECORDS", "ERRORS", "LAST ACCEPTED"]);
+            table.set_header(vec![
+                "PIPELINE",
+                "BATCHES",
+                "RECORDS",
+                "ERRORS",
+                "LAST ACCEPTED",
+            ]);
             for p in &pipelines {
                 table.add_row(vec![
                     p["pipeline"].as_str().unwrap_or("-").to_string(),
                     p["batches"].as_u64().unwrap_or(0).to_string(),
                     p["records"].as_u64().unwrap_or(0).to_string(),
                     p["errors"].as_u64().unwrap_or(0).to_string(),
-                    p["last_accepted_at"].as_str().unwrap_or("never").to_string(),
+                    p["last_accepted_at"]
+                        .as_str()
+                        .unwrap_or("never")
+                        .to_string(),
                 ]);
             }
             println!("{table}");

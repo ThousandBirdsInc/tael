@@ -588,6 +588,15 @@ pub struct LogQuery {
     pub trace_id: Option<String>,
     pub last_seconds: Option<i64>,
     pub limit: Option<u32>,
+    /// Exact-match filters on log attributes (`--attribute k=v`). ANDed.
+    #[serde(default)]
+    pub attributes: Vec<(String, String)>,
+    /// Substring filters on log attribute values (`--attribute k~=v`).
+    #[serde(default)]
+    pub attributes_contains: Vec<(String, String)>,
+    /// Regex filters on log attribute values (`--attribute 'k=~pattern'`).
+    #[serde(default)]
+    pub attributes_regex: Vec<(String, String)>,
     /// Restrict to one tenant; set by the API layer, not the caller.
     #[serde(default)]
     pub tenant: Option<String>,
