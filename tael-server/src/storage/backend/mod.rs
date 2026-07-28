@@ -702,6 +702,10 @@ impl Store for TaelBackend {
         Ok(())
     }
 
+    fn collect_live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        TaelBackend::collect_live_blob_hashes(self)
+    }
+
     /// Standby entrypoint: durably accept a framed WAL record shipped from a
     /// leader and bring local state up to it. Mirrors the leader's write
     /// discipline (append → apply → consume) so the standby's WAL, hot tier, and
@@ -1409,6 +1413,105 @@ mod tests {
         let standby_traces = standby.query_traces(&TraceQuery::default()).unwrap();
         assert_eq!(leader_traces.len(), standby_traces.len());
         assert_eq!(standby_traces.len(), 3);
+    }
+
+    /// The failover drill the scaling doc's D2 asks CI to cover: a leader
+    /// ships WAL to a standby, dies mid-stream, and the standby (a) already
+    /// serves everything the leader acked, (b) accepts writes once promoted,
+    /// and (c) fences out a deposed leader that comes back and keeps shipping
+    /// under its old epoch.
+    #[test]
+    fn standby_survives_leader_death_and_fences_the_stale_leader() {
+        use crate::cluster::EpochFencer;
+
+        let (standby, _sd, _sg) = backend();
+        let standby = Arc::new(standby);
+        // The standby-side epoch gate, exactly as the `/internal/wal/records`
+        // endpoint consults it before applying a shipped record.
+        let fencer = Arc::new(EpochFencer::new());
+
+        struct FencedReplicaSink {
+            standby: Arc<TaelBackend>,
+            fencer: Arc<EpochFencer>,
+            epoch: u64,
+        }
+        impl WalSink for FencedReplicaSink {
+            fn append_framed(&self, framed: &[u8]) -> Result<()> {
+                if !self.fencer.check_and_advance(self.epoch) {
+                    anyhow::bail!("fenced: record from deposed leader epoch {}", self.epoch);
+                }
+                self.standby.apply_framed_wal(framed)
+            }
+        }
+
+        // Epoch-1 leader replicating synchronously to the standby.
+        let leader_dir = tempfile::tempdir().unwrap();
+        let leader_key = format!("tael-test-failover-{}", uuid::Uuid::new_v4());
+        let _lg = NsGuard(leader_key.clone());
+        let leader = TaelBackend::with_wal_key_and_sinks(
+            leader_dir.path().to_str().unwrap(),
+            &leader_key,
+            vec![Arc::new(FencedReplicaSink {
+                standby: Arc::clone(&standby),
+                fencer: Arc::clone(&fencer),
+                epoch: 1,
+            })],
+            None,
+        )
+        .unwrap();
+        leader
+            .insert_spans(&[
+                span("t1", "s1", "api", 10.0, SpanStatus::Ok),
+                span("t1", "s2", "db", 20.0, SpanStatus::Error),
+            ])
+            .unwrap();
+
+        // Kill the leader. Everything it acked is already on the standby.
+        drop(leader);
+        assert_eq!(standby.get_trace("t1").unwrap().len(), 2);
+
+        // Promotion: the new leadership epoch advances the fence, and the
+        // standby serves reads and accepts writes of its own.
+        assert!(fencer.check_and_advance(2), "promotion advances the epoch");
+        standby
+            .insert_spans(&[span("t2", "s3", "api", 5.0, SpanStatus::Ok)])
+            .unwrap();
+        assert_eq!(standby.get_trace("t1").unwrap().len(), 2);
+        assert_eq!(standby.get_trace("t2").unwrap().len(), 1);
+        assert_eq!(
+            standby.query_traces(&TraceQuery::default()).unwrap().len(),
+            3
+        );
+
+        // The deposed leader restarts against the same standby, still stamping
+        // epoch 1. Every shipped record must be refused, and refused records
+        // must not change standby state.
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale_key = format!("tael-test-stale-{}", uuid::Uuid::new_v4());
+        let _zg = NsGuard(stale_key.clone());
+        let stale_leader = TaelBackend::with_wal_key_and_sinks(
+            stale_dir.path().to_str().unwrap(),
+            &stale_key,
+            vec![Arc::new(FencedReplicaSink {
+                standby: Arc::clone(&standby),
+                fencer: Arc::clone(&fencer),
+                epoch: 1,
+            })],
+            None,
+        )
+        .unwrap();
+        let err = stale_leader
+            .insert_spans(&[span("t-zombie", "s9", "api", 1.0, SpanStatus::Ok)])
+            .unwrap_err();
+        // The fenced sink refuses the record, so the write fails required-acks
+        // — the deposed leader cannot ack writes it can no longer replicate.
+        assert!(err.to_string().contains("underreplicated"), "{err}");
+        assert!(standby.get_trace("t-zombie").unwrap().is_empty());
+        assert_eq!(
+            standby.query_traces(&TraceQuery::default()).unwrap().len(),
+            3,
+            "a fenced record must not mutate standby state"
+        );
     }
 
     #[test]

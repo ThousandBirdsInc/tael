@@ -137,6 +137,7 @@ pub fn router(
         // listener via DD_TRACE_AGENT_URL. See `ingest::datadog`.
         .merge(dd_routes())
         .route("/internal/wal/records", post(apply_wal_record))
+        .route("/internal/blobs/live", get(live_blob_hashes))
         .route("/internal/cluster", get(cluster_status))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -1605,6 +1606,27 @@ async fn dd_traces_v05(
 /// itself is derivable from the traces we already store.
 async fn dd_discard() -> impl IntoResponse {
     StatusCode::OK
+}
+
+/// Every blob hash a live row on this node references. The blob-GC owner on a
+/// shared blob store unions this across all writers before sweeping, so one
+/// node's mark-and-sweep can't delete blobs another shard still references
+/// (`docs/tael-server-scaling-ha.md` §5.2). Internal endpoint — firewall it
+/// alongside `/internal/wal/records`.
+async fn live_blob_hashes(State(state): State<AppState>) -> impl IntoResponse {
+    match state.store.collect_live_blob_hashes() {
+        Ok(hashes) => {
+            let hashes: Vec<String> = hashes.into_iter().collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "count": hashes.len(), "hashes": hashes })),
+            )
+        }
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }
 
 /// WAL replication ingress: a standby receives one framed WAL record

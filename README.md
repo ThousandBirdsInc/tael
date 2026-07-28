@@ -777,6 +777,7 @@ The server (`tael serve`) is configured via flags or environment variables
 | `TAEL_OTLP_HTTP_ADDR` | `127.0.0.1:4318` | OTLP/HTTP listen address (`off` to disable) |
 | `TAEL_INGEST_MAX_IN_FLIGHT` | `512` | Max concurrent in-flight ingest batches before new batches are shed with a retryable status (`0` = unbounded) |
 | `TAEL_METRIC_SERIES_LIMIT` | `100000` | Max distinct metric series this process accepts; points minting series beyond the cap are dropped and counted (`0` = unbounded) |
+| `TAEL_BLOB_GC_PEERS` | — | Comma-separated base URLs of other writers sharing the blob store; the GC owner unions their live blob sets (via `/internal/blobs/live`) before sweeping, and skips the pass if any peer is unreachable |
 | `TAEL_REST_API_ADDR` | `127.0.0.1:7701` | REST API listen address |
 | `TAEL_DATA_DIR` | `~/.tael/data` | Telemetry data directory |
 | `TAEL_WAL_DIR` | `~/.tael/wal_files` | Write-ahead log directory |

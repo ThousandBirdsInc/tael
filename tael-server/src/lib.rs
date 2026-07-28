@@ -136,6 +136,7 @@ fn spawn_span_compactor(
     backend: Arc<TaelBackend>,
     blobs: Arc<BlobStore>,
     gc_ownership: BlobGcOwnership,
+    gc_peers: Arc<Vec<RemoteStore>>,
     policy: retention::RetentionPolicy,
 ) {
     tokio::spawn(async move {
@@ -145,6 +146,7 @@ fn spawn_span_compactor(
             tick.tick().await;
             let backend = Arc::clone(&backend);
             let blobs = Arc::clone(&blobs);
+            let gc_peers = Arc::clone(&gc_peers);
             let policy = policy.clone();
             // Sampled per pass, so a node that loses leadership stops GCing on
             // its next tick and the new leader picks it up.
@@ -163,8 +165,27 @@ fn spawn_span_compactor(
                 // single-owner guard), to avoid deleting blobs other shards
                 // reference.
                 let blobs_gcd = if blob_gc_enabled {
-                    let live = backend.collect_live_blob_hashes()?;
-                    blobs.gc(&live)?
+                    let mut live = backend.collect_live_blob_hashes()?;
+                    // On a shared store the GC owner's own live set is not
+                    // enough: union every peer writer's, and if any peer can't
+                    // answer, skip GC entirely this pass — an incomplete live
+                    // set deletes blobs someone still references, while a
+                    // skipped pass only defers reclamation.
+                    let mut peers_ok = true;
+                    for peer in gc_peers.iter() {
+                        match peer.live_blob_hashes() {
+                            Ok(peer_live) => live.extend(peer_live),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "blob GC skipped: peer live-set unavailable"
+                                );
+                                peers_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if peers_ok { blobs.gc(&live)? } else { 0 }
                 } else {
                     0
                 };
@@ -618,10 +639,26 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                     );
                     BlobGcOwnership::Never
                 };
+                // Other writers sharing the blob store, whose live sets must
+                // be unioned before a sweep. Comma-separated base URLs.
+                let gc_peers: Vec<RemoteStore> = std::env::var("TAEL_BLOB_GC_PEERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(RemoteStore::new)
+                    .collect::<Result<_>>()?;
+                if !gc_peers.is_empty() {
+                    tracing::info!(
+                        peers = gc_peers.len(),
+                        "blob GC will union live blob sets across peers before sweeping"
+                    );
+                }
                 spawn_span_compactor(
                     Arc::clone(&backend),
                     Arc::clone(&blobs),
                     gc_ownership,
+                    Arc::new(gc_peers),
                     retention_policy.clone(),
                 );
                 backend as Arc<dyn Store>

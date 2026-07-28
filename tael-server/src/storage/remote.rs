@@ -79,6 +79,14 @@ impl RemoteStore {
         resp.json::<Value>()
             .with_context(|| format!("decoding {path} response from {}", self.base_url))
     }
+
+    /// The peer's live blob hashes (`GET /internal/blobs/live`). Used by the
+    /// blob-GC owner to union the live sets of every writer sharing a blob
+    /// store before sweeping it.
+    pub fn live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        let body = self.get_json("/internal/blobs/live", &[])?;
+        field(body, "hashes")
+    }
 }
 
 /// Pull a named field out of a JSON envelope and deserialize it. The REST API

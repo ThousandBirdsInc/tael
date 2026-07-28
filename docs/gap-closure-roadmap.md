@@ -68,16 +68,34 @@ shed with retryable statuses), a metric series-cardinality cap
 (`TAEL_METRIC_SERIES_LIMIT`), leader-gated blob GC in coordinated clusters,
 and engine self-metrics (`tael.engine.*`).
 
+### Closed in the second pass (2026-07, cont.)
+
+- **Git/prompt span conventions**: `tael.git.commit`/`tael.git.branch`/
+  `tael.prompt.name`/`tael.prompt.version` documented; `eval run` stamps and
+  exports the git pair automatically. `experiment compare --group-by <attr>`
+  compares across any span attribute (experiment id now optional).
+- **DuckDB→tael-backend migration tool**: `tael server migrate` (B5 closed).
+- **Cold partition pruning**: time-bounded cold reads skip whole
+  `date=`/`hour=` partitions before fetching (the partition half of Phase 6
+  pushdown).
+- **Failover coverage**: an in-process kill-the-leader test (WAL shipping →
+  leader death → standby promotion → stale-epoch fencing) runs in the normal
+  CI test job.
+- **Cross-owner blob GC**: the GC owner unions peers' live blob sets
+  (`TAEL_BLOB_GC_PEERS` + `/internal/blobs/live`) before sweeping a shared
+  store, and skips the pass if any peer is unreachable.
+
 ### Residual gaps (known, not yet built)
 
-- **Git/prompt span conventions** (`tael.git.commit`, `tael.git.branch`,
-  `tael.prompt.name`) and `--group-by` on `experiment compare`/`eval report`.
-- **D2 HA hardening**: a kill-the-leader failover test in CI and a "running
-  tael for a team" operations doc; docs/tael-server-scaling-ha.md phases 5–7
-  (pushdown cold reads, DataFusion hot∪cold unification, ingest-only mode).
+- **DataFusion hot∪cold unification** with predicate pushdown *inside*
+  Parquet objects (partition pruning landed; row-group/predicate pushdown and
+  streaming reads have not).
+- **Ingest-only node mode** and a "running tael for a team" operations doc;
+  a multi-process network failover drill (the in-process one is in CI).
+- **`--group-by` on `eval report`** (landed on `experiment compare` only).
 - **D3 Windows**: the client CLI does not build for Windows (WAL uses
   unix-only file I/O); the planned client/server split was not pursued.
-- **DuckDB→tael-backend migration tool** (tracked in the backend plan's B5).
+- **Kafka/Redpanda ingest buffer** and tenant-as-shard-key storage isolation.
 
 ### Deviations from the plan, and why
 

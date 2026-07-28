@@ -465,9 +465,11 @@ shipping layer providing the replication a broker would otherwise own.
   follows failover; without a cluster the static `TAEL_BLOB_GC_ROLE=coordinator`
   designation applies as before. Never run blob GC from two processes against
   one bucket — `collect_live_blob_hashes` only sees one node's live rows and
-  will delete another's blobs. If GC ever spans multiple writers' blobs, it
-  must compute the live set as the **union across all owners** (or switch to
-  refcounts) — that part is still open.
+  will delete another's blobs. **Also landed:** when GC spans multiple
+  writers' blobs, set `TAEL_BLOB_GC_PEERS` on the GC owner — each pass it
+  unions every peer's live set (`GET /internal/blobs/live`) before sweeping,
+  and skips the pass entirely if any peer is unreachable, so an incomplete
+  live set can never delete a referenced blob.
 
 ### 5.3 Object storage for cold + blobs
 

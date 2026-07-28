@@ -137,6 +137,15 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// Every blob hash a live row on this node references. Backs the
+    /// `GET /internal/blobs/live` endpoint, which the blob-GC owner uses to
+    /// union live sets across all writers sharing one blob store before
+    /// sweeping it (`docs/tael-server-scaling-ha.md` §5.2). Default:
+    /// unsupported — only stores with a blob-referencing schema override it.
+    fn collect_live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        anyhow::bail!("this storage backend does not track blob references")
+    }
+
     /// Standby entrypoint for WAL replication: durably accept a framed WAL
     /// record shipped from a leader and bring local state up to it
     /// (`docs/tael-server-scaling-ha.md` §5.1). Backs the
