@@ -500,23 +500,47 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         config.multi_tenant = true;
     }
 
-    // An ingest-only node forwards OTLP and nothing else: it has no engine
-    // for the Datadog/remote-write decode paths to write into, so the
-    // dedicated agent listener is off and those clients point at storage
-    // nodes directly (docs/running-tael-for-a-team.md).
-    if config.node_role == NodeRole::Ingest {
-        if config.ingest_shards.is_empty() {
-            bail!(
-                "TAEL_NODE_ROLE=ingest requires TAEL_INGEST_SHARDS=<http://shard:7701,...> — \
-                 the storage shards this node forwards to"
-            );
-        }
-        if config.dd_agent_addr.take().is_some() {
-            tracing::info!(
-                "ingest-only node: dd-trace listener disabled (point DD_TRACE_AGENT_URL at a \
-                 storage node)"
-            );
-        }
+    // Kafka ingest buffer (`--features kafka`). Parsed before the edge-mode
+    // checks: produce mode is an edge role like TAEL_NODE_ROLE=ingest.
+    #[cfg(feature = "kafka")]
+    let kafka_settings = ingest::kafka::KafkaSettings::from_env()?;
+    #[cfg(not(feature = "kafka"))]
+    if std::env::var("TAEL_KAFKA_MODE").is_ok_and(|v| !v.trim().is_empty()) {
+        bail!(
+            "the Kafka ingest buffer is not included in this build; reinstall with \
+             `--features kafka` to use TAEL_KAFKA_MODE"
+        );
+    }
+    #[cfg(feature = "kafka")]
+    let kafka_produce_mode = kafka_settings
+        .as_ref()
+        .is_some_and(|k| k.mode == ingest::kafka::KafkaMode::Produce);
+    #[cfg(not(feature = "kafka"))]
+    let kafka_produce_mode = false;
+    #[cfg(feature = "kafka")]
+    if kafka_produce_mode && config.node_role == NodeRole::Ingest {
+        bail!(
+            "TAEL_KAFKA_MODE=produce and TAEL_NODE_ROLE=ingest are both edge roles \
+             (buffer to Kafka vs. forward to shards); configure one of them"
+        );
+    }
+
+    // An edge node (ingest-only forwarder, or Kafka producer) accepts OTLP
+    // and nothing else: it has no engine for the Datadog/remote-write decode
+    // paths to write into, so the dedicated agent listener is off and those
+    // clients point at storage nodes directly (docs/running-tael-for-a-team.md).
+    let edge_only = config.node_role == NodeRole::Ingest || kafka_produce_mode;
+    if config.node_role == NodeRole::Ingest && config.ingest_shards.is_empty() {
+        bail!(
+            "TAEL_NODE_ROLE=ingest requires TAEL_INGEST_SHARDS=<http://shard:7701,...> — \
+             the storage shards this node forwards to"
+        );
+    }
+    if edge_only && config.dd_agent_addr.take().is_some() {
+        tracing::info!(
+            "edge (ingest/buffer) node: dd-trace listener disabled (point \
+             DD_TRACE_AGENT_URL at a storage node)"
+        );
     }
 
     // Resolve auth and retention before anything binds, so a misconfigured
@@ -584,7 +608,24 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     } else {
         None
     };
-    let store: Arc<dyn Store> = if let Some(f) = &forwarder {
+    // Kafka producer edge: connect before anything binds, so a missing
+    // topic/broker fails startup instead of the first batch.
+    #[cfg(feature = "kafka")]
+    let kafka_publisher = match &kafka_settings {
+        Some(s) if s.mode == ingest::kafka::KafkaMode::Produce => {
+            Some(Arc::new(ingest::kafka::KafkaPublisher::connect(s).await?))
+        }
+        _ => None,
+    };
+    let store: Arc<dyn Store> = if kafka_produce_mode {
+        Arc::new(ingest::forward::IngestOnlyStore::with_message(
+            &[],
+            "this node buffers OTLP into Kafka (TAEL_KAFKA_MODE=produce): it serves no \
+             queries and stores nothing. Query a storage node that consumes the topic \
+             (TAEL_KAFKA_MODE=consume); point dd-trace and Prometheus remote-write \
+             directly at a storage node.",
+        )?)
+    } else if let Some(f) = &forwarder {
         tracing::info!(
             shards = f.shard_count(),
             "ingest-only node: forwarding OTLP to storage shards (no local engine)"
@@ -782,9 +823,9 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
     let score_rules = Arc::new(scoring::ScoreRuleStore::open(&config.data_dir)?);
     let suite_store = Arc::new(suites::SuiteStore::open(&config.data_dir)?);
-    // Online scoring and alert evaluation read the store; an ingest-only
-    // node has none, so the loops would only log refusals.
-    if config.node_role != NodeRole::Ingest {
+    // Online scoring and alert evaluation read the store; an edge node has
+    // none, so the loops would only log refusals.
+    if !edge_only {
         spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
         // Evaluate more often than the compaction pass: an alert is only
         // useful if it fires close to when the condition started.
@@ -806,35 +847,78 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     // HTTP/protobuf (:4318) hand decoded batches to the same implementations,
     // so there is one ingest path regardless of how a client speaks to it.
     let payload_indexes = Arc::new(payload_indexes);
-    let otlp_services = match &forwarder {
-        // Ingest tier: both transports split-and-forward at the protobuf
-        // layer, so blobs/indexing/tenant stamping happen on the owning shard.
-        Some(f) => ingest::otlp_http::OtlpHttpState {
-            traces: Arc::new(ingest::forward::ForwardingTraceService(Arc::clone(f))),
-            logs: Arc::new(ingest::forward::ForwardingLogsService(Arc::clone(f))),
-            metrics: Arc::new(ingest::forward::ForwardingMetricsService(Arc::clone(f))),
-        },
-        None => ingest::otlp_http::OtlpHttpState {
-            traces: Arc::new(ingest::otlp::OtlpTraceService::new(
-                Arc::clone(&store),
-                Arc::clone(&blobs),
-                Arc::clone(&payload_indexes),
-                Arc::clone(&bus),
-                config.multi_tenant,
-            )),
-            logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
-                Arc::clone(&store),
-                Arc::clone(&blobs),
-                Arc::clone(&payload_indexes),
-                Arc::clone(&log_bus),
-                config.multi_tenant,
-            )),
-            metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(
-                Arc::clone(&store),
-                config.multi_tenant,
-            )),
-        },
+    #[cfg(feature = "kafka")]
+    let kafka_services = kafka_publisher
+        .as_ref()
+        .map(|p| ingest::otlp_http::OtlpHttpState {
+            traces: Arc::new(ingest::kafka::KafkaTraceService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+            logs: Arc::new(ingest::kafka::KafkaLogsService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+            metrics: Arc::new(ingest::kafka::KafkaMetricsService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+        });
+    #[cfg(not(feature = "kafka"))]
+    let kafka_services: Option<ingest::otlp_http::OtlpHttpState> = None;
+    let otlp_services = if let Some(services) = kafka_services {
+        // Edge buffering: both transports publish shard-split OTLP slices to
+        // the topic; storage nodes consume and apply them.
+        services
+    } else {
+        match &forwarder {
+            // Ingest tier: both transports split-and-forward at the protobuf
+            // layer, so blobs/indexing/tenant stamping happen on the owning shard.
+            Some(f) => ingest::otlp_http::OtlpHttpState {
+                traces: Arc::new(ingest::forward::ForwardingTraceService(Arc::clone(f))),
+                logs: Arc::new(ingest::forward::ForwardingLogsService(Arc::clone(f))),
+                metrics: Arc::new(ingest::forward::ForwardingMetricsService(Arc::clone(f))),
+            },
+            None => ingest::otlp_http::OtlpHttpState {
+                traces: Arc::new(ingest::otlp::OtlpTraceService::new(
+                    Arc::clone(&store),
+                    Arc::clone(&blobs),
+                    Arc::clone(&payload_indexes),
+                    Arc::clone(&bus),
+                    config.multi_tenant,
+                )),
+                logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
+                    Arc::clone(&store),
+                    Arc::clone(&blobs),
+                    Arc::clone(&payload_indexes),
+                    Arc::clone(&log_bus),
+                    config.multi_tenant,
+                )),
+                metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(
+                    Arc::clone(&store),
+                    config.multi_tenant,
+                )),
+            },
+        }
     };
+
+    // Kafka consumer: a storage node that also drains its owned topic
+    // partitions through the same services the listeners use.
+    #[cfg(feature = "kafka")]
+    if let Some(s) = &kafka_settings
+        && s.mode == ingest::kafka::KafkaMode::Consume
+    {
+        if config.node_role == NodeRole::Ingest {
+            bail!("TAEL_KAFKA_MODE=consume needs a storage node, not TAEL_NODE_ROLE=ingest");
+        }
+        ingest::kafka::spawn_consumers(
+            s,
+            otlp_services.clone(),
+            &config.data_dir,
+            config.multi_tenant,
+        )
+        .await?;
+    }
 
     let grpc_handle = tokio::spawn({
         let otlp = otlp_services.clone();

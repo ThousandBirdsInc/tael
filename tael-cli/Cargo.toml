@@ -42,6 +42,8 @@ duckdb = ["tael-server/duckdb"]
 # it is a large dependency, and the structured commands cover most of what
 # the SQL escape hatch is reached for.
 sql = ["tael-server/sql"]
+# Kafka/Redpanda ingest buffer support in the embedded server (`tael serve`).
+kafka = ["tael-server/kafka"]
 
 [dependencies]
 tael-server = { path = "../tael-server", version = "0.5.14" }

@@ -43,6 +43,9 @@ jobs:
       - name: Build (cloud feature)
         run: cargo build -p tael-server --features cloud
 
+      - name: Test (kafka feature)
+        run: cargo test -p tael-server --features kafka ingest::kafka
+
       - name: Build benchmarks
         run: cargo build -p tael-server --benches
 

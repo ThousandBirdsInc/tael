@@ -241,7 +241,7 @@ impl MetricsService for ForwardingMetricsService {
 /// Split a trace export by `hash(trace_id)`, preserving each span's resource
 /// and scope wrappers. Returns one request per shard (`None` = nothing for
 /// that shard) plus the total span count.
-fn split_traces(
+pub(crate) fn split_traces(
     req: ExportTraceServiceRequest,
     n: usize,
 ) -> (Vec<Option<ExportTraceServiceRequest>>, usize) {
@@ -281,7 +281,7 @@ fn split_traces(
 /// Split a logs export the way the read fan-out expects: by `hash(trace_id)`
 /// when the record carries one, else by the resource's service name (matching
 /// `FanoutStore::insert_logs`, which routes orphan logs by service).
-fn split_logs(
+pub(crate) fn split_logs(
     req: ExportLogsServiceRequest,
     n: usize,
 ) -> (Vec<Option<ExportLogsServiceRequest>>, usize) {
@@ -325,7 +325,7 @@ fn split_logs(
 /// Split a metrics export by `hash(metric name)`, matching
 /// `FanoutStore::insert_metrics` (a series stays whole on one shard, so
 /// unique-name counts still merge by sum).
-fn split_metrics(
+pub(crate) fn split_metrics(
     req: ExportMetricsServiceRequest,
     n: usize,
 ) -> (Vec<Option<ExportMetricsServiceRequest>>, usize) {
@@ -402,39 +402,47 @@ const INGEST_ONLY: &str = "this node is ingest-only (TAEL_NODE_ROLE=ingest): it 
 /// The `Store` an ingest-only node mounts behind its REST router: every
 /// storage operation is refused with an explanation, and readiness reflects
 /// shard reachability so a load balancer drops an ingest node whose shards
-/// are all gone (it could only shed traffic anyway).
+/// are all gone (it could only shed traffic anyway). With no shards
+/// configured (the Kafka-producer edge, whose downstream is a broker rather
+/// than HTTP shards), readiness is unconditional.
 pub struct IngestOnlyStore {
     shards: Vec<RemoteStore>,
+    message: &'static str,
 }
 
 impl IngestOnlyStore {
     pub fn new(shard_urls: &[String]) -> Result<Self> {
+        Self::with_message(shard_urls, INGEST_ONLY)
+    }
+
+    /// Same refusal behavior with a mode-specific explanation.
+    pub fn with_message(shard_urls: &[String], message: &'static str) -> Result<Self> {
         let shards = shard_urls
             .iter()
             .map(RemoteStore::new)
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { shards })
+        Ok(Self { shards, message })
     }
 }
 
 macro_rules! refuse {
-    () => {
-        anyhow::bail!(INGEST_ONLY)
+    ($self:ident) => {
+        anyhow::bail!($self.message)
     };
 }
 
 impl Store for IngestOnlyStore {
     fn insert_spans(&self, _spans: &[Span]) -> Result<()> {
-        refuse!()
+        refuse!(self)
     }
     fn query_traces(&self, _query: &TraceQuery) -> Result<Vec<Span>> {
-        refuse!()
+        refuse!(self)
     }
     fn get_trace(&self, _trace_id: &str) -> Result<Vec<Span>> {
-        refuse!()
+        refuse!(self)
     }
     fn list_services(&self) -> Result<Vec<ServiceInfo>> {
-        refuse!()
+        refuse!(self)
     }
     fn add_comment(
         &self,
@@ -443,25 +451,25 @@ impl Store for IngestOnlyStore {
         _author: &str,
         _body: &str,
     ) -> Result<TraceComment> {
-        refuse!()
+        refuse!(self)
     }
     fn get_comments(&self, _trace_id: &str) -> Result<Vec<TraceComment>> {
-        refuse!()
+        refuse!(self)
     }
     fn insert_logs(&self, _logs: &[LogRecord]) -> Result<()> {
-        refuse!()
+        refuse!(self)
     }
     fn query_logs(&self, _query: &LogQuery) -> Result<Vec<LogRecord>> {
-        refuse!()
+        refuse!(self)
     }
     fn insert_metrics(&self, _metrics: &[MetricPoint]) -> Result<()> {
-        refuse!()
+        refuse!(self)
     }
     fn query_metrics(&self, _query: &MetricQuery) -> Result<Vec<MetricPoint>> {
-        refuse!()
+        refuse!(self)
     }
     fn query_summary(&self, _last_seconds: i64, _service: Option<&str>) -> Result<SummaryReport> {
-        refuse!()
+        refuse!(self)
     }
     fn query_anomalies(
         &self,
@@ -469,17 +477,21 @@ impl Store for IngestOnlyStore {
         _baseline_seconds: i64,
         _service: Option<&str>,
     ) -> Result<AnomalyReport> {
-        refuse!()
+        refuse!(self)
     }
     fn query_correlate(&self, _trace_id: &str) -> Result<Option<CorrelateReport>> {
-        refuse!()
+        refuse!(self)
     }
     fn query_sql(&self, _sql: &str) -> Result<Vec<serde_json::Value>> {
-        refuse!()
+        refuse!(self)
     }
     fn health(&self) -> Result<()> {
-        // Ready while at least one shard is reachable — with none, ingest can
-        // only shed, so the LB should route around this node.
+        // Ready while at least one shard is reachable — with none configured
+        // (the Kafka edge), always ready; with all configured shards down,
+        // ingest can only shed, so the LB should route around this node.
+        if self.shards.is_empty() {
+            return Ok(());
+        }
         let mut healthy = 0usize;
         for (i, shard) in self.shards.iter().enumerate() {
             match shard.health() {

@@ -2,6 +2,8 @@ pub mod backpressure;
 pub mod cardinality;
 pub mod datadog;
 pub mod forward;
+#[cfg(feature = "kafka")]
+pub mod kafka;
 pub mod otlp;
 pub mod otlp_http;
 pub mod otlp_logs;
