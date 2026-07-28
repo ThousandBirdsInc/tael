@@ -135,7 +135,7 @@ tael eval runs
 tael eval status <run_id>
 tael eval cases <run_id>
 tael eval scores <run_id>
-tael eval report <run_id>
+tael eval report <run_id> [--group-by <label>]   # --group-by git.commit: per-group score means
 tael eval compare <run_id> <baseline_run_id>
 ```
 

@@ -9,15 +9,19 @@
 > structure the deployment for high availability. It picks up where the design
 > doc's **B5: Scale path (v2)** leaves off.
 
-> **Implementation status.** The near-term horizontal + HA path is **built**
-> (phased rollout §6, items 1–4): read fan-out (`FanoutStore` + `RemoteStore`),
-> `trace_id` write routing, ops hardening (health/readiness + graceful drain),
-> synchronous WAL replication (`required_acks`), and automatic failover via
-> chitchat leader election + epoch fencing. **Remaining** (items 5–7): the async
-> object-store cold/blob tier, the DataFusion analytics unification (retiring the
-> DuckDB projection), and full ingest/query disaggregation. Per-section "Status
-> (landed)" notes mark exactly what exists; everything else is design ahead of
-> code.
+> **Implementation status.** The full phased rollout (§6) is **built**: read
+> fan-out (`FanoutStore` + `RemoteStore`), `trace_id` write routing, ops
+> hardening (health/readiness + graceful drain), synchronous WAL replication
+> (`required_acks`), automatic failover via chitchat leader election + epoch
+> fencing, the object-store cold/blob tier (`cloud` feature), cold-read
+> predicate pushdown inside Parquet objects (partition + row-group pruning +
+> decoder-level row filters, streamed partition-at-a-time), and ingest/query
+> disaggregation (`TAEL_QUERY_SHARDS` query tier, `TAEL_NODE_ROLE=ingest`
+> ingest tier, optional Kafka buffer behind `--features kafka`). Tenant
+> isolation (`TAEL_TENANT_ISOLATION`) makes the tenant the top-level shard
+> key. The operator-facing side lives in
+> [running-tael-for-a-team.md](running-tael-for-a-team.md); a multi-process
+> failover drill (`scripts/failover-drill.sh`) runs in CI.
 
 ## TL;DR
 
@@ -39,7 +43,10 @@ two grains, in order of effort:
    layer — *not* Kafka; see below) and an object-store cold tier. This is the
    target; it's what B5 gestures at.
 
-> **No Kafka/Redpanda.** The WAL is already walrus (`storage/backend/wal.rs`):
+> **No Kafka/Redpanda in the HA path.** (An *optional* ingest buffer exists
+> behind `--features kafka` for scaling ingest and storage independently —
+> see `ingest/kafka.rs` — but durability and failover never depend on a
+> broker.) The WAL is already walrus (`storage/backend/wal.rs`):
 > durable fsync'd append, topic streams, and retained read offsets that
 > `TaelBackend::replay` uses today. The only thing a broker would add over
 > walrus is **cross-node replication** (surviving node *loss*, not just crash).
@@ -216,8 +223,11 @@ traceID`) does exactly this and is the standard pattern. Logs carry `trace_id`
 too and route the same way; metrics (no trace) shard by `(name, labels_hash)` or
 `service`.
 
-Tenant, when it lands (design Open Q #4), becomes the natural top-level shard key
-— `hash(tenant, trace_id)` — and gives clean per-tenant isolation.
+Tenant, when enabled, is the natural top-level shard key. **Landed:**
+`TAEL_TENANT_ISOLATION=1` gives every tenant its own complete engine under
+`<data_dir>/tenants/<tenant>/` (`storage/tenant_shard.rs`) — physical
+isolation, not query-layer filtering — with writes routed by the server-side
+tenant stamp and WAL replication composing per tenant engine.
 
 ### The query fan-out layer
 
@@ -475,10 +485,12 @@ shipping layer providing the replication a broker would otherwise own.
 
 The durable, shared, replicated system of record. Action items:
 
-- Land the native async `object_store` cold backend (design B5 / Phase 9). The
-  blocker is the sync read path (`cold.rs:for_each_row`, `all_spans`); it must go
-  async and ideally gain predicate/partition pushdown (the design's DataFusion
-  Phase 6) so cold reads don't pull whole partitions into memory.
+- ~~Land the native async `object_store` cold backend~~ **Landed:** the
+  `cloud` feature serves cold + blobs from S3/GCS through the `ObjectBackend`
+  seam, and cold reads push predicates down to partition pruning, row-group
+  statistics, and decoder-level row filters (`cold.rs`), streaming one time
+  partition at a time with early exit — a limit-bounded query no longer pulls
+  whole partitions into memory.
 - Point blobs at the same bucket. `put` is already idempotent and safe under
   concurrent writers (temp-file-then-rename, `blobs.rs:50`); on S3 use
   put-if-absent semantics or just tolerate idempotent overwrites.
@@ -557,12 +569,23 @@ buffer; no broker needed to absorb spikes.
    (`TAEL_WAL_STANDBYS` / `TAEL_WAL_REQUIRED_ACKS`); chitchat election + epoch
    fencing (`cluster/`, `TAEL_CLUSTER_*`). Quorum/Raft (linearizable) failover is
    the optional upgrade (Open Q #2).
-5. **Async object-store cold + blobs** (design B5/Phase 9): shared system of
-   record; failover only rebuilds the hot window.
-6. **DataFusion unification** (design Phase 6): retire the DuckDB projection so the
-   query tier is fully stateless and reads scale independently.
-7. **Disaggregated tiers**: stateless ingest + query autoscale; one storage owner
-   per partition; leader-elected compaction/GC.
+5. **Object-store cold + blobs** (design B5/Phase 9): shared system of
+   record; failover only rebuilds the hot window. — *Landed:* `cloud`
+   feature (S3/GCS via `TAEL_COLD_STORE`/`TAEL_BLOB_STORE`), with
+   leader-gated, live-set-unioned blob GC.
+6. **Cold-read pushdown** (design Phase 6's residual): predicate pushdown
+   inside Parquet objects so cold reads scale with matches, not history.
+   — *Landed:* partition + row-group pruning and decoder-level row filters
+   with streamed, early-exiting scans; `--explain` reports `cold_scan`. (The
+   default build already runs analytics natively with no DuckDB projection;
+   the `duckdb` feature remains a legacy option.)
+7. **Disaggregated tiers**: stateless ingest + query autoscale; one storage
+   owner per partition; leader-elected compaction/GC. — *Landed:*
+   `TAEL_QUERY_SHARDS` (stateless query tier), `TAEL_NODE_ROLE=ingest`
+   (stateless OTLP-splitting ingest tier), optional Kafka buffer
+   (`--features kafka`) with operator-assigned single-writer partitions, and
+   leader-gated GC. See
+   [running-tael-for-a-team.md](running-tael-for-a-team.md) for topologies.
 
 ## 7. Failure modes (target/disaggregated)
 

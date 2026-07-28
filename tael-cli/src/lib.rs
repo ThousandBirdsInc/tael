@@ -765,6 +765,10 @@ pub enum EvalAction {
     Report {
         /// Eval run ID
         run_id: String,
+        /// Group cases by a label, e.g. --group-by git.commit
+        /// (tael.-prefixed forms also match); reports per-group score means
+        #[arg(long)]
+        group_by: Option<String>,
     },
     /// Compare a run against a baseline run
     Compare {
@@ -1532,8 +1536,8 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             EvalAction::Scores { run_id } => {
                 commands::eval::scores(&client, &opts.format, &run_id).await?;
             }
-            EvalAction::Report { run_id } => {
-                commands::eval::report(&client, &opts.format, &run_id).await?;
+            EvalAction::Report { run_id, group_by } => {
+                commands::eval::report(&client, &opts.format, &run_id, group_by.as_deref()).await?;
             }
             EvalAction::Compare {
                 run_id,

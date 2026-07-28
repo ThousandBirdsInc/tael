@@ -1,6 +1,6 @@
 # Gap-Closure Roadmap: Competing with Eval-First SaaS Platforms
 
-Status: partially implemented — see **Implementation status** below
+Status: fully implemented — see **Implementation status** below
 Extends: [DESIGN.md](../DESIGN.md) milestones M4+, [tael-backend-design.md](tael-backend-design.md), [tael-evals-design.md](tael-evals-design.md)
 
 ## Context
@@ -85,17 +85,70 @@ and engine self-metrics (`tael.engine.*`).
   (`TAEL_BLOB_GC_PEERS` + `/internal/blobs/live`) before sweeping a shared
   store, and skips the pass if any peer is unreachable.
 
+### Closed in the third pass (2026-07, cont.) — the multi-week projects
+
+The five architecture projects the second pass left open are built:
+
+- **Predicate pushdown inside Parquet objects** (the Phase 6 residual): cold
+  reads now push their predicate down three levels — partition pruning
+  (existing), row-group pruning from Parquet column statistics, and a
+  decoder-level Arrow `RowFilter` — before a row is materialized. Objects are
+  written with bounded row groups so trace-sorted/`(service|name, ts)`-sorted
+  statistics actually prune. Scans stream one time partition at a time,
+  newest first, with early exit at partition boundaries, and every scan
+  reports `ColdScanStats`, surfaced as `cold_scan` in
+  `query traces --explain`. An oracle test pins pushdown ≡ full-scan+filter.
+- **Ingest-only node mode** (`TAEL_NODE_ROLE=ingest` +
+  `TAEL_INGEST_SHARDS`): a stateless OTLP edge that splits each export batch
+  at the protobuf layer by the same shard key the query fan-out uses and
+  re-posts per-shard OTLP requests — blobs, indexing, and tenant stamping
+  happen on the owning shard; the client's `Authorization` forwards
+  verbatim. Plus [running-tael-for-a-team.md](running-tael-for-a-team.md)
+  (the operations doc) and `scripts/failover-drill.sh` — the multi-process
+  network failover drill, now a CI job. The drill immediately caught a real
+  bug the in-process tests could not: `reqwest::blocking` panics inside the
+  server runtime, so `TAEL_WAL_STANDBYS` panicked at startup and query-tier
+  reads panicked per request; the remote clients now run an async client on
+  a dedicated IO runtime behind the same sync facade.
+- **D3 Windows**: the client/server split was pursued after all. On Windows
+  the `tael-server` dependency is compiled out (target-gated) and `tael`
+  builds as a pure client — every query/eval/annotation command works
+  against a remote server; `serve`/`auth`/`config`/`server migrate` refuse
+  with a pointer to the server host. CI builds the client on
+  `windows-latest`; releases ship a Windows binary.
+- **Kafka/Redpanda ingest buffer** (`--features kafka`, pure-Rust rskafka):
+  `TAEL_KAFKA_MODE=produce` buffers shard-split OTLP slices into a topic
+  (acked only after the broker acked, tenant carried as a header);
+  `TAEL_KAFKA_MODE=consume` drains explicitly-owned partitions
+  (single-writer-per-partition, operator-assigned) through the same OTLP
+  services the listeners use, with offsets persisted after apply
+  (at-least-once, idempotent replay). The broker remains deliberately
+  outside the HA story — walrus + WAL shipping own that.
+- **Tenant-as-shard-key storage isolation** (`TAEL_TENANT_ISOLATION=1`):
+  tenancy graduated from query-layer authorization to physical isolation —
+  each tenant gets its own complete engine (WAL namespace, hot tier, cold
+  tier, text index, comments) under `<data_dir>/tenants/<tenant>/`, with
+  writes routed by the stamped attribute, scoped reads opening only the
+  scoped tenant's engine, and admin reads fanning out. WAL replication
+  composes. Along the way the pass fixed a real hole: ingest never actually
+  stamped the writer's tenant (the tenancy doc claimed it did), so a client
+  could forge `tael.tenant` even under plain multi-tenancy — every ingest
+  path now stamps server-side from the authenticated principal, overriding
+  client-supplied values.
+
+Also closed: `eval report --group-by <label>` (per-group case counts and
+score means over the run's labels, matching `tael.`-prefixed forms), the
+last B4 sub-item.
+
 ### Residual gaps (known, not yet built)
 
-- **DataFusion hot∪cold unification** with predicate pushdown *inside*
-  Parquet objects (partition pruning landed; row-group/predicate pushdown and
-  streaming reads have not).
-- **Ingest-only node mode** and a "running tael for a team" operations doc;
-  a multi-process network failover drill (the in-process one is in CI).
-- **`--group-by` on `eval report`** (landed on `experiment compare` only).
-- **D3 Windows**: the client CLI does not build for Windows (WAL uses
-  unix-only file I/O); the planned client/server split was not pursued.
-- **Kafka/Redpanda ingest buffer** and tenant-as-shard-key storage isolation.
+None. Every item from the four phases, the follow-up audits, and the
+residual list above is built and tested. Future work now lives where it
+belongs: the deliberate non-goals in **Thesis guardrails**, and the
+documented limits in each feature's own docs (gossip election is
+best-effort, not Raft; cross-shard percentiles are weighted approximations;
+`query sql` is single-node; ANN indexing for `similar`/`cluster` remains
+demand-driven).
 
 ### Deviations from the plan, and why
 

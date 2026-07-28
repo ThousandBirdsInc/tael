@@ -594,7 +594,7 @@ eval runs        → {"runs": [...], "count": N}
 eval status      → {"run": {...}}
 eval cases       → {"run_id", "cases": [...], "count": N}
 eval scores      → {"run_id", "scores": [...], "count": N} or {"scores": [...], "count": N} after ingest
-eval report      → {"run": {...}, "cases": [...]}
+eval report      → {"run": {...}, "cases": [...]} (+"groups" with --group-by <label>)
 eval compare     → {"current_run_id", "baseline_run_id", "cases": [...]}
 eval suite inspect → {"suite", "case_count", "critical_path_count", "provenance_free", "missing_expected_behavior", "duplicate_failure_modes", "cases"}
 issue list       → {"issues": [...], "count": N}

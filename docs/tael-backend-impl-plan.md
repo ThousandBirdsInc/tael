@@ -471,9 +471,11 @@ embedding source.
 >   and `BlobStore` sitting on the `ObjectBackend` seam (async driven on a
 >   dedicated IO runtime behind the sync facade). Query-tier sharding landed
 >   via `FanoutStore`/`RemoteStore` per docs/tael-server-scaling-ha.md.
-> - **Still deferred:** the DuckDB→backend migration tool, the optional
->   Kafka/Redpanda ingest buffer, a dedicated ingest-only process mode, and
->   predicate/partition pushdown on cold reads (DataFusion Phase 6 follow-on).
+> - **Since landed:** the DuckDB→backend migration tool (`tael server
+>   migrate`), the optional Kafka/Redpanda ingest buffer (`--features
+>   kafka`), the dedicated ingest-only process mode (`TAEL_NODE_ROLE=ingest`),
+>   and predicate/partition pushdown on cold reads (partition + row-group
+>   pruning + decoder-level row filters, streamed with early exit).
 
 **Goal:** promote `tael-backend` to default; enable cloud cold tier.
 

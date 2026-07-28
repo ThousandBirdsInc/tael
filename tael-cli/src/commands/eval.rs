@@ -34,15 +34,76 @@ pub async fn scores(client: &TaelClient, format: &OutputFormat, run_id: &str) ->
     Ok(())
 }
 
-pub async fn report(client: &TaelClient, format: &OutputFormat, run_id: &str) -> Result<()> {
+pub async fn report(
+    client: &TaelClient,
+    format: &OutputFormat,
+    run_id: &str,
+    group_by: Option<&str>,
+) -> Result<()> {
     let status = client.eval_status(run_id).await?;
     let cases = client.eval_cases(run_id).await?;
-    let result = serde_json::json!({
+    let cases = cases
+        .get("cases")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let mut result = serde_json::json!({
         "run": status.get("run").cloned().unwrap_or(Value::Null),
-        "cases": cases.get("cases").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "cases": cases,
     });
+    if let Some(key) = group_by {
+        result["group_by"] = Value::String(key.to_string());
+        result["groups"] = group_cases(&result["cases"], key);
+    }
     output::render(format, &result, output::print_eval_report);
     Ok(())
+}
+
+/// Group a run's cases by a label (`key`, also matching the `tael.`-prefixed
+/// form the span conventions use), reporting per-group case counts and mean
+/// scores per metric. This is the report-side half of the git/prompt span
+/// conventions: `eval run` stamps `tael.git.commit` on every case, so
+/// `--group-by git.commit` compares scores across the commits in one run.
+fn group_cases(cases: &Value, key: &str) -> Value {
+    use std::collections::BTreeMap;
+    /// Running sum + count per metric, for the group's means.
+    type MetricSums = BTreeMap<String, (f64, usize)>;
+    let prefixed = format!("tael.{key}");
+    let mut groups: BTreeMap<String, (usize, MetricSums)> = BTreeMap::new();
+    for case in cases.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let labels = case.get("labels").and_then(Value::as_object);
+        let group = labels
+            .and_then(|l| l.get(key).or_else(|| l.get(&prefixed)))
+            .and_then(Value::as_str)
+            .unwrap_or("(none)")
+            .to_string();
+        let entry = groups.entry(group).or_default();
+        entry.0 += 1;
+        if let Some(scores) = case.get("scores").and_then(Value::as_object) {
+            for (metric, value) in scores {
+                if let Some(v) = value.as_f64() {
+                    let m = entry.1.entry(metric.clone()).or_insert((0.0, 0));
+                    m.0 += v;
+                    m.1 += 1;
+                }
+            }
+        }
+    }
+    Value::Array(
+        groups
+            .into_iter()
+            .map(|(group, (case_count, metrics))| {
+                let means: serde_json::Map<String, Value> = metrics
+                    .into_iter()
+                    .map(|(metric, (sum, n))| (metric, serde_json::json!(sum / n.max(1) as f64)))
+                    .collect();
+                serde_json::json!({
+                    "group": group,
+                    "case_count": case_count,
+                    "score_means": means,
+                })
+            })
+            .collect(),
+    )
 }
 
 pub async fn compare(
@@ -585,5 +646,41 @@ fn print_eval_suite_inspect(value: &Value) {
             ]);
         }
         println!("{table}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_cases_matches_plain_and_prefixed_labels_and_averages_scores() {
+        let cases = serde_json::json!([
+            { "case_id": "a", "labels": { "tael.git.commit": "abc" },
+              "scores": { "accuracy": 1.0, "latency": 10.0 } },
+            { "case_id": "b", "labels": { "git.commit": "abc" },
+              "scores": { "accuracy": 0.0 } },
+            { "case_id": "c", "labels": { "git.commit": "def" },
+              "scores": { "accuracy": 1.0 } },
+            { "case_id": "d", "labels": {}, "scores": {} },
+        ]);
+        let groups = group_cases(&cases, "git.commit");
+        let groups = groups.as_array().unwrap();
+        assert_eq!(groups.len(), 3);
+
+        let by_name = |name: &str| {
+            groups
+                .iter()
+                .find(|g| g["group"] == name)
+                .unwrap_or_else(|| panic!("missing group {name}"))
+        };
+        let abc = by_name("abc");
+        assert_eq!(abc["case_count"], 2);
+        // (1.0 + 0.0) / 2 — plain and tael.-prefixed labels land together.
+        assert_eq!(abc["score_means"]["accuracy"], 0.5);
+        assert_eq!(abc["score_means"]["latency"], 10.0);
+        assert_eq!(by_name("def")["case_count"], 1);
+        // A case without the label is reported, not silently dropped.
+        assert_eq!(by_name("(none)")["case_count"], 1);
     }
 }
