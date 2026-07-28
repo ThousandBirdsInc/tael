@@ -1,6 +1,6 @@
 # Scaling & HA: tael-server on the tael-backend engine
 
-> Status: Part design, part as-built · Owner: colton@thousandbirds.ai · Last updated: 2026-05-26
+> Status: Part design, part as-built · Owner: colton@thousandbirds.ai · Last updated: 2026-07-28
 >
 > Companion to [`tael-backend-design.md`](./tael-backend-design.md) (the storage
 > engine) and [`tael-backend-impl-plan.md`](./tael-backend-impl-plan.md). This
@@ -457,13 +457,19 @@ shipping layer providing the replication a broker would otherwise own.
   each compacts its own copy independently (no shared namespace, no race). The
   compactor is therefore **not** gated on the elected leader yet, and doesn't
   need to be.
-- Disaggregated/shared-object-store model *(item 5, not yet built)*: once cold +
-  blobs are a single shared bucket, compaction and `blobs.gc` must move to the
-  per-partition storage owner, gated by the chitchat **leader election** we now
-  have (§5.1). Never run blob GC from two processes against one bucket —
-  `collect_live_blob_hashes` only sees one node's live rows and will delete
-  another's blobs. If GC ever spans multiple writers' blobs, it must compute the
-  live set as the **union across all owners** (or switch to refcounts).
+- Disaggregated/shared-object-store model: once cold + blobs are a single
+  shared bucket, compaction and `blobs.gc` must move to the per-partition
+  storage owner. **Landed (2026-07):** on a shared blob store, when a
+  coordinated cluster is running, blob GC is gated on the chitchat **leader
+  election** (§5.1) — checked live each maintenance pass, so GC ownership
+  follows failover; without a cluster the static `TAEL_BLOB_GC_ROLE=coordinator`
+  designation applies as before. Never run blob GC from two processes against
+  one bucket — `collect_live_blob_hashes` only sees one node's live rows and
+  will delete another's blobs. **Also landed:** when GC spans multiple
+  writers' blobs, set `TAEL_BLOB_GC_PEERS` on the GC owner — each pass it
+  unions every peer's live set (`GET /internal/blobs/live`) before sweeping,
+  and skips the pass entirely if any peer is unreachable, so an incomplete
+  live set can never delete a referenced blob.
 
 ### 5.3 Object storage for cold + blobs
 
@@ -515,13 +521,15 @@ disaggregation it does **not** distribute:
 ### 5.6 Backpressure & flow control
 
 Writes are synchronous through fsync (`insert_spans`), which already applies
-*implicit* backpressure — a slow disk slows the ack. **Not yet implemented:**
-explicit shedding (OTLP gRPC `RESOURCE_EXHAUSTED` / remote-write 429) and a
-bounded receive queue, so a sustained burst still buffers in the async runtime
-rather than being cleanly rejected with a retryable error. walrus's
-`batch_append_for_topic` + a tuned `FsyncSchedule` amortize fsync cost and the
-local-NVMe WAL is the burst buffer; the explicit shed-with-429 path is the
-remaining hardening (no broker needed to absorb spikes).
+*implicit* backpressure — a slow disk slows the ack. **Landed (2026-07):**
+explicit shedding — every ingest path (OTLP spans/logs/metrics on both
+transports, Datadog intake, remote-write) acquires a process-wide admission
+permit before decoding; at `TAEL_INGEST_MAX_IN_FLIGHT` concurrent batches
+(default 512, `0` = unbounded) new batches are shed with OTLP gRPC
+`RESOURCE_EXHAUSTED` / HTTP 429, and shed counts are surfaced per pipeline in
+`tael ingest status`. walrus's `batch_append_for_topic` + a tuned
+`FsyncSchedule` amortize fsync cost and the local-NVMe WAL remains the burst
+buffer; no broker needed to absorb spikes.
 
 ---
 

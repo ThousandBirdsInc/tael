@@ -476,6 +476,28 @@ pub(super) fn log_matches(
     {
         return false;
     }
+    for (k, v) in &query.attributes {
+        if log.attributes.get(k).map(|s| s.as_str()) != Some(v.as_str()) {
+            return false;
+        }
+    }
+    for (k, needle) in &query.attributes_contains {
+        match log.attributes.get(k) {
+            Some(value) if value.contains(needle.as_str()) => {}
+            _ => return false,
+        }
+    }
+    for (k, pattern) in &query.attributes_regex {
+        // An unparseable pattern matches nothing rather than everything; the
+        // API layer already rejected it with a message.
+        let Ok(re) = regex::Regex::new(pattern) else {
+            return false;
+        };
+        match log.attributes.get(k) {
+            Some(value) if re.is_match(value) => {}
+            _ => return false,
+        }
+    }
     true
 }
 

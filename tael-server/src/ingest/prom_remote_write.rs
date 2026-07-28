@@ -54,6 +54,14 @@ pub struct Sample {
 // ── Handler ─────────────────────────────────────────────────────────
 
 pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoResponse {
+    let Some(_permit) = super::backpressure::try_acquire() else {
+        super::stats::record_shed(super::stats::Pipeline::RemoteWrite);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "ingest at capacity; retry with backoff",
+        )
+            .into_response();
+    };
     match decode_and_insert(store.as_ref(), &body) {
         Ok(count) => {
             tracing::debug!(metric_points = count, "ingested prom remote-write");
@@ -119,8 +127,13 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
         }
     }
 
+    super::cardinality::admit(&mut points);
     let count = points.len();
-    store.insert_metrics(&points)?;
+    if let Err(e) = store.insert_metrics(&points) {
+        super::stats::record_error(super::stats::Pipeline::RemoteWrite);
+        return Err(e);
+    }
+    super::stats::record_accepted(super::stats::Pipeline::RemoteWrite, count);
     Ok(count)
 }
 

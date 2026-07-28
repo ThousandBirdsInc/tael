@@ -60,6 +60,12 @@ impl LogsService for OtlpLogsService {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
+        let Some(_permit) = super::backpressure::try_acquire() else {
+            super::stats::record_shed(super::stats::Pipeline::OtlpLogs);
+            return Err(Status::resource_exhausted(
+                "ingest at capacity; retry with backoff",
+            ));
+        };
         let req = request.into_inner();
         let mut logs = Vec::new();
         // Bodies moved to the blob store, kept here so the search index still
@@ -202,8 +208,10 @@ impl LogsService for OtlpLogsService {
         let log_count = logs.len();
         if let Err(e) = self.store.insert_logs(&logs) {
             tracing::error!(error = %e, "failed to insert logs");
+            super::stats::record_error(super::stats::Pipeline::OtlpLogs);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpLogs, log_count);
 
         if let Err(e) = self.bus.publish(&logs) {
             tracing::warn!(error = %e, "failed to publish logs to bus");

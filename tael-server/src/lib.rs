@@ -22,6 +22,8 @@ mod cluster;
 mod config;
 mod ingest;
 mod log_bus;
+#[cfg(feature = "duckdb")]
+pub mod migrate;
 mod promql;
 pub mod retention;
 pub mod scoring;
@@ -99,6 +101,33 @@ impl ServerRunOptions {
     }
 }
 
+/// Whether this node may garbage-collect the (possibly shared) blob store.
+///
+/// On a shared store, per-node mark-and-sweep would delete blobs other shards
+/// still reference, so exactly one owner must run it. In a coordinated cluster
+/// the elected leader is that owner — checked live each pass, so GC ownership
+/// follows failover instead of dying with a statically designated node.
+/// Without a cluster the operator designates the owner statically.
+#[derive(Clone)]
+enum BlobGcOwnership {
+    /// Node-local blob store: every node owns its own blobs and GCs freely.
+    Always,
+    /// Shared store, no cluster, not the designated coordinator.
+    Never,
+    /// Shared store in a coordinated cluster: GC only while leader.
+    Leader(Arc<cluster::ClusterCoordinator>),
+}
+
+impl BlobGcOwnership {
+    fn may_gc(&self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Leader(c) => c.is_leader(),
+        }
+    }
+}
+
 /// Periodically roll aged signals into the cold tier and drop expired
 /// partitions, following the resolved [`RetentionPolicy`]. Runs the (blocking)
 /// compaction off the async executor. A 0-hour hot-tier window compacts
@@ -106,7 +135,8 @@ impl ServerRunOptions {
 fn spawn_span_compactor(
     backend: Arc<TaelBackend>,
     blobs: Arc<BlobStore>,
-    blob_gc_enabled: bool,
+    gc_ownership: BlobGcOwnership,
+    gc_peers: Arc<Vec<RemoteStore>>,
     policy: retention::RetentionPolicy,
 ) {
     tokio::spawn(async move {
@@ -116,11 +146,16 @@ fn spawn_span_compactor(
             tick.tick().await;
             let backend = Arc::clone(&backend);
             let blobs = Arc::clone(&blobs);
+            let gc_peers = Arc::clone(&gc_peers);
             let policy = policy.clone();
+            // Sampled per pass, so a node that loses leadership stops GCing on
+            // its next tick and the new leader picks it up.
+            let blob_gc_enabled = gc_ownership.may_gc();
             let result = tokio::task::spawn_blocking(move || {
                 // One clock for the whole pass, so signals don't drift apart
                 // across a long compaction.
                 let cutoffs = policy.cutoffs(chrono::Utc::now());
+                let started = std::time::Instant::now();
                 let mut compacted = backend.compact_spans(cutoffs.hot_tier)?;
                 compacted += backend.compact_logs_metrics(cutoffs.hot_tier)?;
                 let dropped = backend.enforce_retention(&cutoffs)?;
@@ -130,11 +165,43 @@ fn spawn_span_compactor(
                 // single-owner guard), to avoid deleting blobs other shards
                 // reference.
                 let blobs_gcd = if blob_gc_enabled {
-                    let live = backend.collect_live_blob_hashes()?;
-                    blobs.gc(&live)?
+                    let mut live = backend.collect_live_blob_hashes()?;
+                    // On a shared store the GC owner's own live set is not
+                    // enough: union every peer writer's, and if any peer can't
+                    // answer, skip GC entirely this pass — an incomplete live
+                    // set deletes blobs someone still references, while a
+                    // skipped pass only defers reclamation.
+                    let mut peers_ok = true;
+                    for peer in gc_peers.iter() {
+                        match peer.live_blob_hashes() {
+                            Ok(peer_live) => live.extend(peer_live),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "blob GC skipped: peer live-set unavailable"
+                                );
+                                peers_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if peers_ok { blobs.gc(&live)? } else { 0 }
                 } else {
                     0
                 };
+                let elapsed_ms = started.elapsed().as_millis() as f64;
+                // The engine reports on itself through its own metric pipeline,
+                // so compaction health is queryable and alertable like any
+                // other series instead of living only in log lines.
+                let points = engine_metric_points(&[
+                    ("tael.engine.compacted_rows", compacted as f64),
+                    ("tael.engine.partitions_dropped", dropped as f64),
+                    ("tael.engine.blobs_gcd", blobs_gcd as f64),
+                    ("tael.engine.maintenance_ms", elapsed_ms),
+                ]);
+                if let Err(e) = backend.insert_metrics(&points) {
+                    tracing::warn!(error = %e, "failed to record engine metrics");
+                }
                 anyhow::Ok((compacted, dropped, blobs_gcd))
             })
             .await;
@@ -151,6 +218,25 @@ fn spawn_span_compactor(
             }
         }
     });
+}
+
+/// Gauge points for the engine's own health, emitted under the `tael` service
+/// each maintenance pass.
+fn engine_metric_points(values: &[(&str, f64)]) -> Vec<storage::models::MetricPoint> {
+    let now = chrono::Utc::now();
+    values
+        .iter()
+        .map(|(name, value)| storage::models::MetricPoint {
+            timestamp: now,
+            service: "tael".to_string(),
+            name: (*name).to_string(),
+            metric_type: storage::models::MetricType::Gauge,
+            value: *value,
+            unit: String::new(),
+            attributes: std::collections::HashMap::new(),
+            histogram: None,
+        })
+        .collect()
 }
 
 /// Evaluate alert rules on a schedule and deliver the resulting transitions.
@@ -530,22 +616,49 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                     comments,
                 )?);
                 search = Some(backend.search_index());
-                // Blob GC single-owner guard: on a shared (GCS) blob store,
-                // per-node mark-and-sweep would delete blobs other shards still
-                // reference, so it only runs on the designated coordinator. On a
-                // node-local store every node owns its own blobs and GCs freely.
-                let blob_gc_enabled =
-                    !config.object_store.blobs_shared() || config.object_store.blob_gc_coordinator;
-                if !blob_gc_enabled {
+                // Blob GC single-owner guard: on a shared (object-store) blob
+                // store, per-node mark-and-sweep would delete blobs other
+                // shards still reference. In a coordinated cluster the elected
+                // leader owns GC (re-checked every pass, so ownership follows
+                // failover); without a cluster, the operator designates one
+                // owner statically. Node-local stores GC freely.
+                let gc_ownership = if !config.object_store.blobs_shared() {
+                    BlobGcOwnership::Always
+                } else if let Some(c) = &coordinator {
+                    tracing::info!(
+                        "blob GC leader-gated: shared blob store in a coordinated cluster, \
+                         GC runs only while this node holds leadership"
+                    );
+                    BlobGcOwnership::Leader(Arc::clone(c))
+                } else if config.object_store.blob_gc_coordinator {
+                    BlobGcOwnership::Always
+                } else {
                     tracing::info!(
                         "blob GC disabled on this node: shared blob store, not the GC coordinator \
                          (set TAEL_BLOB_GC_ROLE=coordinator on exactly one node)"
+                    );
+                    BlobGcOwnership::Never
+                };
+                // Other writers sharing the blob store, whose live sets must
+                // be unioned before a sweep. Comma-separated base URLs.
+                let gc_peers: Vec<RemoteStore> = std::env::var("TAEL_BLOB_GC_PEERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(RemoteStore::new)
+                    .collect::<Result<_>>()?;
+                if !gc_peers.is_empty() {
+                    tracing::info!(
+                        peers = gc_peers.len(),
+                        "blob GC will union live blob sets across peers before sweeping"
                     );
                 }
                 spawn_span_compactor(
                     Arc::clone(&backend),
                     Arc::clone(&blobs),
-                    blob_gc_enabled,
+                    gc_ownership,
+                    Arc::new(gc_peers),
                     retention_policy.clone(),
                 );
                 backend as Arc<dyn Store>

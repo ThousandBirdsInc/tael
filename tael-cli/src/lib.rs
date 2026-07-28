@@ -281,6 +281,11 @@ pub enum Commands {
         #[arg(long, default_value = "5")]
         k: usize,
     },
+    /// Health of the server's ingestion pipelines
+    Ingest {
+        #[command(subcommand)]
+        action: IngestAction,
+    },
     /// Service dependency graph derived from span parent/child edges
     Topology {
         /// Time window (e.g. 1h, 24h)
@@ -321,8 +326,9 @@ pub enum Commands {
         interval: u64,
         /// Stop and exit 6 when this condition becomes true. Repeatable (any
         /// match stops). Format: <field><op><value>, where value is a number
-        /// or a multiple of the first sample.
-        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, span_count<1
+        /// or a multiple of the first sample, or alert:<name> to stop when the
+        /// named server alert rule fires.
+        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, alert:high-error-rate
         #[arg(long = "exit-on")]
         exit_on: Vec<String>,
         /// Give up after this many ticks and exit 0. Without it, `watch` polls
@@ -513,10 +519,21 @@ pub enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+pub enum IngestAction {
+    /// Per-pipeline accept counters: batches, records, errors, last accepted
+    Status,
+}
+
+#[derive(Subcommand)]
 pub enum McpAction {
     /// Serve MCP over stdio. Configure this as an MCP server in your agent:
     /// {"command": "tael", "args": ["mcp", "serve"]}
-    Serve,
+    Serve {
+        /// Serve the streamable-HTTP transport on this address instead of
+        /// stdio, e.g. 127.0.0.1:7702. Clients connect to http://<addr>/mcp.
+        #[arg(long)]
+        http: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -632,6 +649,11 @@ pub enum QuerySignal {
         /// Filter by trace ID
         #[arg(long)]
         trace_id: Option<String>,
+        /// Filter by log attribute, repeatable and ANDed. Three operators:
+        /// = exact, ~= contains, =~ anchored-less regex.
+        /// e.g. --attribute retry_count=3 --attribute 'host~=prod'
+        #[arg(long = "attribute")]
+        attribute: Vec<String>,
         /// Time window (e.g. 1h, 30m, 7d)
         #[arg(long)]
         last: Option<String>,
@@ -801,6 +823,18 @@ pub enum EvalCaseAction {
         #[arg(long)]
         trace_id: Option<String>,
     },
+    /// Drop cases from a server-managed suite that no run exercised recently
+    Prune {
+        /// Suite name
+        #[arg(long)]
+        suite: String,
+        /// Staleness window: prune cases unseen in runs within it (e.g. 90d)
+        #[arg(long, default_value = "90d")]
+        stale: String,
+        /// Report what would be pruned without changing the suite
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -919,6 +953,23 @@ pub enum SignalAction {
         /// Maximum comments to scan
         #[arg(long, default_value = "50000")]
         limit: u32,
+        /// Time window to count within (e.g. 7d, 24h). Default: all history.
+        #[arg(long)]
+        last: Option<String>,
+    },
+    /// Compare a signal's rate across span-attribute groups
+    Compare {
+        /// Signal name, failure mode, or self-diagnostic category
+        name: String,
+        /// Span attribute to group traces by, e.g. experiment.variant
+        #[arg(long)]
+        by: String,
+        /// Time window (e.g. 1h, 24h, 7d)
+        #[arg(long)]
+        last: Option<String>,
+        /// Maximum comments to scan
+        #[arg(long, default_value = "50000")]
+        limit: u32,
     },
 }
 
@@ -926,11 +977,18 @@ pub enum SignalAction {
 pub enum ExperimentAction {
     /// Compare variants using trace attributes tael.experiment.*
     Compare {
-        /// Experiment identifier
-        experiment_id: String,
+        /// Experiment identifier. Optional when --group-by is set.
+        experiment_id: Option<String>,
+        /// Group by any span attribute instead of the experiment variant,
+        /// e.g. --group-by git.commit (tael.-prefixed forms also match)
+        #[arg(long)]
+        group_by: Option<String>,
         /// Optional signal/failure mode/category to count by variant
         #[arg(long)]
         signal: Option<String>,
+        /// Numeric span attribute (or tael.metric.<name>) to average by variant
+        #[arg(long)]
+        metric: Option<String>,
         /// Time window (e.g. 1h, 24h, 7d)
         #[arg(long)]
         last: Option<String>,
@@ -1026,6 +1084,19 @@ pub enum DiagnoseAction {
 pub enum ServerAction {
     /// Show server status
     Status,
+    /// Copy a legacy DuckDB datastore into the tael-backend engine
+    /// (requires a build with --features duckdb)
+    Migrate {
+        /// Data directory holding the DuckDB datastore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Write the tael-backend tiers here instead of the same directory
+        #[arg(long)]
+        target_dir: Option<String>,
+        /// Count what would be migrated without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1139,6 +1210,23 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 force,
             ),
         };
+    }
+
+    // Migration works on the data directory directly; the server must in fact
+    // NOT be running against either engine while it copies.
+    if let Commands::Server {
+        action:
+            ServerAction::Migrate {
+                data_dir,
+                target_dir,
+                dry_run,
+            },
+    } = command
+    {
+        let source =
+            data_dir.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir.clone());
+        let target = target_dir.unwrap_or_else(|| source.clone());
+        return commands::server::migrate(&opts.format, &source, &target, dry_run);
     }
 
     // Key management works on the keystore file directly, so it must not need
@@ -1258,6 +1346,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 severity,
                 body_contains,
                 trace_id,
+                attribute,
                 last,
                 limit,
             } => {
@@ -1268,6 +1357,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     severity,
                     body_contains,
                     trace_id,
+                    attribute,
                     last,
                     limit,
                 )
@@ -1342,6 +1432,11 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Cluster { k } => {
             commands::similar::cluster(&client, &opts.format, k).await?;
         }
+        Commands::Ingest { action } => match action {
+            IngestAction::Status => {
+                commands::ingest::status(&client, &opts.format).await?;
+            }
+        },
         Commands::Topology { last, limit } => {
             commands::topology::run(&client, &opts.format, last, limit).await?;
         }
@@ -1450,6 +1545,13 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                     commands::eval::case_link(&client, &opts.format, &case_id, &issue_id, trace_id)
                         .await?;
                 }
+                EvalCaseAction::Prune {
+                    suite,
+                    stale,
+                    dry_run,
+                } => {
+                    commands::suite::prune(&client, &opts.format, &suite, &stale, dry_run).await?;
+                }
             },
             EvalAction::Suite { action } => match action {
                 EvalSuiteAction::Inspect { suite, limit } => {
@@ -1524,18 +1626,36 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 )
                 .await?;
             }
-            SignalAction::Trend { name, limit } => {
-                commands::signal::trend(&client, &opts.format, &name, limit).await?;
+            SignalAction::Trend { name, limit, last } => {
+                commands::signal::trend(&client, &opts.format, &name, limit, last).await?;
+            }
+            SignalAction::Compare {
+                name,
+                by,
+                last,
+                limit,
+            } => {
+                commands::signal::compare(&client, &opts.format, &name, &by, last, limit).await?;
             }
         },
         Commands::Experiment { action } => match action {
             ExperimentAction::Compare {
                 experiment_id,
+                group_by,
                 signal,
+                metric,
                 last,
             } => {
-                commands::experiment::compare(&client, &opts.format, &experiment_id, signal, last)
-                    .await?;
+                commands::experiment::compare(
+                    &client,
+                    &opts.format,
+                    experiment_id.as_deref(),
+                    group_by.as_deref(),
+                    signal,
+                    metric,
+                    last,
+                )
+                .await?;
             }
         },
         Commands::Review { action } => match action {
@@ -1612,11 +1732,14 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             ServerAction::Status => {
                 commands::server::status(&client, &opts.format).await?;
             }
+            // Handled offline before the client is constructed.
+            ServerAction::Migrate { .. } => unreachable!("migrate dispatched earlier"),
         },
         Commands::Mcp { action } => match action {
-            McpAction::Serve => {
-                mcp::serve(client, &server_url).await?;
-            }
+            McpAction::Serve { http } => match http {
+                Some(addr) => mcp::serve_http(client, &server_url, &addr).await?,
+                None => mcp::serve(client, &server_url).await?,
+            },
         },
         Commands::Score { action } => match action {
             ScoreAction::Rule { action } => match action {

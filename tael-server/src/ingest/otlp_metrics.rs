@@ -45,6 +45,12 @@ impl MetricsService for OtlpMetricsService {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        let Some(_permit) = super::backpressure::try_acquire() else {
+            super::stats::record_shed(super::stats::Pipeline::OtlpMetrics);
+            return Err(Status::resource_exhausted(
+                "ingest at capacity; retry with backoff",
+            ));
+        };
         let req = request.into_inner();
         let mut points: Vec<MetricPoint> = Vec::new();
 
@@ -151,11 +157,14 @@ impl MetricsService for OtlpMetricsService {
             }
         }
 
+        super::cardinality::admit(&mut points);
         let count = points.len();
         if let Err(e) = self.store.insert_metrics(&points) {
             tracing::error!(error = %e, "failed to insert metrics");
+            super::stats::record_error(super::stats::Pipeline::OtlpMetrics);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpMetrics, count);
 
         tracing::debug!(metric_points = count, "ingested metrics");
 

@@ -155,7 +155,7 @@ tael summarize --last=1h              # agent-friendly summary of system health
 - **`tael summarize`**: returns a structured health summary an agent can use to decide what to investigate further. Includes: top errors, latency regressions, anomalous metrics, and recent deploys correlated with changes.
 - **`tael anomalies`**: surfaces statistically significant deviations without requiring the agent to define thresholds.
 - **`tael correlate`**: eliminates manual cross-signal pivoting — the agent says "this metric spiked, what's related?" and gets traces + logs back.
-- **`tael watch`**: polls the summary endpoint on an interval and prints signed deltas per tick (span count, error count, error rate, p95, log errors, metric volume). A future `--exit-on=<condition>` flag will let an agent subscribe to a query and exit once a threshold is crossed ("watch this deploy and tell me if error rate exceeds 1%").
+- **`tael watch`**: polls the summary endpoint on an interval and prints signed deltas per tick (span count, error count, error rate, p95, log errors, metric volume). The `--exit-on=<condition>` flag lets an agent subscribe to a query and exit once a threshold is crossed ("watch this deploy and tell me if error rate exceeds 1%").
 - **`tael diff`**: compare a time range against a baseline. Agents use this to answer "is this deploy worse than the last one?"
 
 ### 5. API Server
@@ -240,7 +240,7 @@ tael server start --storage=sqlite --data-dir=./data
 One process handles ingestion, storage, query, and API. Good for local dev, single-team use, or an agent monitoring its own infra.
 
 ### Distributed (v2)
-Separate ingestion, storage, and query services. ClickHouse cluster for storage. Horizontal scaling of ingestion and query nodes.
+Superseded: distribution is built on the tael-backend engine rather than ClickHouse — trace-id-sharded fan-out queries (`TAEL_QUERY_SHARDS`), WAL shipping to standbys, and gossip-based leader election. See [docs/tael-server-scaling-ha.md](docs/tael-server-scaling-ha.md) for the current architecture and remaining phases.
 
 ## MCP / Tool-Use Integration (Future)
 
@@ -281,8 +281,8 @@ This lets agents like Claude Code call observability tools without shelling out.
 - [x] `tael correlate` — cross-signal correlation by trace ID
 - [x] `tael watch` — polling summary deltas
 - [x] `tael eval` — trace-native eval collection, scoring, reporting, and live progress ([design](docs/tael-evals-design.md))
-- [ ] `tael diff` — baseline comparison
-- [ ] `tael topology` — service dependency graph
+- [x] `tael diff` — baseline comparison
+- [x] `tael topology` — service dependency graph
 
 ### M3.5: Floor-Raising Reliability Loop
 - [x] `tael issue` — classify production stumbles into recurring failure patterns, backed by structured trace comments
@@ -294,11 +294,11 @@ This lets agents like Claude Code call observability tools without shelling out.
 - [ ] Dedicated issue/signal tables and distributed query support if comment-backed conventions become limiting
 
 ### M4: Scale + Polish
-- [ ] ClickHouse storage backend
+- [x] ~~ClickHouse storage backend~~ — superseded: the purpose-built tael-backend engine (WAL + LSM hot tier + Parquet cold tier) replaced this plan; see [docs/tael-backend-design.md](docs/tael-backend-design.md) and [docs/tael-server-scaling-ha.md](docs/tael-server-scaling-ha.md)
 - [x] MCP server integration (`tael mcp serve`)
-- [ ] Retention policies and downsampling
-- [ ] Auth (API keys)
-- [ ] Packaging (Homebrew, Docker)
+- [x] Retention policies and downsampling (`tael-server/src/retention.rs`, 5m rollups in the cold tier)
+- [x] Auth (API keys) (`tael-server/src/auth.rs`, roles + authz middleware)
+- [x] Packaging (Homebrew, Docker) (`packaging/homebrew/`, `Dockerfile`, `install.sh`)
 
 ## Agent Auth Model
 
@@ -378,7 +378,7 @@ Total: **~50-90 GB** for a single-node DuckDB deployment. Well within local disk
 ## Open Questions
 
 1. ~~**Naming**: resolved — `tael` (**t**race **a**gent **e**vent **l**og). Short, unique, no conflicts.~~
-2. **Storage default**: DuckDB gives us columnar performance locally. Need to validate concurrent write throughput under high-ingest scenarios — DuckDB is single-writer, so we may need a write-ahead buffer or batching layer.
+2. ~~**Storage default**: resolved — the tael-backend engine (WAL + LSM hot tier + Parquet cold tier) is now the default storage backend; DuckDB is an opt-in Cargo feature. The single-writer throughput concern is addressed by the WAL/ingest-buffer design.~~
 3. ~~**Agent auth model**: resolved — see Auth section below.~~
 4. ~~**Retention**: resolved — see Retention section below.~~
 5. ~~**Natural language query layer**: resolved — leave it to the calling agent. Tael returns structured data; the agent is already an LLM that can formulate queries and interpret results. Embedding a query translator adds complexity and a model dependency we don't need.~~

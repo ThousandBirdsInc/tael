@@ -117,6 +117,15 @@ pub async fn handle_traces(
         return sampling_response();
     }
 
+    let Some(_permit) = super::backpressure::try_acquire() else {
+        super::stats::record_shed(super::stats::Pipeline::Datadog);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "ingest at capacity; retry with backoff",
+        )
+            .into_response();
+    };
+
     let chunks = match decode_traces(version, &headers, &body) {
         Ok(chunks) => chunks,
         Err(e) => {
@@ -146,12 +155,14 @@ pub async fn handle_traces(
     let span_count = spans.len();
     if let Err(e) = store.insert_spans(&spans) {
         tracing::error!(error = %e, "failed to insert datadog spans");
+        super::stats::record_error(super::stats::Pipeline::Datadog);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("storage error: {e}"),
         )
             .into_response();
     }
+    super::stats::record_accepted(super::stats::Pipeline::Datadog, span_count);
     if let Err(e) = bus.publish(&spans) {
         tracing::warn!(error = %e, "failed to publish spans to bus");
     }

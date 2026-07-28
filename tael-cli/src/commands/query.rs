@@ -101,15 +101,18 @@ pub async fn logs(
     severity: Option<String>,
     body_contains: Option<String>,
     trace_id: Option<String>,
+    attribute: Vec<String>,
     last: Option<String>,
     limit: u32,
 ) -> Result<()> {
+    let attributes = parse_attribute_args(&attribute)?;
     let result = client
         .query_logs(
             service.as_deref(),
             severity.as_deref(),
             body_contains.as_deref(),
             trace_id.as_deref(),
+            &attributes,
             last.as_deref(),
             limit,
         )

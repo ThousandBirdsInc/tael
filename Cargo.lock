@@ -6845,6 +6845,7 @@ name = "tael-cli"
 version = "0.5.14"
 dependencies = [
  "anyhow",
+ "axum 0.8.8",
  "chrono",
  "clap",
  "comfy-table",

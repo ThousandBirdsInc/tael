@@ -75,6 +75,12 @@ impl TraceService for OtlpTraceService {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
+        let Some(_permit) = super::backpressure::try_acquire() else {
+            super::stats::record_shed(super::stats::Pipeline::OtlpSpans);
+            return Err(Status::resource_exhausted(
+                "ingest at capacity; retry with backoff",
+            ));
+        };
         let req = request.into_inner();
         let mut spans = Vec::new();
         let mut indexed_any = false;
@@ -242,8 +248,10 @@ impl TraceService for OtlpTraceService {
         let span_count = spans.len();
         if let Err(e) = self.store.insert_spans(&spans) {
             tracing::error!(error = %e, "failed to insert spans");
+            super::stats::record_error(super::stats::Pipeline::OtlpSpans);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpSpans, span_count);
 
         // Make any newly indexed payload text searchable.
         if indexed_any

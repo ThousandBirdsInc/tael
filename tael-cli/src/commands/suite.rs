@@ -193,6 +193,127 @@ pub async fn list(client: &TaelClient, format: &OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Drop cases no eval run has exercised within the stale window.
+///
+/// A suite accretes cases; nothing removes the ones that stopped mattering.
+/// A case counts as exercised when any run of this suite inside the window
+/// observed its `case_id`. Refuses to run when the window contains no runs at
+/// all — a suite that simply hasn't been run lately is not a suite of stale
+/// cases.
+pub async fn prune(
+    client: &TaelClient,
+    format: &OutputFormat,
+    suite: &str,
+    stale: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let stale_secs = crate::commands::alert::parse_duration_secs(stale)
+        .map_err(|e| CategorizedError::new(ExitCategory::BadQuery, e.to_string()))?;
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_secs);
+
+    let current = client.get_suite(suite, None).await?;
+    if let Some(error) = current["error"].as_str() {
+        return Err(CategorizedError::new(ExitCategory::NoResults, error).into());
+    }
+    let cases = current["cases"].as_array().cloned().unwrap_or_default();
+
+    let runs = client.eval_runs().await?;
+    let recent_runs: Vec<String> = runs["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["suite_id"].as_str() == Some(suite))
+        .filter(|r| {
+            // A run with no parsable timestamp is kept: better to treat its
+            // cases as exercised than to prune on missing data.
+            r["updated_at"]
+                .as_str()
+                .or_else(|| r["started_at"].as_str())
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_none_or(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+        })
+        .filter_map(|r| r["run_id"].as_str().map(str::to_string))
+        .collect();
+
+    if recent_runs.is_empty() {
+        return Err(CategorizedError::new(
+            ExitCategory::BadQuery,
+            format!(
+                "suite `{suite}` has no eval runs within {stale}; refusing to prune \
+                 every case — run the suite first, or widen --stale"
+            ),
+        )
+        .into());
+    }
+
+    let mut exercised: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for run_id in &recent_runs {
+        let run_cases = client.eval_cases(run_id).await?;
+        for case in run_cases["cases"].as_array().into_iter().flatten() {
+            if let Some(id) = case["case_id"].as_str() {
+                exercised.insert(id.to_string());
+            }
+        }
+    }
+
+    let (kept, stale_cases): (Vec<&Value>, Vec<&Value>) = cases.iter().partition(|c| {
+        c["case_id"]
+            .as_str()
+            .is_some_and(|id| exercised.contains(id))
+    });
+    let stale_ids: Vec<&str> = stale_cases
+        .iter()
+        .filter_map(|c| c["case_id"].as_str())
+        .collect();
+
+    if !dry_run && !stale_cases.is_empty() {
+        let refs: Vec<Value> = kept
+            .iter()
+            .map(|c| json!({ "case_id": c["case_id"], "content_sha256": c["content_sha256"] }))
+            .collect();
+        let result = client.push_suite(suite, &json!({ "cases": refs })).await?;
+        if let Some(error) = result["error"].as_str() {
+            return Err(CategorizedError::new(ExitCategory::BadQuery, error).into());
+        }
+    }
+
+    let result = json!({
+        "suite": suite,
+        "stale_window": stale,
+        "runs_examined": recent_runs.len(),
+        "kept": kept.len(),
+        "pruned": stale_ids,
+        "pruned_count": stale_ids.len(),
+        "dry_run": dry_run,
+    });
+    match format {
+        OutputFormat::Json => print_json(&result),
+        OutputFormat::Table => {
+            if stale_ids.is_empty() {
+                println!(
+                    "Nothing to prune: all {} case(s) were exercised by {} run(s) within {stale}.",
+                    kept.len(),
+                    recent_runs.len()
+                );
+            } else {
+                let verb = if dry_run { "Would prune" } else { "Pruned" };
+                println!(
+                    "{verb} {} of {} case(s) not exercised within {stale}:",
+                    stale_ids.len(),
+                    cases.len()
+                );
+                for id in &stale_ids {
+                    println!("  - {id}");
+                }
+                if dry_run {
+                    println!("Re-run without --dry-run to apply.");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Compare two suite references. An edited case is reported as changed rather
 /// than as an add plus a remove — it is still the same case.
 pub async fn diff(client: &TaelClient, format: &OutputFormat, from: &str, to: &str) -> Result<()> {

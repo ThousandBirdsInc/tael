@@ -420,6 +420,13 @@ impl DuckDbStore {
                 " AND timestamp >= current_timestamp::TIMESTAMP - INTERVAL '{secs} seconds'"
             ));
         }
+        // Exact attribute matchers only, mirroring the span path; the
+        // substring/regex matchers are a tael-backend feature.
+        for (k, v) in &query.attributes {
+            sql.push_str(" AND json_extract_string(attributes, ?) = ?");
+            param_values.push(Box::new(json_path_for_key(k)));
+            param_values.push(Box::new(v.clone()));
+        }
 
         sql.push_str(" ORDER BY timestamp DESC");
 

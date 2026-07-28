@@ -131,11 +131,13 @@ pub fn router(
         .route("/api/v1/evals/runner-spans", post(eval_add_runner_span))
         .route("/api/v1/blobs", post(put_blob))
         .route("/api/v1/blobs/{sha256}", get(get_blob))
+        .route("/api/v1/ingest/status", get(ingest_status))
         .route("/api/v1/write", post(prom_remote_write))
         // Datadog trace-agent (dd-trace) intake, also usable through this
         // listener via DD_TRACE_AGENT_URL. See `ingest::datadog`.
         .merge(dd_routes())
         .route("/internal/wal/records", post(apply_wal_record))
+        .route("/internal/blobs/live", get(live_blob_hashes))
         .route("/internal/cluster", get(cluster_status))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -543,7 +545,19 @@ struct LogQueryParams {
 async fn query_logs(
     State(state): State<AppState>,
     Query(params): Query<LogQueryParams>,
+    RawQuery(raw): RawQuery,
 ) -> impl IntoResponse {
+    let attribute_filters = match parse_attribute_params(raw.as_deref()) {
+        Ok(f) => f,
+        // A malformed regex is the caller's mistake and must say so; silently
+        // matching nothing would look like "no such logs".
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
     let query = LogQuery {
         service: params.service,
         severity: params.severity,
@@ -551,6 +565,9 @@ async fn query_logs(
         trace_id: params.trace_id,
         last_seconds: params.last.as_deref().and_then(parse_duration_to_seconds),
         limit: params.limit,
+        attributes: attribute_filters.exact,
+        attributes_contains: attribute_filters.contains,
+        attributes_regex: attribute_filters.regex,
         tenant: None,
     };
 
@@ -946,6 +963,9 @@ struct AddEvalRunnerSpanBody {
     case_index: Option<usize>,
     case_count: Option<usize>,
     code_version: Option<String>,
+    /// Conventional provenance attributes (`tael.git.commit` / `tael.git.branch`).
+    git_commit: Option<String>,
+    git_branch: Option<String>,
     status: Option<String>,
     start_time: Option<String>,
     end_time: Option<String>,
@@ -1194,6 +1214,12 @@ async fn eval_add_runner_span(
     }
     if let Some(version) = payload.code_version.as_deref().filter(|s| !s.is_empty()) {
         attrs.insert("tael.eval.code_version".to_string(), version.to_string());
+    }
+    if let Some(commit) = payload.git_commit.as_deref().filter(|s| !s.is_empty()) {
+        attrs.insert("tael.git.commit".to_string(), commit.to_string());
+    }
+    if let Some(branch) = payload.git_branch.as_deref().filter(|s| !s.is_empty()) {
+        attrs.insert("tael.git.branch".to_string(), branch.to_string());
     }
 
     let span = Span {
@@ -1580,6 +1606,27 @@ async fn dd_traces_v05(
 /// itself is derivable from the traces we already store.
 async fn dd_discard() -> impl IntoResponse {
     StatusCode::OK
+}
+
+/// Every blob hash a live row on this node references. The blob-GC owner on a
+/// shared blob store unions this across all writers before sweeping, so one
+/// node's mark-and-sweep can't delete blobs another shard still references
+/// (`docs/tael-server-scaling-ha.md` §5.2). Internal endpoint — firewall it
+/// alongside `/internal/wal/records`.
+async fn live_blob_hashes(State(state): State<AppState>) -> impl IntoResponse {
+    match state.store.collect_live_blob_hashes() {
+        Ok(hashes) => {
+            let hashes: Vec<String> = hashes.into_iter().collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "count": hashes.len(), "hashes": hashes })),
+            )
+        }
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }
 
 /// WAL replication ingress: a standby receives one framed WAL record
@@ -2048,6 +2095,29 @@ async fn alert_events(
 
 /// Live alert feed. This is the long-poll primitive a babysitting agent blocks
 /// on: connect once and be woken when something changes, instead of polling.
+/// Per-pipeline ingest counters for this node: what arrived, what persisted,
+/// what failed, and when each pipeline last accepted a batch.
+async fn ingest_status() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "pipelines": crate::ingest::stats::snapshot(),
+            "backpressure": {
+                "in_flight": crate::ingest::backpressure::in_flight(),
+                // 0 = unbounded (TAEL_INGEST_MAX_IN_FLIGHT=0)
+                "max_in_flight": crate::ingest::backpressure::max_in_flight(),
+            },
+            "metric_series": {
+                "tracked": crate::ingest::cardinality::tracked_series(),
+                // 0 = unbounded (TAEL_METRIC_SERIES_LIMIT=0)
+                "limit": crate::ingest::cardinality::series_limit(),
+                "dropped_points": crate::ingest::cardinality::dropped_points(),
+            },
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+        })),
+    )
+}
+
 async fn live_alerts(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {

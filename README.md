@@ -79,12 +79,13 @@ release, so there is no source build:
 
 ```bash
 docker run --rm \
-  -p 7701:7701 -p 4317:4317 -p 8126:8126 \
+  -p 7701:7701 -p 4317:4317 -p 4318:4318 -p 8126:8126 \
   -v tael-data:/data \
   ghcr.io/thousandbirdsinc/tael:latest
 ```
 
-That starts `tael serve` with OTLP gRPC on `:4317`, the REST API on `:7701`,
+That starts `tael serve` with OTLP gRPC on `:4317`, OTLP/HTTP on `:4318`,
+the REST API on `:7701`,
 and the Datadog trace-agent intake on `:8126`,
 persisting telemetry to the `tael-data` volume. Point your app's OTLP exporter
 at `http://localhost:4317` and query from the host with a locally installed
@@ -134,7 +135,7 @@ Running `tael gui` from a headless build prints a reminder to reinstall with
 ## Quickstart
 
 ```bash
-# Start the server (OTLP on :4317, REST API on :7701, dd-trace agent on :8126)
+# Start the server (OTLP gRPC on :4317, OTLP/HTTP on :4318, REST API on :7701, dd-trace agent on :8126)
 tael serve
 
 # In another terminal — send sample traces
@@ -156,7 +157,7 @@ tael gui
 ## Features
 
 ### OTLP Ingestion
-Accepts traces, logs, and metrics from any OpenTelemetry-instrumented application via standard OTLP gRPC (port 4317), plus Prometheus remote-write over HTTP (`POST /api/v1/write`). No proprietary SDKs or agents required. LLM spans (`gen_ai.*` semantic conventions) get typed model/token/cost fields, with prompt/completion payloads stored as deduplicated blobs.
+Accepts traces, logs, and metrics from any OpenTelemetry-instrumented application via standard OTLP gRPC (port 4317) or OTLP/HTTP (port 4318, protobuf and JSON, gzip supported), plus Prometheus remote-write over HTTP (`POST /api/v1/write`). No proprietary SDKs or agents required. LLM spans (`gen_ai.*` semantic conventions) get typed model/token/cost fields, with prompt/completion payloads stored as deduplicated blobs.
 
 ### Datadog (dd-trace) Ingestion
 tael also speaks the Datadog trace-agent protocol (`/v0.3`, `/v0.4`, and
@@ -447,6 +448,7 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--otlp-grpc-addr` | OTLP gRPC listen address | `127.0.0.1:4317` |
+| `--otlp-http-addr` | OTLP/HTTP listen address; `off` disables the dedicated listener | `127.0.0.1:4318` |
 | `--rest-api-addr` | REST API listen address | `127.0.0.1:7701` |
 | `--dd-agent-addr` | Datadog trace-agent listen address; `off` disables the dedicated listener | `127.0.0.1:8126` |
 | `--data-dir` | Telemetry data directory | `~/.tael/data` |
@@ -489,9 +491,11 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | `--last` | Time window or PromQL selector lookback | `--last 5m` |
 | `--limit` | Max results in filter mode (default 500) | `--limit 1000` |
 
-PromQL support is intentionally small: bare selectors, `{label="value"}`,
-`rate(metric[5m])`, and `sum|avg|min|max|count` with optional `by (...)`.
-Binary operators, regex matchers, `histogram_quantile`, subqueries, offset, and
+PromQL support is intentionally small: bare selectors, `{label="value"}`
+with exact (`=`, `!=`) and anchored regex (`=~`, `!~`) matchers,
+`rate(metric[5m])`, `sum|avg|min|max|count` with optional `by (...)`,
+`histogram_quantile(phi, selector)`, and a top-level scalar comparison
+(`<expr> > 0.05`). Binary operators between series, subqueries, offset, and
 range queries are not supported.
 
 ### `tael query sql`
@@ -591,7 +595,7 @@ ingest/storage/API side; the other subcommands are the client.
 │         Data Sources         │
 │  (OTel-instrumented apps)    │
 └──────────┬───────────────────┘
-           │ OTLP gRPC :4317 · Prometheus remote-write (HTTP) · Datadog trace-agent (HTTP)
+           │ OTLP gRPC :4317 · OTLP/HTTP :4318 · Prometheus remote-write (HTTP) · Datadog trace-agent (HTTP)
            ▼
 ┌──────────────────────────────────────────────┐
 │   tael serve                                   │
@@ -754,7 +758,7 @@ startup banner and default tracing subscriber setup.
 |-----------|--------|-----|
 | Language | Rust | Fast, single binary, memory-safe |
 | Storage | tael-backend | Tiered engine: WAL (walrus) + LSM hot tier (fjall) + Parquet cold tier (arrow/parquet) + content-addressed blobs + Tantivy search |
-| Storage (fallback) | DuckDB | Optional embedded columnar DB, `--features duckdb` + `--storage duckdb` |
+| Storage (fallback) | DuckDB | Optional embedded columnar DB, `--features duckdb` + `--storage duckdb`. Migrate existing DuckDB data onto the default engine with `tael server migrate` (offline, `--dry-run` to preview) |
 | CLI | clap | Standard Rust CLI framework |
 | GUI | Tauri | Desktop app embedded in the installed `tael` binary |
 | API | axum | Async REST on tokio |
@@ -770,6 +774,10 @@ The server (`tael serve`) is configured via flags or environment variables
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TAEL_OTLP_GRPC_ADDR` | `127.0.0.1:4317` | OTLP gRPC listen address |
+| `TAEL_OTLP_HTTP_ADDR` | `127.0.0.1:4318` | OTLP/HTTP listen address (`off` to disable) |
+| `TAEL_INGEST_MAX_IN_FLIGHT` | `512` | Max concurrent in-flight ingest batches before new batches are shed with a retryable status (`0` = unbounded) |
+| `TAEL_METRIC_SERIES_LIMIT` | `100000` | Max distinct metric series this process accepts; points minting series beyond the cap are dropped and counted (`0` = unbounded) |
+| `TAEL_BLOB_GC_PEERS` | — | Comma-separated base URLs of other writers sharing the blob store; the GC owner unions their live blob sets (via `/internal/blobs/live`) before sweeping, and skips the pass if any peer is unreachable |
 | `TAEL_REST_API_ADDR` | `127.0.0.1:7701` | REST API listen address |
 | `TAEL_DATA_DIR` | `~/.tael/data` | Telemetry data directory |
 | `TAEL_WAL_DIR` | `~/.tael/wal_files` | Write-ahead log directory |

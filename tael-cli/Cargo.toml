@@ -47,6 +47,7 @@ sql = ["tael-server/sql"]
 tael-server = { path = "../tael-server", version = "0.5.14" }
 tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.14", package = "tael-gui", optional = true }
 anyhow.workspace = true
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 comfy-table.workspace = true

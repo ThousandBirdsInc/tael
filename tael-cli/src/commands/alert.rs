@@ -189,7 +189,7 @@ fn parse_sink(spec: &str) -> Result<serde_json::Value> {
 }
 
 /// Parse `5m`, `30s`, `1h`, or a bare number of seconds.
-fn parse_duration_secs(raw: &str) -> Result<i64> {
+pub(crate) fn parse_duration_secs(raw: &str) -> Result<i64> {
     let s = raw.trim();
     let (value, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let value: i64 = value

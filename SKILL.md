@@ -25,7 +25,7 @@ Trigger this skill proactively on:
 
 1. Is a tael server reachable? `tael --format json server status`. If not, skip to code reading.
 2. What's unhealthy right now? `tael --format json summarize --last 1h` and `tael --format json anomalies --last 5m --baseline 30m` — use these to pick a service and a failure mode before drilling in.
-3. Is the affected service emitting data? `tael --format json services` — check that the service appears and has a non-zero `span_count`.
+3. Is the affected service emitting data? `tael --format json services` — check that the service appears and has a non-zero `span_count`. If nothing is emitting at all, `tael --format json ingest status` splits "no data arriving on any pipeline" (exporter misconfigured) from "batches arriving but erroring" (storage trouble) via per-pipeline batch/record/error counters.
 4. Are there error spans in the relevant window? `tael --format json query traces --service <name> --status error --last 15m`.
 5. For each suspicious trace, pull spans + logs + metrics in one shot: `tael --format json correlate --trace <trace_id>`.
 6. **Only then** start reading code, armed with a specific trace ID, the failing span's operation, and the error message from the logs.
@@ -201,10 +201,14 @@ tael alert create --name high-errors \
   --query 'tael:span_error_rate{service="api"} > 0.05' --for 5m \
   --sink exec='./page.sh'
 tael alerts --follow
+
+# Or block until a standing alert rule fires.
+tael watch --exit-on alert:high-errors
 ```
 
 Prefer `watch --exit-on` for a bounded wait inside one task, and an alert rule
-for a standing condition. Thresholds can be absolute (`error_rate>0.05`) or
+for a standing condition; `--exit-on alert:<name>` combines them, blocking
+until the named rule fires. Thresholds can be absolute (`error_rate>0.05`) or
 relative to the first sample (`p95_ms>2x`) — use the relative form when you're
 starting mid-incident and don't know what healthy looks like.
 
@@ -323,6 +327,14 @@ tael --format json eval suite inspect <suite_id>
 
 Read `missing_expected_behavior`, `provenance_free`, and `duplicate_failure_modes` first. A case without source-trace provenance or durable expected behavior is weak evidence.
 
+Drop cases no run has exercised recently (server-managed suites only):
+```bash
+tael --format json eval case prune --suite <suite_id> --stale 90d --dry-run
+```
+
+`prune` refuses to run when the window holds no runs of the suite at all — an
+idle suite is not a stale one. Re-run without `--dry-run` to apply.
+
 ### Define and trend long-running signals
 Use signals for patterns that should be watched across many traces:
 
@@ -334,10 +346,11 @@ tael --format json signal create \
   --summary "<what this signal means>" \
   --query "<optional human-readable classifier/query>"
 
-tael --format json signal trend <signal_name>
+tael --format json signal trend <signal_name> --last 7d
+tael --format json signal compare <signal_name> --by experiment.variant --last 24h
 ```
 
-`signal trend` counts matching signal definitions, failure reviews, and self diagnostics by day. It is useful for directionality, not precise incident metrics.
+`signal trend` counts matching signal definitions, failure reviews, and self diagnostics by day (`--last` bounds the window; default is all history). It is useful for directionality, not precise incident metrics. `signal compare` reports one signal's per-trace rate across groups keyed by any span attribute — `--by experiment.variant` also matches the `tael.`-prefixed attribute.
 
 ### Compare production experiment variants
 If spans carry `tael.experiment.id` and `tael.experiment.variant`, compare variants directly:
@@ -345,9 +358,11 @@ If spans carry `tael.experiment.id` and `tael.experiment.variant`, compare varia
 ```bash
 tael --format json experiment compare <experiment_id> --last 24h
 tael --format json experiment compare <experiment_id> --signal <failure_mode_or_signal> --last 24h
+tael --format json experiment compare <experiment_id> --metric task_completion --last 24h
+tael --format json experiment compare --group-by git.commit --last 24h
 ```
 
-This reports trace count, span count, error count/rate, average span duration, and optional signal count/rate per variant. Treat it as an operational comparison over observed traces, not a randomized-experiment statistics package.
+This reports trace count, span count, error count/rate, average span duration, and optional signal count/rate per variant. `--metric <name>` averages a numeric span attribute of that name (or `tael.metric.<name>`) per variant, for outcome scores stamped on spans. `--group-by <attr>` groups by any span attribute instead of the variant; without an experiment id it compares across all traces in the window — with the provenance conventions (`tael.git.commit`, `tael.git.branch`, `tael.prompt.name`, `tael.prompt.version` stamped on spans; `eval run` stamps and exports the git pair automatically) this directly answers "is the new commit worse?". Treat it as an operational comparison over observed traces, not a randomized-experiment statistics package.
 
 ### Record untrusted agent self diagnostics
 

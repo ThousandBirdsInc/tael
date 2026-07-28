@@ -79,6 +79,14 @@ impl RemoteStore {
         resp.json::<Value>()
             .with_context(|| format!("decoding {path} response from {}", self.base_url))
     }
+
+    /// The peer's live blob hashes (`GET /internal/blobs/live`). Used by the
+    /// blob-GC owner to union the live sets of every writer sharing a blob
+    /// store before sweeping it.
+    pub fn live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        let body = self.get_json("/internal/blobs/live", &[])?;
+        field(body, "hashes")
+    }
 }
 
 /// Pull a named field out of a JSON envelope and deserialize it. The REST API
@@ -128,6 +136,12 @@ impl Store for RemoteStore {
         }
         for (k, v) in &query.attributes {
             params.push(("attribute", format!("{k}={v}")));
+        }
+        for (k, v) in &query.attributes_contains {
+            params.push(("attribute", format!("{k}~={v}")));
+        }
+        for (k, v) in &query.attributes_regex {
+            params.push(("attribute", format!("{k}=~{v}")));
         }
         if let Some(ref t) = query.text {
             params.push(("text", t.clone()));
@@ -213,6 +227,15 @@ impl Store for RemoteStore {
         last_param(&mut params, query.last_seconds);
         if let Some(l) = query.limit {
             params.push(("limit", l.to_string()));
+        }
+        for (k, v) in &query.attributes {
+            params.push(("attribute", format!("{k}={v}")));
+        }
+        for (k, v) in &query.attributes_contains {
+            params.push(("attribute", format!("{k}~={v}")));
+        }
+        for (k, v) in &query.attributes_regex {
+            params.push(("attribute", format!("{k}=~{v}")));
         }
         let body = self.get_json("/api/v1/logs", &params)?;
         field(body, "logs")
