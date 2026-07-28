@@ -977,8 +977,12 @@ pub enum SignalAction {
 pub enum ExperimentAction {
     /// Compare variants using trace attributes tael.experiment.*
     Compare {
-        /// Experiment identifier
-        experiment_id: String,
+        /// Experiment identifier. Optional when --group-by is set.
+        experiment_id: Option<String>,
+        /// Group by any span attribute instead of the experiment variant,
+        /// e.g. --group-by git.commit (tael.-prefixed forms also match)
+        #[arg(long)]
+        group_by: Option<String>,
         /// Optional signal/failure mode/category to count by variant
         #[arg(long)]
         signal: Option<String>,
@@ -1080,6 +1084,19 @@ pub enum DiagnoseAction {
 pub enum ServerAction {
     /// Show server status
     Status,
+    /// Copy a legacy DuckDB datastore into the tael-backend engine
+    /// (requires a build with --features duckdb)
+    Migrate {
+        /// Data directory holding the DuckDB datastore (env: TAEL_DATA_DIR)
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Write the tael-backend tiers here instead of the same directory
+        #[arg(long)]
+        target_dir: Option<String>,
+        /// Count what would be migrated without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1193,6 +1210,23 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 force,
             ),
         };
+    }
+
+    // Migration works on the data directory directly; the server must in fact
+    // NOT be running against either engine while it copies.
+    if let Commands::Server {
+        action:
+            ServerAction::Migrate {
+                data_dir,
+                target_dir,
+                dry_run,
+            },
+    } = command
+    {
+        let source =
+            data_dir.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir.clone());
+        let target = target_dir.unwrap_or_else(|| source.clone());
+        return commands::server::migrate(&opts.format, &source, &target, dry_run);
     }
 
     // Key management works on the keystore file directly, so it must not need
@@ -1607,6 +1641,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Experiment { action } => match action {
             ExperimentAction::Compare {
                 experiment_id,
+                group_by,
                 signal,
                 metric,
                 last,
@@ -1614,7 +1649,8 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
                 commands::experiment::compare(
                     &client,
                     &opts.format,
-                    &experiment_id,
+                    experiment_id.as_deref(),
+                    group_by.as_deref(),
                     signal,
                     metric,
                     last,
@@ -1696,6 +1732,8 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
             ServerAction::Status => {
                 commands::server::status(&client, &opts.format).await?;
             }
+            // Handled offline before the client is constructed.
+            ServerAction::Migrate { .. } => unreachable!("migrate dispatched earlier"),
         },
         Commands::Mcp { action } => match action {
             McpAction::Serve { http } => match http {

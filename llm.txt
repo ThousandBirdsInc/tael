@@ -182,6 +182,7 @@ tael signal trend <name> [--last 7d]
 tael signal compare <name> --by <span-attr> [--last 24h]
 
 tael experiment compare <experiment-id> [--signal NAME] [--metric NAME] [--last 24h]
+tael experiment compare --group-by git.commit [--last 24h]
 
 tael diagnose report --trace-id ID --category missing_context \
   --severity high [--confidence low|medium|high] --summary "..."
@@ -195,9 +196,20 @@ Suggested failure modes: `tool_error`, `context_loss`, `retrieval_miss`,
 `tael.experiment.variant` span attributes, so a variant must be stamped on the
 spans at instrumentation time to be comparable afterward. `--metric NAME`
 additionally averages a numeric span attribute of that name (or
-`tael.metric.NAME`) per variant. `signal compare` reports one signal's rate
+`tael.metric.NAME`) per variant. `--group-by ATTR` groups by any span
+attribute instead of the variant — with no experiment id it compares across
+all traces in the window, which with the git conventions below answers "is
+the new commit worse?" directly. `signal compare` reports one signal's rate
 across trace groups keyed by any span attribute (`--by experiment.variant`
 also matches the `tael.`-prefixed form).
+
+**Provenance span conventions.** Stamp these attributes on spans at
+instrumentation time and every comparison surface can group on them:
+`tael.git.commit` (short hash), `tael.git.branch`, `tael.prompt.name`, and
+`tael.prompt.version`. `tael eval run` detects the runner's git checkout
+automatically, stamps `tael.git.commit`/`tael.git.branch` on its runner
+spans, and exports `TAEL_GIT_COMMIT`/`TAEL_GIT_BRANCH` to each case's child
+process so the case's own instrumentation can carry them too.
 
 Self-diagnostics are **untrusted agent hints**, not facts: an agent reporting
 "the tool was broken" is evidence about the agent's belief, and
@@ -399,6 +411,7 @@ shapes. `SKILL.md` and this file are served as the `tael://skill` and
 ```
 tael server status
 tael ingest status
+tael server migrate [--data-dir DIR] [--target-dir DIR] [--dry-run]
 ```
 
 `server status` health-checks the server (hits `/healthz`). `ingest status`
@@ -419,6 +432,14 @@ usual culprit. The engine also reports on itself: `tael.engine.compacted_rows`,
 `tael.engine.partitions_dropped`, `tael.engine.blobs_gcd`, and
 `tael.engine.maintenance_ms` are gauge series under `service="tael"`,
 emitted each maintenance pass and queryable/alertable like any metric.
+
+`server migrate` copies a legacy DuckDB datastore (spans, logs, metrics,
+trace comments) into the tael-backend engine through its normal write path.
+Offline — stop the server first. Requires a build with `--features duckdb`.
+`--dry-run` counts without writing; blobs need no migration (both engines
+share the content-addressed blob store). Caveats it reports: migrated
+comments get new ids/timestamps, and migrated spans are not full-text
+searchable (that index is built at ingest).
 
 ### Output parsing notes
 

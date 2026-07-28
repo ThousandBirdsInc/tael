@@ -22,6 +22,8 @@ mod cluster;
 mod config;
 mod ingest;
 mod log_bus;
+#[cfg(feature = "duckdb")]
+pub mod migrate;
 mod promql;
 pub mod retention;
 pub mod scoring;

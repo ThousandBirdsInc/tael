@@ -163,12 +163,8 @@ impl ColdTier {
         Ok(out)
     }
 
-    /// Read every cold span (used by the hot∪cold union, which then filters).
-    pub fn all_spans(&self) -> Result<Vec<Span>> {
-        self.spans_since(None)
-    }
-
     /// Cold spans from partitions that can hold rows at or after `since`.
+    /// `None` reads everything (the hot∪cold union filters afterward).
     /// Rows are partitioned by their own timestamp, so partitions entirely
     /// before `since` are skipped without ever being fetched or decoded — the
     /// partition-pruning half of the pushdown the design's Phase 6 asks for.
@@ -207,10 +203,6 @@ impl ColdTier {
         )
     }
 
-    pub fn all_logs(&self) -> Result<Vec<LogRecord>> {
-        self.logs_since(None)
-    }
-
     /// Cold logs from partitions that can hold rows at or after `since`.
     pub fn logs_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<LogRecord>> {
         let mut out = Vec::new();
@@ -238,10 +230,6 @@ impl ColdTier {
                 metrics_to_batch(group)
             },
         )
-    }
-
-    pub fn all_metrics(&self) -> Result<Vec<MetricPoint>> {
-        self.metrics_since(None)
     }
 
     /// Cold metric points from partitions that can hold rows at or after
@@ -279,10 +267,6 @@ impl ColdTier {
             self.put_parquet(&day_partition_key(METRICS_5M, &date, "metrics_5m"), &batch)?;
         }
         Ok(())
-    }
-
-    pub fn all_rollups(&self) -> Result<Vec<RollupPoint>> {
-        self.rollups_since(None)
     }
 
     /// Rollups from day partitions that can hold buckets at or after `since`.
@@ -915,7 +899,7 @@ mod tests {
         tier.write_spans(&[span_at("t-old", "s1", old), span_at("t-new", "s2", recent)])
             .unwrap();
 
-        let all = tier.all_spans().unwrap();
+        let all = tier.spans_since(None).unwrap();
         assert_eq!(all.len(), 2);
 
         let since = Utc::now() - chrono::Duration::days(1);
@@ -960,7 +944,7 @@ mod tests {
         assert_eq!(t1.len(), 2);
         assert!(t1.iter().all(|s| s.trace_id == "t1"));
         assert_eq!(t1[0].attributes.get("k").map(String::as_str), Some("v"));
-        assert_eq!(cold.all_spans().unwrap().len(), 3);
+        assert_eq!(cold.spans_since(None).unwrap().len(), 3);
         assert!(cold.get_trace("missing").unwrap().is_empty());
     }
 
@@ -984,7 +968,7 @@ mod tests {
         cold.write_downsampled(&[mk(0, 10.0), mk(60, 30.0), mk(120, 20.0), mk(360, 5.0)])
             .unwrap();
 
-        let mut rollups = cold.all_rollups().unwrap();
+        let mut rollups = cold.rollups_since(None).unwrap();
         rollups.sort_by_key(|r| r.bucket_start);
         assert_eq!(rollups.len(), 2);
         let first = &rollups[0];
@@ -1004,12 +988,12 @@ mod tests {
         let recent = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
         cold.write_spans(&[span_at("told", "a", old), span_at("tnew", "b", recent)])
             .unwrap();
-        assert_eq!(cold.all_spans().unwrap().len(), 2);
+        assert_eq!(cold.spans_since(None).unwrap().len(), 2);
 
         // Keep everything on/after 2026-05-01 → the Jan partition is dropped.
         let dropped = cold.drop_partitions_before("2026-05-01").unwrap();
         assert_eq!(dropped, 1);
-        let remaining = cold.all_spans().unwrap();
+        let remaining = cold.spans_since(None).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].trace_id, "tnew");
     }

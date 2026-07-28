@@ -758,7 +758,7 @@ startup banner and default tracing subscriber setup.
 |-----------|--------|-----|
 | Language | Rust | Fast, single binary, memory-safe |
 | Storage | tael-backend | Tiered engine: WAL (walrus) + LSM hot tier (fjall) + Parquet cold tier (arrow/parquet) + content-addressed blobs + Tantivy search |
-| Storage (fallback) | DuckDB | Optional embedded columnar DB, `--features duckdb` + `--storage duckdb` |
+| Storage (fallback) | DuckDB | Optional embedded columnar DB, `--features duckdb` + `--storage duckdb`. Migrate existing DuckDB data onto the default engine with `tael server migrate` (offline, `--dry-run` to preview) |
 | CLI | clap | Standard Rust CLI framework |
 | GUI | Tauri | Desktop app embedded in the installed `tael` binary |
 | API | axum | Async REST on tokio |

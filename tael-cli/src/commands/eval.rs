@@ -268,6 +268,10 @@ pub async fn run(
     let run_id =
         run_id.unwrap_or_else(|| format!("run_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S")));
     let case_count = cases.len().to_string();
+    // Best-effort provenance: when the runner is inside a git checkout, stamp
+    // the conventional `tael.git.*` attributes so runs are comparable by
+    // commit/branch without the harness passing anything.
+    let git = GitInfo::detect();
     println!("eval run {run_id}: {} cases", cases.len());
 
     for (idx, case) in cases.iter().enumerate() {
@@ -295,6 +299,7 @@ pub async fn run(
             idx,
             cases.len(),
             code_version.as_deref(),
+            &git,
             "unset",
             started_at,
             started_at,
@@ -316,6 +321,14 @@ pub async fn run(
         if let Some(version) = &code_version {
             cmd.env("TAEL_EVAL_CODE_VERSION", version);
         }
+        // The case's own instrumentation can stamp `tael.git.*` / prompt
+        // attributes on its spans from these.
+        if let Some(commit) = &git.commit {
+            cmd.env("TAEL_GIT_COMMIT", commit);
+        }
+        if let Some(branch) = &git.branch {
+            cmd.env("TAEL_GIT_BRANCH", branch);
+        }
 
         let status = cmd
             .status()
@@ -332,6 +345,7 @@ pub async fn run(
             idx,
             cases.len(),
             code_version.as_deref(),
+            &git,
             if status.success() { "ok" } else { "error" },
             started_at,
             finished_at,
@@ -346,6 +360,33 @@ pub async fn run(
     Ok(())
 }
 
+/// Git provenance for the working directory the runner was started in.
+/// Absent (all `None`) outside a checkout or without a `git` binary — the
+/// conventions are additive, never required.
+struct GitInfo {
+    commit: Option<String>,
+    branch: Option<String>,
+}
+
+impl GitInfo {
+    fn detect() -> Self {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        Self {
+            commit: git(&["rev-parse", "--short=12", "HEAD"]),
+            // "HEAD" means detached; that is not a branch name worth recording.
+            branch: git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn write_runner_span(
     client: &TaelClient,
@@ -357,6 +398,7 @@ async fn write_runner_span(
     case_index: usize,
     case_count: usize,
     code_version: Option<&str>,
+    git: &GitInfo,
     status: &str,
     start_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
@@ -381,6 +423,12 @@ async fn write_runner_span(
     });
     if let Some(version) = code_version {
         payload["code_version"] = Value::String(version.to_string());
+    }
+    if let Some(commit) = &git.commit {
+        payload["git_commit"] = Value::String(commit.clone());
+    }
+    if let Some(branch) = &git.branch {
+        payload["git_branch"] = Value::String(branch.clone());
     }
     client.add_eval_runner_span(&payload).await?;
     Ok(())

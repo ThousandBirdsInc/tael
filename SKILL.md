@@ -359,9 +359,10 @@ If spans carry `tael.experiment.id` and `tael.experiment.variant`, compare varia
 tael --format json experiment compare <experiment_id> --last 24h
 tael --format json experiment compare <experiment_id> --signal <failure_mode_or_signal> --last 24h
 tael --format json experiment compare <experiment_id> --metric task_completion --last 24h
+tael --format json experiment compare --group-by git.commit --last 24h
 ```
 
-This reports trace count, span count, error count/rate, average span duration, and optional signal count/rate per variant. `--metric <name>` averages a numeric span attribute of that name (or `tael.metric.<name>`) per variant, for outcome scores stamped on spans. Treat it as an operational comparison over observed traces, not a randomized-experiment statistics package.
+This reports trace count, span count, error count/rate, average span duration, and optional signal count/rate per variant. `--metric <name>` averages a numeric span attribute of that name (or `tael.metric.<name>`) per variant, for outcome scores stamped on spans. `--group-by <attr>` groups by any span attribute instead of the variant; without an experiment id it compares across all traces in the window — with the provenance conventions (`tael.git.commit`, `tael.git.branch`, `tael.prompt.name`, `tael.prompt.version` stamped on spans; `eval run` stamps and exports the git pair automatically) this directly answers "is the new commit worse?". Treat it as an operational comparison over observed traces, not a randomized-experiment statistics package.
 
 ### Record untrusted agent self diagnostics
 

@@ -23,11 +23,22 @@ struct VariantStats {
 pub async fn compare(
     client: &TaelClient,
     format: &OutputFormat,
-    experiment_id: &str,
+    experiment_id: Option<&str>,
+    group_by: Option<&str>,
     signal: Option<String>,
     metric: Option<String>,
     last: Option<String>,
 ) -> Result<()> {
+    if experiment_id.is_none() && group_by.is_none() {
+        return Err(crate::exit::CategorizedError::new(
+            crate::exit::ExitCategory::BadQuery,
+            "pass an experiment id, or --group-by <span-attr> (e.g. --group-by git.commit) \
+             to compare across attribute values"
+                .to_string(),
+        )
+        .into());
+    }
+    let group_by_prefixed = group_by.map(|g| format!("tael.{g}"));
     let traces = client
         .query_traces(
             None,
@@ -55,28 +66,48 @@ pub async fn compare(
         let Some(attrs) = attrs else {
             continue;
         };
-        // Two instrumentation paths resolve to (experiment, variant):
-        //   1. explicit `tael.experiment.id` / `tael.experiment.variant` attrs;
-        //   2. a Chidori `chidori.branch` fan-out — the run id is the
-        //      experiment and each variant's spans carry `chidori.branch_label`,
-        //      so `tael experiment compare <chidori_run_id>` works with no
-        //      extra instrumentation.
-        let variant =
-            if attrs.get("tael.experiment.id").and_then(|v| v.as_str()) == Some(experiment_id) {
-                attrs
-                    .get("tael.experiment.variant")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            } else if attrs.get("chidori.run_id").and_then(|v| v.as_str()) == Some(experiment_id) {
-                match attrs.get("chidori.branch_label").and_then(|v| v.as_str()) {
-                    Some(label) => label.to_string(),
-                    // Non-branch spans of the run aren't part of any variant.
-                    None => continue,
-                }
-            } else {
+        // With an experiment id, only that experiment's spans participate.
+        if let Some(experiment_id) = experiment_id {
+            let in_experiment = attrs.get("tael.experiment.id").and_then(|v| v.as_str())
+                == Some(experiment_id)
+                || attrs.get("chidori.run_id").and_then(|v| v.as_str()) == Some(experiment_id);
+            if !in_experiment {
                 continue;
-            };
+            }
+        }
+        let variant = if let Some(group_attr) = group_by {
+            // `--group-by git.commit` groups by any span attribute; the
+            // conventional `tael.`-prefixed form also matches. Spans without
+            // the attribute belong to no group.
+            match attrs
+                .get(group_attr)
+                .or_else(|| group_by_prefixed.as_deref().and_then(|g| attrs.get(g)))
+                .and_then(|v| v.as_str())
+            {
+                Some(value) => value.to_string(),
+                None => continue,
+            }
+        } else {
+            // Two instrumentation paths resolve to a variant:
+            //   1. explicit `tael.experiment.variant` attrs;
+            //   2. a Chidori `chidori.branch` fan-out, where each variant's
+            //      spans carry `chidori.branch_label` — so
+            //      `tael experiment compare <chidori_run_id>` works with no
+            //      extra instrumentation.
+            if let Some(v) = attrs
+                .get("tael.experiment.variant")
+                .and_then(|v| v.as_str())
+            {
+                v.to_string()
+            } else if let Some(label) = attrs.get("chidori.branch_label").and_then(|v| v.as_str()) {
+                label.to_string()
+            } else if attrs.contains_key("tael.experiment.id") {
+                "unknown".to_string()
+            } else {
+                // Non-branch spans of a chidori run aren't part of any variant.
+                continue;
+            }
+        };
         let trace_id = span
             .get("trace_id")
             .and_then(|v| v.as_str())
@@ -167,6 +198,7 @@ pub async fn compare(
         .collect();
     let result = serde_json::json!({
         "experiment_id": experiment_id,
+        "group_by": group_by,
         "variants": rows,
         "count": rows.len(),
     });
@@ -192,15 +224,29 @@ fn print_experiment_compare(value: &Value) {
             return;
         }
     };
-    println!(
-        "Experiment {}",
-        value["experiment_id"].as_str().unwrap_or("-")
-    );
+    match (value["experiment_id"].as_str(), value["group_by"].as_str()) {
+        (Some(id), Some(by)) => println!("Experiment {id} by {by}"),
+        (Some(id), None) => println!("Experiment {id}"),
+        (None, Some(by)) => println!("Grouped by {by}"),
+        (None, None) => {}
+    }
     let has_metric = variants
         .iter()
         .any(|v| v.get("metric").is_some_and(|m| !m.is_null()));
+    let group_label = if value["group_by"].is_string() {
+        "Group"
+    } else {
+        "Variant"
+    };
     let mut header = vec![
-        "Variant", "Traces", "Spans", "Errors", "Error %", "Avg ms", "Signal", "Signal %",
+        group_label,
+        "Traces",
+        "Spans",
+        "Errors",
+        "Error %",
+        "Avg ms",
+        "Signal",
+        "Signal %",
     ];
     if has_metric {
         header.push("Metric avg");

@@ -962,6 +962,9 @@ struct AddEvalRunnerSpanBody {
     case_index: Option<usize>,
     case_count: Option<usize>,
     code_version: Option<String>,
+    /// Conventional provenance attributes (`tael.git.commit` / `tael.git.branch`).
+    git_commit: Option<String>,
+    git_branch: Option<String>,
     status: Option<String>,
     start_time: Option<String>,
     end_time: Option<String>,
@@ -1210,6 +1213,12 @@ async fn eval_add_runner_span(
     }
     if let Some(version) = payload.code_version.as_deref().filter(|s| !s.is_empty()) {
         attrs.insert("tael.eval.code_version".to_string(), version.to_string());
+    }
+    if let Some(commit) = payload.git_commit.as_deref().filter(|s| !s.is_empty()) {
+        attrs.insert("tael.git.commit".to_string(), commit.to_string());
+    }
+    if let Some(branch) = payload.git_branch.as_deref().filter(|s| !s.is_empty()) {
+        attrs.insert("tael.git.branch".to_string(), branch.to_string());
     }
 
     let span = Span {
