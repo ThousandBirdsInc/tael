@@ -546,10 +546,10 @@ beat later because of the series layout + downsampling.
 - [ ] HNSW semantic index (feature-gated, off by default — needs embeddings)
 
 ### B5: Scale path (v2)
-- [◐] Cold tier relocatable via `TAEL_COLD_DIR` (object-store FUSE mount today); native S3/R2 async `object_store` is v2
-- [ ] Optional Kafka/Redpanda ingest buffer for bursty traffic (demand-driven)
-- [ ] Evaluate separating ingest/query processes
-- [ ] DuckDB→tael-backend migration tool (prerequisite for flipping the default)
+- [x] Cold tier relocatable via `TAEL_COLD_DIR`; native S3/GCS `object_store` behind the `cloud` feature, with predicate pushdown (partition + row-group pruning, row filters) on cold reads
+- [x] Optional Kafka/Redpanda ingest buffer for bursty traffic (`--features kafka`: produce = shard-split OTLP into a topic, consume = operator-assigned partitions applied through the normal ingest services)
+- [x] Separate ingest/query processes (`TAEL_NODE_ROLE=ingest` forwarding tier, `TAEL_QUERY_SHARDS` query tier — docs/running-tael-for-a-team.md)
+- [x] DuckDB→tael-backend migration tool (`tael server migrate`)
 
 ## Open Questions
 

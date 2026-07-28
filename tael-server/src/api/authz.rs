@@ -214,8 +214,9 @@ pub async fn require_auth(
 pub fn grpc_interceptor(
     state: Arc<AuthState>,
 ) -> impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
-    move |req: tonic::Request<()>| {
+    move |mut req: tonic::Request<()>| {
         if state.mode() == AuthMode::Off {
+            req.extensions_mut().insert(Principal::anonymous());
             return Ok(req);
         }
         let presented = req
@@ -251,6 +252,9 @@ pub fn grpc_interceptor(
                 principal.role.as_str()
             )));
         }
+        // Attach the principal so the ingest services can stamp each record
+        // with the writer's tenant (`crate::tenancy::stamp`).
+        req.extensions_mut().insert(principal);
         Ok(req)
     }
 }

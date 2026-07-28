@@ -144,6 +144,17 @@ pub fn router(
         .with_state(state)
 }
 
+/// The tenant every record accepted by a write handler is stamped with, or
+/// `None` when tenancy is off (no stamp, exactly the single-tenant behavior).
+fn resolved_write_tenant(
+    state: &AppState,
+    principal: Option<&crate::auth::Principal>,
+) -> Option<String> {
+    state
+        .multi_tenant
+        .then(|| crate::tenancy::write_tenant(true, principal))
+}
+
 /// The Datadog trace-agent endpoint set (see `ingest::datadog`). Mounted on
 /// the main REST router and, via [`dd_router`], on the dedicated agent-port
 /// listener.
@@ -165,6 +176,7 @@ pub fn dd_router(
     blobs: Arc<BlobStore>,
     bus: Arc<SpanBus>,
     log_bus: Arc<LogBus>,
+    multi_tenant: bool,
 ) -> Router {
     let state = AppState {
         store,
@@ -188,7 +200,7 @@ pub fn dd_router(
                 .unwrap_or_else(|_| unreachable!("empty-path suite store cannot fail to open")),
         ),
         data_dir: String::new(),
-        multi_tenant: false,
+        multi_tenant,
     };
     dd_routes()
         .route("/healthz", get(healthz))
@@ -1098,6 +1110,7 @@ async fn eval_compare(
 
 async fn eval_add_score(
     State(state): State<AppState>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Json(payload): Json<AddEvalScoreBody>,
 ) -> impl IntoResponse {
     if payload.run_id.trim().is_empty()
@@ -1142,6 +1155,12 @@ async fn eval_add_score(
         attrs.insert("source".to_string(), v.to_string());
     }
 
+    let principal = principal.map(|axum::Extension(p)| p);
+    crate::tenancy::stamp_resolved(
+        resolved_write_tenant(&state, principal.as_ref()).as_deref(),
+        std::iter::once(&mut attrs),
+    );
+
     let point = MetricPoint {
         timestamp: Utc::now(),
         service: "tael-eval".to_string(),
@@ -1164,6 +1183,7 @@ async fn eval_add_score(
 
 async fn eval_add_runner_span(
     State(state): State<AppState>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Json(payload): Json<AddEvalRunnerSpanBody>,
 ) -> impl IntoResponse {
     if payload.suite_id.trim().is_empty()
@@ -1221,6 +1241,12 @@ async fn eval_add_runner_span(
     if let Some(branch) = payload.git_branch.as_deref().filter(|s| !s.is_empty()) {
         attrs.insert("tael.git.branch".to_string(), branch.to_string());
     }
+
+    let principal = principal.map(|axum::Extension(p)| p);
+    crate::tenancy::stamp_resolved(
+        resolved_write_tenant(&state, principal.as_ref()).as_deref(),
+        std::iter::once(&mut attrs),
+    );
 
     let span = Span {
         trace_id: payload.trace_id,
@@ -1559,8 +1585,14 @@ fn cases_by_metric(
     out
 }
 
-async fn prom_remote_write(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
-    crate::ingest::prom_remote_write::handle_write(state.store, body).await
+async fn prom_remote_write(
+    State(state): State<AppState>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let tenant = resolved_write_tenant(&state, principal.as_ref());
+    crate::ingest::prom_remote_write::handle_write(state.store, body, tenant).await
 }
 
 // ── Datadog trace-agent (dd-trace) intake ───────────────────────────
@@ -1571,9 +1603,12 @@ async fn dd_info() -> impl IntoResponse {
 
 async fn dd_traces_v04(
     State(state): State<AppState>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let tenant = resolved_write_tenant(&state, principal.as_ref());
     crate::ingest::datadog::handle_traces(
         state.store,
         state.blobs,
@@ -1581,15 +1616,19 @@ async fn dd_traces_v04(
         crate::ingest::datadog::TracesVersion::V04,
         headers,
         body,
+        tenant,
     )
     .await
 }
 
 async fn dd_traces_v05(
     State(state): State<AppState>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let tenant = resolved_write_tenant(&state, principal.as_ref());
     crate::ingest::datadog::handle_traces(
         state.store,
         state.blobs,
@@ -1597,6 +1636,7 @@ async fn dd_traces_v05(
         crate::ingest::datadog::TracesVersion::V05,
         headers,
         body,
+        tenant,
     )
     .await
 }
@@ -1880,6 +1920,7 @@ mod tests {
 
         let r = dd_traces_v04(
             State(state),
+            None,
             axum::http::HeaderMap::new(),
             Bytes::from(body),
         )

@@ -1,16 +1,23 @@
 //! Tenant scoping.
 //!
-//! **What this is, and what it is not.** Every telemetry record written by an
-//! authenticated principal is stamped with that principal's tenant, and reads
-//! are filtered to the reader's tenant. That is *authorization*: the API will
-//! not hand tenant A's traces to tenant B.
+//! **Two levels, chosen explicitly.**
 //!
-//! It is not *isolation*. The storage engine keys nothing by tenant — all
-//! tenants share one hot tier, one cold tier, and one blob store — so anything
-//! that bypasses the query layer sees everything. The SQL escape hatch is
-//! exactly such a bypass, which is why it is refused for non-admin principals
-//! when tenancy is on rather than being silently unscoped. Physical isolation
-//! needs a storage key-schema change, which this deliberately is not.
+//! `TAEL_MULTI_TENANT=1` is *authorization*: every record written by an
+//! authenticated principal is stamped with that principal's tenant (the
+//! server's stamp overrides anything the client sent — see [`stamp`]), and
+//! reads are filtered to the reader's tenant. The API will not hand tenant
+//! A's traces to tenant B, but all tenants still share one hot tier, one cold
+//! tier, and one text index, so anything that bypasses the query layer sees
+//! everything. The SQL escape hatch is exactly such a bypass, which is why it
+//! is refused for non-admin principals when tenancy is on rather than being
+//! silently unscoped.
+//!
+//! `TAEL_TENANT_ISOLATION=1` (which implies the above) is *isolation*: the
+//! tenant becomes the top-level shard key of the storage layout itself and
+//! each tenant gets its own complete engine — see
+//! [`crate::storage::TenantShardedStore`]. The one deliberately shared piece
+//! is the content-addressed payload blob store (cross-tenant dedup, keys
+//! reachable only by knowing the content's hash).
 //!
 //! Saying which of the two you have matters: a deployment that believes it has
 //! isolation and only has authorization will put data somewhere it shouldn't.
@@ -74,6 +81,37 @@ pub fn write_tenant(enabled: bool, principal: Option<&Principal>) -> String {
     principal
         .map(|p| p.tenant.clone())
         .unwrap_or_else(|| DEFAULT_TENANT.to_string())
+}
+
+/// Stamp the writer's tenant onto a batch of attribute maps.
+///
+/// With tenancy off this is a no-op — single-tenant records carry no tenant
+/// attribute, exactly as before. With tenancy on the server's stamp
+/// **overwrites** anything the client sent: the attribute is an authorization
+/// boundary, and honoring a client-supplied value would let any writer place
+/// records in (and read them back from) another tenant by forging one field.
+pub fn stamp<'a>(
+    enabled: bool,
+    principal: Option<&Principal>,
+    attribute_maps: impl Iterator<Item = &'a mut std::collections::HashMap<String, String>>,
+) {
+    if !enabled {
+        return;
+    }
+    stamp_resolved(Some(&write_tenant(enabled, principal)), attribute_maps);
+}
+
+/// [`stamp`] with the tenant already resolved. `None` means tenancy is off
+/// (no-op); handlers that resolve the tenant once and hand it to an ingest
+/// helper use this form.
+pub fn stamp_resolved<'a>(
+    tenant: Option<&str>,
+    attribute_maps: impl Iterator<Item = &'a mut std::collections::HashMap<String, String>>,
+) {
+    let Some(tenant) = tenant else { return };
+    for attributes in attribute_maps {
+        attributes.insert(TENANT_ATTRIBUTE.to_string(), tenant.to_string());
+    }
 }
 
 /// Whether a principal may use the SQL escape hatch.

@@ -9,29 +9,34 @@ use tonic::{Request, Response, Status};
 
 use crate::span_bus::SpanBus;
 use crate::storage::models::{LlmOperation, LlmSpan, Span, SpanEvent, SpanKind, SpanStatus};
-use crate::storage::{BlobStore, SearchIndex, Store};
+use crate::storage::{BlobStore, PayloadIndexes, Store};
 
 pub struct OtlpTraceService {
     store: Arc<dyn Store>,
     blobs: Arc<BlobStore>,
-    /// Optional full-text index over LLM payloads (present only for the
-    /// tael-backend storage engine).
-    search: Option<Arc<SearchIndex>>,
+    /// Full-text index routing over LLM payloads (`None` for backends without
+    /// a text index).
+    search: Arc<PayloadIndexes>,
     bus: Arc<SpanBus>,
+    /// Stamp every record with the writing principal's tenant
+    /// (`TAEL_MULTI_TENANT`). See [`crate::tenancy::stamp`].
+    multi_tenant: bool,
 }
 
 impl OtlpTraceService {
     pub fn new(
         store: Arc<dyn Store>,
         blobs: Arc<BlobStore>,
-        search: Option<Arc<SearchIndex>>,
+        search: Arc<PayloadIndexes>,
         bus: Arc<SpanBus>,
+        multi_tenant: bool,
     ) -> Self {
         Self {
             store,
             blobs,
             search,
             bus,
+            multi_tenant,
         }
     }
 
@@ -57,7 +62,7 @@ impl OtlpTraceService {
 /// with the OTLP/HTTP listener. `tonic`'s generated server takes ownership of
 /// its service, and the orphan rule blocks implementing [`TraceService`] on
 /// `Arc<OtlpTraceService>` directly, so the wrapper carries the shared handle.
-pub struct SharedTraceService(pub Arc<OtlpTraceService>);
+pub struct SharedTraceService(pub Arc<dyn TraceService>);
 
 #[tonic::async_trait]
 impl TraceService for SharedTraceService {
@@ -81,6 +86,15 @@ impl TraceService for OtlpTraceService {
                 "ingest at capacity; retry with backoff",
             ));
         };
+        // The authenticated principal (attached by the auth layer on both
+        // transports) determines the tenant this batch is stamped with and,
+        // under tenant isolation, which engine's text index receives it.
+        let principal = request
+            .extensions()
+            .get::<crate::auth::Principal>()
+            .cloned();
+        let tenant = crate::tenancy::write_tenant(self.multi_tenant, principal.as_ref());
+        let search = self.search.for_tenant(&tenant);
         let req = request.into_inner();
         let mut spans = Vec::new();
         let mut indexed_any = false;
@@ -187,7 +201,7 @@ impl TraceService for OtlpTraceService {
 
                         // Index the payload text for full-text search before it
                         // leaves memory (only the hashes survive on the span).
-                        if let Some(ref idx) = self.search {
+                        if let Some(ref idx) = search {
                             let mut text = String::new();
                             if let Some(p) = &prompt {
                                 text.push_str(p);
@@ -218,11 +232,11 @@ impl TraceService for OtlpTraceService {
                     // filters are exact-match: an agent that doesn't already
                     // know a URL or model string can't filter for it, but can
                     // search for it.
-                    if let Some(ref idx) = self.search
+                    if let Some(ref idx) = search
                         && let Err(e) = idx.index_span_attributes(&trace_id, &span_id, &attributes)
                     {
                         tracing::warn!(error = %e, "failed to index span attributes");
-                    } else if self.search.is_some() && !attributes.is_empty() {
+                    } else if search.is_some() && !attributes.is_empty() {
                         indexed_any = true;
                     }
 
@@ -245,6 +259,14 @@ impl TraceService for OtlpTraceService {
             }
         }
 
+        // Stamp the writer's tenant last, so it overrides anything the client
+        // sent — the attribute is an authorization boundary, not client data.
+        crate::tenancy::stamp(
+            self.multi_tenant,
+            principal.as_ref(),
+            spans.iter_mut().map(|s| &mut s.attributes),
+        );
+
         let span_count = spans.len();
         if let Err(e) = self.store.insert_spans(&spans) {
             tracing::error!(error = %e, "failed to insert spans");
@@ -255,7 +277,7 @@ impl TraceService for OtlpTraceService {
 
         // Make any newly indexed payload text searchable.
         if indexed_any
-            && let Some(ref idx) = self.search
+            && let Some(ref idx) = search
             && let Err(e) = idx.commit()
         {
             tracing::warn!(error = %e, "failed to commit search index");
@@ -411,5 +433,106 @@ mod tests {
         let llm = extract_llm_span(&a).expect("model alone is enough");
         assert_eq!(llm.model, "gpt-4o");
         assert!(llm.provider.is_empty());
+    }
+
+    /// A one-span OTLP export whose span carries `extra` client attributes.
+    fn export_request(
+        extra: &[(&str, &str)],
+    ) -> opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span as PSpan};
+
+        let kv = |k: &str, v: &str| KeyValue {
+            key: k.into(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.into())),
+            }),
+        };
+        opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![kv("service.name", "api")],
+                    ..Default::default()
+                }),
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![PSpan {
+                        trace_id: vec![7u8; 16],
+                        span_id: vec![8u8; 8],
+                        name: "op".into(),
+                        start_time_unix_nano: 1_700_000_000_000_000_000,
+                        end_time_unix_nano: 1_700_000_000_001_000_000,
+                        attributes: extra.iter().map(|(k, v)| kv(k, v)).collect(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_server_stamp_overrides_a_forged_client_tenant() {
+        use crate::auth::{Principal, Role};
+        use crate::storage::models::TraceQuery;
+        use crate::storage::testing::TestBackend;
+        use crate::tenancy::TENANT_ATTRIBUTE;
+
+        let engine = TestBackend::new();
+        let service = OtlpTraceService::new(
+            engine.store(),
+            Arc::clone(&engine.blobs),
+            Arc::new(crate::storage::PayloadIndexes::None),
+            Arc::new(crate::span_bus::SpanBus::new().unwrap()),
+            true, // multi-tenant: stamping on
+        );
+
+        // The client claims to be team-b; the authenticated key is team-a's.
+        let mut request = Request::new(export_request(&[(TENANT_ATTRIBUTE, "team-b")]));
+        request.extensions_mut().insert(Principal {
+            key_id: "k1".into(),
+            name: "svc-key".into(),
+            role: Role::Writer,
+            tenant: "team-a".into(),
+        });
+        service.export(request).await.unwrap();
+
+        let spans = engine.backend.query_traces(&TraceQuery::default()).unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0]
+                .attributes
+                .get(TENANT_ATTRIBUTE)
+                .map(String::as_str),
+            Some("team-a"),
+            "the writer's tenant must override the forged attribute"
+        );
+
+        // With tenancy off, nothing is stamped and client attributes pass
+        // through untouched — the single-tenant path stays exactly as it was.
+        let service_off = OtlpTraceService::new(
+            engine.store(),
+            Arc::clone(&engine.blobs),
+            Arc::new(crate::storage::PayloadIndexes::None),
+            Arc::new(crate::span_bus::SpanBus::new().unwrap()),
+            false,
+        );
+        let mut request = Request::new(export_request(&[]));
+        request.extensions_mut().insert(Principal {
+            key_id: "k1".into(),
+            name: "svc-key".into(),
+            role: Role::Writer,
+            tenant: "team-a".into(),
+        });
+        // Distinct span id so both survive.
+        service_off.export(request).await.unwrap();
+        let spans = engine.backend.query_traces(&TraceQuery::default()).unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| !s.attributes.contains_key(TENANT_ATTRIBUTE)),
+            "tenancy off must not stamp"
+        );
     }
 }

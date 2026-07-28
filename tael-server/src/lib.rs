@@ -44,7 +44,7 @@ use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
 pub use config::{
-    DEFAULT_DD_AGENT_ADDR, DEFAULT_OTLP_HTTP_ADDR, ServerConfig, StorageBackend,
+    DEFAULT_DD_AGENT_ADDR, DEFAULT_OTLP_HTTP_ADDR, NodeRole, ServerConfig, StorageBackend,
     parse_dd_agent_addr, parse_otlp_http_addr,
 };
 #[cfg(feature = "duckdb")]
@@ -133,7 +133,7 @@ impl BlobGcOwnership {
 /// compaction off the async executor. A 0-hour hot-tier window compacts
 /// everything, which is what the tests rely on.
 fn spawn_span_compactor(
-    backend: Arc<TaelBackend>,
+    backend: Arc<dyn storage::EngineMaintenance>,
     blobs: Arc<BlobStore>,
     gc_ownership: BlobGcOwnership,
     gc_peers: Arc<Vec<RemoteStore>>,
@@ -165,7 +165,7 @@ fn spawn_span_compactor(
                 // single-owner guard), to avoid deleting blobs other shards
                 // reference.
                 let blobs_gcd = if blob_gc_enabled {
-                    let mut live = backend.collect_live_blob_hashes()?;
+                    let mut live = backend.live_blob_hashes()?;
                     // On a shared store the GC owner's own live set is not
                     // enough: union every peer writer's, and if any peer can't
                     // answer, skip GC entirely this pass — an incomplete live
@@ -199,7 +199,7 @@ fn spawn_span_compactor(
                     ("tael.engine.blobs_gcd", blobs_gcd as f64),
                     ("tael.engine.maintenance_ms", elapsed_ms),
                 ]);
-                if let Err(e) = backend.insert_metrics(&points) {
+                if let Err(e) = backend.record_engine_metrics(&points) {
                     tracing::warn!(error = %e, "failed to record engine metrics");
                 }
                 anyhow::Ok((compacted, dropped, blobs_gcd))
@@ -493,6 +493,56 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
 
     configure_walrus_data_dir(&config.wal_dir);
 
+    // Physical tenant isolation implies tenant scoping at the API layer —
+    // isolated storage with unscoped reads would be a contradiction.
+    if config.tenant_isolation && !config.multi_tenant {
+        tracing::info!("TAEL_TENANT_ISOLATION implies TAEL_MULTI_TENANT; enabling tenant scoping");
+        config.multi_tenant = true;
+    }
+
+    // Kafka ingest buffer (`--features kafka`). Parsed before the edge-mode
+    // checks: produce mode is an edge role like TAEL_NODE_ROLE=ingest.
+    #[cfg(feature = "kafka")]
+    let kafka_settings = ingest::kafka::KafkaSettings::from_env()?;
+    #[cfg(not(feature = "kafka"))]
+    if std::env::var("TAEL_KAFKA_MODE").is_ok_and(|v| !v.trim().is_empty()) {
+        bail!(
+            "the Kafka ingest buffer is not included in this build; reinstall with \
+             `--features kafka` to use TAEL_KAFKA_MODE"
+        );
+    }
+    #[cfg(feature = "kafka")]
+    let kafka_produce_mode = kafka_settings
+        .as_ref()
+        .is_some_and(|k| k.mode == ingest::kafka::KafkaMode::Produce);
+    #[cfg(not(feature = "kafka"))]
+    let kafka_produce_mode = false;
+    #[cfg(feature = "kafka")]
+    if kafka_produce_mode && config.node_role == NodeRole::Ingest {
+        bail!(
+            "TAEL_KAFKA_MODE=produce and TAEL_NODE_ROLE=ingest are both edge roles \
+             (buffer to Kafka vs. forward to shards); configure one of them"
+        );
+    }
+
+    // An edge node (ingest-only forwarder, or Kafka producer) accepts OTLP
+    // and nothing else: it has no engine for the Datadog/remote-write decode
+    // paths to write into, so the dedicated agent listener is off and those
+    // clients point at storage nodes directly (docs/running-tael-for-a-team.md).
+    let edge_only = config.node_role == NodeRole::Ingest || kafka_produce_mode;
+    if config.node_role == NodeRole::Ingest && config.ingest_shards.is_empty() {
+        bail!(
+            "TAEL_NODE_ROLE=ingest requires TAEL_INGEST_SHARDS=<http://shard:7701,...> — \
+             the storage shards this node forwards to"
+        );
+    }
+    if edge_only && config.dd_agent_addr.take().is_some() {
+        tracing::info!(
+            "edge (ingest/buffer) node: dd-trace listener disabled (point \
+             DD_TRACE_AGENT_URL at a storage node)"
+        );
+    }
+
     // Resolve auth and retention before anything binds, so a misconfigured
     // deployment fails at startup rather than after it is already accepting
     // traffic.
@@ -545,10 +595,45 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         None => None,
     };
 
-    // The payload search index is shared between the ingest path (writes) and
-    // the tael-backend query path (reads); present only when that engine runs.
-    let mut search: Option<Arc<storage::SearchIndex>> = None;
-    let store: Arc<dyn Store> = if !config.query_shards.is_empty() {
+    // Where ingest routes payload text for indexing: the single engine's
+    // shared index, per-tenant indexes under isolation, or nothing.
+    let mut payload_indexes = storage::PayloadIndexes::None;
+    // Ingest tier: the OTLP transports forward to these shards instead of
+    // storing (`ingest::forward`); the Store behind the REST router refuses
+    // everything with an explanation.
+    let forwarder = if config.node_role == NodeRole::Ingest {
+        Some(Arc::new(ingest::forward::OtlpForwarder::new(
+            config.ingest_shards.clone(),
+        )?))
+    } else {
+        None
+    };
+    // Kafka producer edge: connect before anything binds, so a missing
+    // topic/broker fails startup instead of the first batch.
+    #[cfg(feature = "kafka")]
+    let kafka_publisher = match &kafka_settings {
+        Some(s) if s.mode == ingest::kafka::KafkaMode::Produce => {
+            Some(Arc::new(ingest::kafka::KafkaPublisher::connect(s).await?))
+        }
+        _ => None,
+    };
+    let store: Arc<dyn Store> = if kafka_produce_mode {
+        Arc::new(ingest::forward::IngestOnlyStore::with_message(
+            &[],
+            "this node buffers OTLP into Kafka (TAEL_KAFKA_MODE=produce): it serves no \
+             queries and stores nothing. Query a storage node that consumes the topic \
+             (TAEL_KAFKA_MODE=consume); point dd-trace and Prometheus remote-write \
+             directly at a storage node.",
+        )?)
+    } else if let Some(f) = &forwarder {
+        tracing::info!(
+            shards = f.shard_count(),
+            "ingest-only node: forwarding OTLP to storage shards (no local engine)"
+        );
+        Arc::new(ingest::forward::IngestOnlyStore::new(
+            &config.ingest_shards,
+        )?)
+    } else if !config.query_shards.is_empty() {
         // Stateless query-tier mode: serve reads by scatter-gather over remote
         // shards, no local engine (`docs/tael-server-scaling-ha.md` §3, Phase 2).
         let shards = config
@@ -595,27 +680,6 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                         "WAL replication enabled: shipping to standbys (leader)"
                     );
                 }
-                // Cold tier: local filesystem by default; object storage when
-                // configured (opt-in, requires the `cloud` feature).
-                let cold_backend = match config.object_store.cold {
-                    StoreLocation::Fs => None,
-                    location => Some(open_object_backend(
-                        location,
-                        Path::new(&config.data_dir).join("cold").as_path(),
-                        config.object_store.cold_bucket.as_deref(),
-                    )?),
-                };
-                // Comments: local JSONL by default; Postgres when configured.
-                let comments = open_comments(&config.comments, &config.data_dir)?;
-                let backend = Arc::new(TaelBackend::with_components(
-                    &config.data_dir,
-                    "tael-backend",
-                    sinks,
-                    config.wal_required_acks,
-                    cold_backend,
-                    comments,
-                )?);
-                search = Some(backend.search_index());
                 // Blob GC single-owner guard: on a shared (object-store) blob
                 // store, per-node mark-and-sweep would delete blobs other
                 // shards still reference. In a coordinated cluster the elected
@@ -654,14 +718,103 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                         "blob GC will union live blob sets across peers before sweeping"
                     );
                 }
-                spawn_span_compactor(
-                    Arc::clone(&backend),
-                    Arc::clone(&blobs),
-                    gc_ownership,
-                    Arc::new(gc_peers),
-                    retention_policy.clone(),
-                );
-                backend as Arc<dyn Store>
+
+                if config.tenant_isolation {
+                    // Physical isolation: one complete engine per tenant under
+                    // <data_dir>/tenants/. See `storage::TenantShardedStore`.
+                    if config.comments.backend != config::CommentsBackend::Jsonl {
+                        bail!(
+                            "TAEL_TENANT_ISOLATION requires the default JSONL comments store; \
+                             a shared Postgres comments store would put every tenant's \
+                             comments in one table"
+                        );
+                    }
+                    // Pre-isolation data lives in the root engine's layout and
+                    // is invisible to the tenant engines — say so rather than
+                    // letting history silently vanish.
+                    if Path::new(&config.data_dir).join("hot").exists() {
+                        tracing::warn!(
+                            data_dir = %config.data_dir,
+                            "tenant isolation is on, but this data dir holds a pre-isolation \
+                             engine (<data_dir>/hot); that data is not served. Move it aside \
+                             or keep a non-isolated server for the history."
+                        );
+                    }
+                    // Per-tenant cold backends: local FS handles itself (the
+                    // factory gives each tenant a TAEL_COLD_DIR subtree);
+                    // object-store cold gets a per-tenant bucket prefix.
+                    let cold_factory: Option<storage::ColdBackendFactory> =
+                        match config.object_store.cold {
+                            StoreLocation::Fs => None,
+                            location => {
+                                let bucket = config.object_store.cold_bucket.clone();
+                                let fs_root = Path::new(&config.data_dir).join("cold");
+                                Some(Box::new(move |tenant: &str| {
+                                    let url = bucket.as_deref().map(|b| {
+                                        format!(
+                                            "{}/tenants/{}",
+                                            b.trim_end_matches('/'),
+                                            storage::tenant_dir_component(tenant)
+                                        )
+                                    });
+                                    Ok(Some(open_object_backend(
+                                        location,
+                                        &fs_root,
+                                        url.as_deref(),
+                                    )?))
+                                }))
+                            }
+                        };
+                    let tenants = Arc::new(storage::TenantShardedStore::open(
+                        &config.data_dir,
+                        sinks,
+                        config.wal_required_acks,
+                        cold_factory,
+                    )?);
+                    tracing::info!(
+                        "tenant isolation on: each tenant gets its own storage engine \
+                         under <data_dir>/tenants/"
+                    );
+                    payload_indexes = storage::PayloadIndexes::PerTenant(Arc::clone(&tenants));
+                    spawn_span_compactor(
+                        Arc::clone(&tenants) as Arc<dyn storage::EngineMaintenance>,
+                        Arc::clone(&blobs),
+                        gc_ownership,
+                        Arc::new(gc_peers),
+                        retention_policy.clone(),
+                    );
+                    tenants as Arc<dyn Store>
+                } else {
+                    // Cold tier: local filesystem by default; object storage when
+                    // configured (opt-in, requires the `cloud` feature).
+                    let cold_backend = match config.object_store.cold {
+                        StoreLocation::Fs => None,
+                        location => Some(open_object_backend(
+                            location,
+                            Path::new(&config.data_dir).join("cold").as_path(),
+                            config.object_store.cold_bucket.as_deref(),
+                        )?),
+                    };
+                    // Comments: local JSONL by default; Postgres when configured.
+                    let comments = open_comments(&config.comments, &config.data_dir)?;
+                    let backend = Arc::new(TaelBackend::with_components(
+                        &config.data_dir,
+                        "tael-backend",
+                        sinks,
+                        config.wal_required_acks,
+                        cold_backend,
+                        comments,
+                    )?);
+                    payload_indexes = storage::PayloadIndexes::Single(backend.search_index());
+                    spawn_span_compactor(
+                        Arc::clone(&backend) as Arc<dyn storage::EngineMaintenance>,
+                        Arc::clone(&blobs),
+                        gc_ownership,
+                        Arc::new(gc_peers),
+                        retention_policy.clone(),
+                    );
+                    backend as Arc<dyn Store>
+                }
             }
         }
     };
@@ -670,10 +823,14 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
     let score_rules = Arc::new(scoring::ScoreRuleStore::open(&config.data_dir)?);
     let suite_store = Arc::new(suites::SuiteStore::open(&config.data_dir)?);
-    spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
-    // Evaluate more often than the compaction pass: an alert is only useful if
-    // it fires close to when the condition started.
-    spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
+    // Online scoring and alert evaluation read the store; an edge node has
+    // none, so the loops would only log refusals.
+    if !edge_only {
+        spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
+        // Evaluate more often than the compaction pass: an alert is only
+        // useful if it fires close to when the condition started.
+        spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
+    }
 
     tracing::info!(
         otlp_grpc = %config.otlp_grpc_addr,
@@ -689,23 +846,79 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     // The OTLP services are shared by both transports: gRPC (:4317) and
     // HTTP/protobuf (:4318) hand decoded batches to the same implementations,
     // so there is one ingest path regardless of how a client speaks to it.
-    let otlp_services = ingest::otlp_http::OtlpHttpState {
-        traces: Arc::new(ingest::otlp::OtlpTraceService::new(
-            Arc::clone(&store),
-            Arc::clone(&blobs),
-            search.clone(),
-            Arc::clone(&bus),
-        )),
-        logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
-            Arc::clone(&store),
-            Arc::clone(&blobs),
-            search.clone(),
-            Arc::clone(&log_bus),
-        )),
-        metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(Arc::clone(
-            &store,
-        ))),
+    let payload_indexes = Arc::new(payload_indexes);
+    #[cfg(feature = "kafka")]
+    let kafka_services = kafka_publisher
+        .as_ref()
+        .map(|p| ingest::otlp_http::OtlpHttpState {
+            traces: Arc::new(ingest::kafka::KafkaTraceService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+            logs: Arc::new(ingest::kafka::KafkaLogsService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+            metrics: Arc::new(ingest::kafka::KafkaMetricsService {
+                publisher: Arc::clone(p),
+                multi_tenant: config.multi_tenant,
+            }),
+        });
+    #[cfg(not(feature = "kafka"))]
+    let kafka_services: Option<ingest::otlp_http::OtlpHttpState> = None;
+    let otlp_services = if let Some(services) = kafka_services {
+        // Edge buffering: both transports publish shard-split OTLP slices to
+        // the topic; storage nodes consume and apply them.
+        services
+    } else {
+        match &forwarder {
+            // Ingest tier: both transports split-and-forward at the protobuf
+            // layer, so blobs/indexing/tenant stamping happen on the owning shard.
+            Some(f) => ingest::otlp_http::OtlpHttpState {
+                traces: Arc::new(ingest::forward::ForwardingTraceService(Arc::clone(f))),
+                logs: Arc::new(ingest::forward::ForwardingLogsService(Arc::clone(f))),
+                metrics: Arc::new(ingest::forward::ForwardingMetricsService(Arc::clone(f))),
+            },
+            None => ingest::otlp_http::OtlpHttpState {
+                traces: Arc::new(ingest::otlp::OtlpTraceService::new(
+                    Arc::clone(&store),
+                    Arc::clone(&blobs),
+                    Arc::clone(&payload_indexes),
+                    Arc::clone(&bus),
+                    config.multi_tenant,
+                )),
+                logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
+                    Arc::clone(&store),
+                    Arc::clone(&blobs),
+                    Arc::clone(&payload_indexes),
+                    Arc::clone(&log_bus),
+                    config.multi_tenant,
+                )),
+                metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(
+                    Arc::clone(&store),
+                    config.multi_tenant,
+                )),
+            },
+        }
     };
+
+    // Kafka consumer: a storage node that also drains its owned topic
+    // partitions through the same services the listeners use.
+    #[cfg(feature = "kafka")]
+    if let Some(s) = &kafka_settings
+        && s.mode == ingest::kafka::KafkaMode::Consume
+    {
+        if config.node_role == NodeRole::Ingest {
+            bail!("TAEL_KAFKA_MODE=consume needs a storage node, not TAEL_NODE_ROLE=ingest");
+        }
+        ingest::kafka::spawn_consumers(
+            s,
+            otlp_services.clone(),
+            &config.data_dir,
+            config.multi_tenant,
+        )
+        .await?;
+    }
 
     let grpc_handle = tokio::spawn({
         let otlp = otlp_services.clone();
@@ -875,8 +1088,9 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
             let bus = Arc::clone(&bus);
             let log_bus = Arc::clone(&log_bus);
             let auth = Arc::clone(&auth_state);
+            let multi_tenant = config.multi_tenant;
             async move {
-                let app = api::rest::dd_router(store, blobs, bus, log_bus).layer(
+                let app = api::rest::dd_router(store, blobs, bus, log_bus, multi_tenant).layer(
                     axum::middleware::from_fn_with_state(auth, api::authz::require_auth),
                 );
                 axum::serve(listener, app)
@@ -1022,6 +1236,9 @@ fn print_startup_banner(
                 dd_agent_url(config)
             ),
         },
+    }
+    if config.node_role == NodeRole::Ingest {
+        println!("  role         ingest-only (forwarding OTLP to storage shards)");
     }
     println!("  data dir     {}", config.data_dir);
     println!("  WAL dir      {}", config.wal_dir);

@@ -769,6 +769,37 @@ pub fn print_eval_report(value: &Value) {
     print_eval_cases(
         &serde_json::json!({ "cases": value.get("cases").cloned().unwrap_or(Value::Array(Vec::new())) }),
     );
+    // Present only when the caller asked for --group-by.
+    if let Some(groups) = value.get("groups").and_then(|g| g.as_array()) {
+        println!();
+        println!(
+            "Grouped by {}:",
+            value
+                .get("group_by")
+                .and_then(|k| k.as_str())
+                .unwrap_or("-")
+        );
+        let mut table = Table::new();
+        table.set_header(vec!["Group", "Cases", "Score means"]);
+        for g in groups {
+            let means = g
+                .get("score_means")
+                .and_then(|m| m.as_object())
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| format!("{k}={:.3}", v.as_f64().unwrap_or(f64::NAN)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            table.add_row(vec![
+                Cell::new(g["group"].as_str().unwrap_or("-")),
+                Cell::new(g["case_count"].as_u64().unwrap_or(0).to_string()),
+                Cell::new(means),
+            ]);
+        }
+        println!("{table}");
+    }
 }
 
 pub fn print_eval_compare(value: &Value) {

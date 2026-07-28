@@ -22,6 +22,27 @@ impl StorageBackend {
     }
 }
 
+/// What kind of node this process runs as (`TAEL_NODE_ROLE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeRole {
+    /// The default: full node (ingest + storage + query in one process).
+    #[default]
+    Full,
+    /// Stateless ingest tier: accept OTLP, split by shard key, forward to the
+    /// storage shards (`TAEL_INGEST_SHARDS`); no local engine, no queries.
+    /// See `docs/running-tael-for-a-team.md`.
+    Ingest,
+}
+
+impl NodeRole {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "ingest" | "ingest-only" | "ingest_only" => NodeRole::Ingest,
+            _ => NodeRole::Full,
+        }
+    }
+}
+
 pub struct ServerConfig {
     pub otlp_grpc_addr: String,
     /// OTLP/HTTP (`http/protobuf`) listen address. Many SDKs default to this
@@ -39,6 +60,13 @@ pub struct ServerConfig {
     pub data_dir: String,
     pub wal_dir: String,
     pub storage: StorageBackend,
+    /// Node role (`TAEL_NODE_ROLE`): full (default) or a stateless ingest
+    /// tier that forwards OTLP to the storage shards.
+    pub node_role: NodeRole,
+    /// Storage-shard base URLs an ingest-role node forwards to
+    /// (`TAEL_INGEST_SHARDS=http://shard-0:7701,...`). Required when
+    /// `node_role` is `Ingest`.
+    pub ingest_shards: Vec<String>,
     /// When non-empty, this process runs as a stateless **query tier**: reads
     /// are served by a `FanoutStore` that scatter-gathers across these shard
     /// base URLs (`http://shard-0:7701,...`) instead of a local engine. Set via
@@ -76,6 +104,12 @@ pub struct ServerConfig {
     /// feature it does not use. See [`crate::tenancy`] for what this does and
     /// does not guarantee.
     pub multi_tenant: bool,
+    /// Physically isolate tenants (`TAEL_TENANT_ISOLATION`): each tenant gets
+    /// its own complete storage engine under `<data_dir>/tenants/<tenant>/`,
+    /// making the tenant the top-level shard key rather than a query-layer
+    /// filter. Implies `multi_tenant`. tael-backend engine only. See
+    /// [`crate::storage::TenantShardedStore`].
+    pub tenant_isolation: bool,
 }
 
 /// Object-storage selection for the cold (Parquet) tier and the blob store.
@@ -200,6 +234,10 @@ impl ServerConfig {
             storage: std::env::var("TAEL_STORAGE")
                 .map(|s| StorageBackend::parse(&s))
                 .unwrap_or(StorageBackend::TaelBackend),
+            node_role: std::env::var("TAEL_NODE_ROLE")
+                .map(|s| NodeRole::parse(&s))
+                .unwrap_or_default(),
+            ingest_shards: parse_csv_env("TAEL_INGEST_SHARDS"),
             query_shards: parse_csv_env("TAEL_QUERY_SHARDS"),
             wal_standbys: parse_csv_env("TAEL_WAL_STANDBYS"),
             wal_required_acks: std::env::var("TAEL_WAL_REQUIRED_ACKS")
@@ -212,14 +250,8 @@ impl ServerConfig {
             // a `from_env`; the server logs and falls back to the address-based
             // default.
             config_path: non_empty_env("TAEL_CONFIG"),
-            multi_tenant: std::env::var("TAEL_MULTI_TENANT")
-                .map(|v| {
-                    matches!(
-                        v.trim().to_lowercase().as_str(),
-                        "1" | "true" | "on" | "yes"
-                    )
-                })
-                .unwrap_or(false),
+            multi_tenant: bool_env("TAEL_MULTI_TENANT"),
+            tenant_isolation: bool_env("TAEL_TENANT_ISOLATION"),
             auth: non_empty_env("TAEL_AUTH").and_then(|s| match crate::auth::AuthMode::parse(&s) {
                 Ok(mode) => Some(mode),
                 Err(e) => {
@@ -324,6 +356,18 @@ fn parse_optional_addr(value: Option<String>, default: &str) -> Option<String> {
 
 fn non_empty_env(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// Parse a boolean env var (`1`/`true`/`on`/`yes`, case-insensitive).
+fn bool_env(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Parse a comma-separated env var into a trimmed, non-empty list.

@@ -55,7 +55,7 @@ pub struct FanoutStore {
 /// keys (unlike `RandomState`), so the same key maps to the same shard across
 /// processes and restarts — a prerequisite for `get_trace` to find the shard
 /// the ingest router wrote to.
-fn shard_index(key: &str, n: usize) -> usize {
+pub(crate) fn shard_index(key: &str, n: usize) -> usize {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
     (h.finish() % n as u64) as usize
@@ -315,7 +315,7 @@ fn route_and_insert<T: Clone>(
 /// Sum disjoint per-shard service rollups. `span_count`/`trace_count` add
 /// directly (trace_ids are disjoint across shards); `avg_duration_ms` and
 /// `error_rate` are recomputed as span-count-weighted means.
-fn merge_services(per_shard: Vec<Vec<ServiceInfo>>) -> Vec<ServiceInfo> {
+pub(crate) fn merge_services(per_shard: Vec<Vec<ServiceInfo>>) -> Vec<ServiceInfo> {
     struct Acc {
         span_count: i64,
         trace_count: i64,
@@ -355,7 +355,7 @@ fn merge_services(per_shard: Vec<Vec<ServiceInfo>>) -> Vec<ServiceInfo> {
 }
 
 /// Span-count-weighted mean of a per-shard value.
-fn weighted_mean(values: impl Iterator<Item = (f64, i64)>) -> f64 {
+pub(crate) fn weighted_mean(values: impl Iterator<Item = (f64, i64)>) -> f64 {
     let mut num = 0.0;
     let mut den = 0i64;
     for (v, w) in values {
@@ -369,7 +369,7 @@ fn weighted_mean(values: impl Iterator<Item = (f64, i64)>) -> f64 {
 /// component sums. Percentiles are span-count-weighted approximations — exact
 /// cross-shard percentiles need a mergeable sketch (t-digest), tracked as
 /// future work; they are an estimate, not a true global quantile.
-fn merge_summaries(
+pub(crate) fn merge_summaries(
     per_shard: Vec<SummaryReport>,
     window_seconds: i64,
     service: Option<&str>,
@@ -484,7 +484,7 @@ fn merge_summaries(
 /// to the one with the largest |delta| (most significant signal). This is an
 /// approximation — a precise version would recompute current/baseline from raw
 /// per-shard partials.
-fn merge_anomalies(
+pub(crate) fn merge_anomalies(
     per_shard: Vec<AnomalyReport>,
     current_seconds: i64,
     baseline_seconds: i64,

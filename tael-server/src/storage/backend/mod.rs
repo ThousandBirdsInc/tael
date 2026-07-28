@@ -30,6 +30,7 @@ use std::sync::Arc;
 use super::DynObjectBackend;
 use super::SearchIndex;
 use super::{CommentsStore, JsonlComments};
+use cold::ColdPredicate;
 use cold::ColdTier;
 use hot::HotTier;
 use wal::WalLog;
@@ -390,55 +391,62 @@ impl Store for TaelBackend {
 
         // Mirror the real access paths so the counts describe what a query
         // actually does, not an idealized plan.
-        let (path, tiers, scanned, text_matches, index) = if let Some(ref text) = query.text {
-            let trace_ids = self.search.search_trace_ids(text, 1000)?;
-            let mut scanned = 0usize;
-            for tid in &trace_ids {
-                scanned += self.get_trace(tid)?.len();
-            }
-            (
-                "full_text_index",
-                vec!["search", "hot", "cold"],
-                scanned,
-                Some(trace_ids.len()),
-                None,
-            )
-        } else {
-            let hot = self.hot.scan_spans(query)?;
-            // `rows_scanned` counts index entries visited, which is the number
-            // that says whether the chosen index was selective. `rows_decoded`
-            // is how many survived the covering header far enough to be read
-            // back in full.
-            let index = serde_json::json!({
-                "keyspace": hot.index.keyspace(),
-                "rows_scanned": hot.rows_scanned,
-                "rows_decoded": hot.rows_decoded,
-            });
-            if hot.spans.len() >= limit {
-                // The hot tier filled the limit, so cold was never opened.
+        let (path, tiers, scanned, text_matches, index, cold_scan) =
+            if let Some(ref text) = query.text {
+                let trace_ids = self.search.search_trace_ids(text, 1000)?;
+                let mut scanned = 0usize;
+                for tid in &trace_ids {
+                    scanned += self.get_trace(tid)?.len();
+                }
                 (
-                    "hot_scan",
-                    vec!["hot"],
-                    hot.rows_scanned as usize,
+                    "full_text_index",
+                    vec!["search", "hot", "cold"],
+                    scanned,
+                    Some(trace_ids.len()),
                     None,
-                    Some(index),
+                    None,
                 )
             } else {
-                let cold_rows = self
-                    .cold
-                    .spans_since(cutoff)?
-                    .into_iter()
-                    .filter(|s| hot::span_matches(s, query, cutoff))
-                    .count();
-                (
-                    "hot_then_cold_scan",
-                    vec!["hot", "cold"],
-                    hot.rows_scanned as usize + cold_rows,
-                    None,
-                    Some(index),
-                )
-            }
-        };
+                let hot = self.hot.scan_spans(query)?;
+                // `rows_scanned` counts index entries visited, which is the number
+                // that says whether the chosen index was selective. `rows_decoded`
+                // is how many survived the covering header far enough to be read
+                // back in full.
+                let index = serde_json::json!({
+                    "keyspace": hot.index.keyspace(),
+                    "rows_scanned": hot.rows_scanned,
+                    "rows_decoded": hot.rows_decoded,
+                });
+                if hot.spans.len() >= limit {
+                    // The hot tier filled the limit, so cold was never opened.
+                    (
+                        "hot_scan",
+                        vec!["hot"],
+                        hot.rows_scanned as usize,
+                        None,
+                        Some(index),
+                        None,
+                    )
+                } else {
+                    // Mirror the real cold path, including its pushdown, and
+                    // report what the pushdown did — pruning that saves work
+                    // invisibly is pruning nobody can verify.
+                    let (cold_spans, cold_stats) =
+                        self.cold.spans_matching(&span_predicate(query, cutoff))?;
+                    let cold_rows = cold_spans
+                        .iter()
+                        .filter(|s| hot::span_matches(s, query, cutoff))
+                        .count();
+                    (
+                        "hot_then_cold_scan",
+                        vec!["hot", "cold"],
+                        hot.rows_scanned as usize + cold_rows,
+                        None,
+                        Some(index),
+                        Some(serde_json::to_value(&cold_stats)?),
+                    )
+                }
+            };
 
         let returned = self.query_traces(query)?.len();
         Ok(serde_json::json!({
@@ -446,6 +454,7 @@ impl Store for TaelBackend {
             "engine": "tael-backend",
             "access_path": path,
             "hot_index": index,
+            "cold_scan": cold_scan,
             "tiers_consulted": tiers,
             "rows_scanned": scanned,
             "rows_returned": returned,
@@ -499,12 +508,21 @@ impl Store for TaelBackend {
             let cutoff = query
                 .last_seconds
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
-            let mut cold: Vec<Span> = self
-                .cold
-                .spans_since(cutoff)?
-                .into_iter()
-                .filter(|s| hot::span_matches(s, query, cutoff))
-                .collect();
+            let needed = limit - results.len();
+            // Push the indexed filters into the Parquet scan; the residual
+            // predicate (`span_matches`) still runs on what comes back. The
+            // scan streams newest partition first and stops once the limit is
+            // covered, so history the limit would discard is never read.
+            let mut cold: Vec<Span> = Vec::new();
+            self.cold
+                .scan_spans(&span_predicate(query, cutoff), &mut |spans| {
+                    cold.extend(
+                        spans
+                            .into_iter()
+                            .filter(|s| hot::span_matches(s, query, cutoff)),
+                    );
+                    cold.len() < needed
+                })?;
             cold.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for s in cold {
                 if results.len() >= limit {
@@ -539,12 +557,21 @@ impl Store for TaelBackend {
             let cutoff = query
                 .last_seconds
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
-            let mut cold: Vec<LogRecord> = self
-                .cold
-                .logs_since(cutoff)?
-                .into_iter()
-                .filter(|l| hot::log_matches(l, query, cutoff))
-                .collect();
+            let pred = ColdPredicate {
+                since: cutoff,
+                service: query.service.clone(),
+                trace_id: query.trace_id.clone(),
+                ..Default::default()
+            };
+            let needed = limit - results.len();
+            let mut cold: Vec<LogRecord> = Vec::new();
+            self.cold.scan_logs(&pred, &mut |logs| {
+                cold.extend(
+                    logs.into_iter()
+                        .filter(|l| hot::log_matches(l, query, cutoff)),
+                );
+                cold.len() < needed
+            })?;
             cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for l in cold {
                 if results.len() >= limit {
@@ -562,12 +589,22 @@ impl Store for TaelBackend {
             let cutoff = query
                 .last_seconds
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
-            let mut cold: Vec<MetricPoint> = self
-                .cold
-                .metrics_since(cutoff)?
-                .into_iter()
-                .filter(|m| hot::metric_matches(m, query, cutoff))
-                .collect();
+            let pred = ColdPredicate {
+                since: cutoff,
+                service: query.service.clone(),
+                name: query.name.clone(),
+                ..Default::default()
+            };
+            let needed = limit - results.len();
+            let mut cold: Vec<MetricPoint> = Vec::new();
+            self.cold.scan_metrics(&pred, &mut |points| {
+                cold.extend(
+                    points
+                        .into_iter()
+                        .filter(|m| hot::metric_matches(m, query, cutoff)),
+                );
+                cold.len() < needed
+            })?;
             cold.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             for m in cold {
                 if results.len() >= limit {
@@ -750,11 +787,19 @@ impl TaelBackend {
             last_seconds: Some(last_seconds),
             ..Default::default()
         };
-        for span in self.cold.spans_since(Some(cutoff))? {
-            if hot::span_matches(&span, &cold_query, Some(cutoff)) {
-                window.push(&span);
+        let pred = ColdPredicate {
+            since: Some(cutoff),
+            service: service.map(str::to_string),
+            ..Default::default()
+        };
+        self.cold.scan_spans(&pred, &mut |spans| {
+            for span in spans {
+                if hot::span_matches(&span, &cold_query, Some(cutoff)) {
+                    window.push(&span);
+                }
             }
-        }
+            true
+        })?;
         Ok(window)
     }
 
@@ -1059,6 +1104,22 @@ fn anomalies(current: &[ServiceSummary], baseline: &[ServiceSummary]) -> Vec<Ano
         }
     }
     rows
+}
+
+/// The pushdown predicate a trace query implies for the cold tier: the
+/// filters the Parquet scan can evaluate from statistics and columns. The
+/// residual filters (attributes, operation substring, tenant) still run in
+/// `span_matches` on whatever comes back.
+fn span_predicate(
+    query: &TraceQuery,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) -> ColdPredicate {
+    ColdPredicate {
+        since: cutoff,
+        service: query.service.clone(),
+        error_only: query.status.as_deref() == Some("error"),
+        ..Default::default()
+    }
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {

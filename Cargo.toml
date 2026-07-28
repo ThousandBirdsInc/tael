@@ -56,4 +56,7 @@ chitchat = "0.10"
 # the cold tier + blob store, and Postgres for the comments store. None of
 # these are pulled into the default local build.
 object_store = { version = "0.11", features = ["gcp", "aws"] }
+# Kafka/Redpanda ingest buffer (compiled behind the `kafka` feature): a pure-
+# Rust client, so the optional feature costs no C toolchain or system libs.
+rskafka = "0.6"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }

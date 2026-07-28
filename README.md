@@ -37,7 +37,10 @@ with structured data as the default interface.
 ## Installation
 
 Supported on macOS (Intel + Apple Silicon) and Linux (x86_64 + aarch64).
-Windows is not supported — a dependency in the WAL uses unix-only file I/O.
+On Windows, `tael` installs as a **client-only** build: every query, eval,
+and annotation command works against a remote server (`--server` /
+`TAEL_SERVER`), while the server itself runs on Linux/macOS/WSL/Docker (its
+WAL uses unix-only file I/O).
 
 ```bash
 # Fastest — download a prebuilt `tael` binary (no compilation)
@@ -624,8 +627,13 @@ ingest/storage/API side; the other subcommands are the client.
 ```
 
 See [`docs/tael-backend-design.md`](docs/tael-backend-design.md) for the storage
-engine and [`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md) for
-the horizontal-scale / HA path.
+engine, [`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md) for
+the horizontal-scale / HA design, and
+[`docs/running-tael-for-a-team.md`](docs/running-tael-for-a-team.md) for the
+supported multi-node topologies (leader+standby replication with automatic
+failover, trace-sharded storage with a stateless query tier, an OTLP-splitting
+ingest tier, an optional Kafka buffer, and per-tenant storage isolation) and
+the operational rules that keep them safe.
 
 ## Embedding tael as a library
 
@@ -816,7 +824,7 @@ See [DESIGN.md](DESIGN.md) for the full design document and milestone plan.
 - [x] **M3**: `tael summarize`, `tael anomalies`, `tael correlate`, `tael watch`
 - [x] **M3.5**: comment-backed floor-raising reliability loop: issues, signals, trace-to-golden-case promotion, suite hygiene, production experiment comparison, and self-diagnostic conventions — see [`docs/tael-evals-design.md`](docs/tael-evals-design.md)
 - [x] **tael-backend**: purpose-built tiered storage engine (WAL + LSM hot tier + Parquet cold tier + content-addressed blobs + full-text search), now the default — see [`docs/tael-backend-design.md`](docs/tael-backend-design.md)
-- [ ] **M4**: object-store cold tier + horizontal scale / HA ([`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md)), MCP server, auth
+- [x] **M4**: object-store cold tier + horizontal scale / HA ([`docs/tael-server-scaling-ha.md`](docs/tael-server-scaling-ha.md), [`docs/running-tael-for-a-team.md`](docs/running-tael-for-a-team.md)), MCP server, auth
 
 ## License
 

@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 
 use crate::log_bus::LogBus;
 use crate::storage::models::{LogRecord, LogSeverity};
-use crate::storage::{BlobStore, SearchIndex, Store};
+use crate::storage::{BlobStore, PayloadIndexes, Store};
 
 /// Log bodies larger than this are offloaded to the blob store (stack traces,
 /// dumped payloads). Tuned against real corpora later (design Open Q #7).
@@ -18,31 +18,36 @@ const LOG_BODY_BLOB_THRESHOLD: usize = 8 * 1024;
 pub struct OtlpLogsService {
     store: Arc<dyn Store>,
     blobs: Arc<BlobStore>,
-    /// Full-text index shared with span ingest, so one `--text` query reaches
-    /// log bodies and LLM payloads alike.
-    search: Option<Arc<SearchIndex>>,
+    /// Full-text index routing shared with span ingest, so one `--text`
+    /// query reaches log bodies and LLM payloads alike.
+    search: Arc<PayloadIndexes>,
     bus: Arc<LogBus>,
+    /// Stamp every record with the writing principal's tenant
+    /// (`TAEL_MULTI_TENANT`). See [`crate::tenancy::stamp`].
+    multi_tenant: bool,
 }
 
 impl OtlpLogsService {
     pub fn new(
         store: Arc<dyn Store>,
         blobs: Arc<BlobStore>,
-        search: Option<Arc<SearchIndex>>,
+        search: Arc<PayloadIndexes>,
         bus: Arc<LogBus>,
+        multi_tenant: bool,
     ) -> Self {
         Self {
             store,
             blobs,
             search,
             bus,
+            multi_tenant,
         }
     }
 }
 
 /// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
 /// logs service. See [`super::otlp::SharedTraceService`].
-pub struct SharedLogsService(pub Arc<OtlpLogsService>);
+pub struct SharedLogsService(pub Arc<dyn LogsService>);
 
 #[tonic::async_trait]
 impl LogsService for SharedLogsService {
@@ -66,6 +71,12 @@ impl LogsService for OtlpLogsService {
                 "ingest at capacity; retry with backoff",
             ));
         };
+        let principal = request
+            .extensions()
+            .get::<crate::auth::Principal>()
+            .cloned();
+        let tenant = crate::tenancy::write_tenant(self.multi_tenant, principal.as_ref());
+        let search = self.search.for_tenant(&tenant);
         let req = request.into_inner();
         let mut logs = Vec::new();
         // Bodies moved to the blob store, kept here so the search index still
@@ -184,7 +195,7 @@ impl LogsService for OtlpLogsService {
         // Index bodies for full-text search. Only logs carrying a trace ID are
         // indexed: search resolves to traces, and a log with no trace has
         // nothing to resolve to.
-        if let Some(ref idx) = self.search {
+        if let Some(ref idx) = search {
             let mut indexed_any = false;
             let inline = logs.iter().filter_map(|log| {
                 let trace_id = log.trace_id.clone()?;
@@ -204,6 +215,14 @@ impl LogsService for OtlpLogsService {
                 tracing::warn!(error = %e, "failed to commit log search index");
             }
         }
+
+        // Stamp the writer's tenant last, so it overrides anything the client
+        // sent — the attribute is an authorization boundary, not client data.
+        crate::tenancy::stamp(
+            self.multi_tenant,
+            principal.as_ref(),
+            logs.iter_mut().map(|l| &mut l.attributes),
+        );
 
         let log_count = logs.len();
         if let Err(e) = self.store.insert_logs(&logs) {
