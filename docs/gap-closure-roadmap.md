@@ -29,8 +29,9 @@ the same single binary, and treats an AI agent as the primary operator.
 
 ## Implementation status
 
-**All phases implemented.** Everything below ships with tests and was verified
-end to end against a running server.
+**All phases implemented**, with the residual sub-items called out in
+**Residual gaps** below. Everything in the table ships with tests and was
+verified end to end against a running server.
 
 | Item | What landed |
 |---|---|
@@ -39,10 +40,10 @@ end to end against a running server.
 | A3 histograms | Bucket layout retained (explicit + exponential, converted at ingest), aggregation temporality stored, `histogram_quantile(phi, selector)` with `by (...)`; also fixed the PromQL lexer rejecting dotted OTel metric names |
 | A4 retention | Per-signal TOML policy with flag > env > file > default, per-signal cold-partition drops (which also fixed metric rollups never expiring), `tael config show/init` |
 | A5 benchmarks | `tael-backend` ingest/query/aggregation/compaction benches; BENCHMARKS.md leads with them and marks the DuckDB numbers as non-comparable |
-| B1 MCP | `tael mcp serve` over stdio, 19 tools mapped onto existing endpoints, SKILL.md and llm.txt as resources |
-| B2 exit codes | Category codes 0–6, `watch --exit-on` with absolute and baseline-relative thresholds, `query traces --explain` |
-| B3 search | Substring (`k~=v`) and regex (`k=~v`) attribute matchers; the text index now covers log bodies and span attribute values, not just LLM payloads |
-| B4 M3 commands | `topology`, `diff`, `get metric` |
+| B1 MCP | `tael mcp serve` over stdio (default) or streamable HTTP via `--http <addr>`, tools mapped onto existing endpoints, SKILL.md and llm.txt as resources |
+| B2 exit codes | Category codes 0–6, `watch --exit-on` with absolute, baseline-relative, and `alert:<name>` conditions, `query traces --explain` |
+| B3 search | Substring (`k~=v`) and regex (`k=~v`) attribute matchers on traces **and logs** (`query logs --attribute`); PromQL regex label matchers (`=~`/`!~`); the text index covers log bodies and span attribute values, not just LLM payloads |
+| B4 M3 commands | `topology`, `diff`, `get metric`, `ingest status` (per-pipeline accept/error/shed counters) |
 | B5 SQL | DataFusion over the default engine behind `--features sql`, same tables and column names as the DuckDB backend plus flattened LLM token/cost columns; in-memory, bounded, read-only |
 | C1 case suites | `eval suite push/pull/snapshot/list/diff`, content-addressed cases, content-derived immutable snapshot ids, byte-stable canonical JSONL round trip |
 | C2 online scoring | `score rule create/list/delete`, deterministic per-trace sampling, per-rule scored memory, scorer contract identical to `eval run`, progress and last-error reporting |
@@ -53,6 +54,30 @@ end to end against a running server.
 | D2 object storage | S3 alongside GCS for the cold tier and blob store; the blob-GC single-owner guard now covers any shared store |
 | D3 packaging | `install.sh` fetching prebuilt binaries, Homebrew formula in-repo |
 | D4 CI + contract | CI runs fmt, clippy at `-D warnings`, tests, and a build of each optional feature. A test walks the clap tree and fails when a command is missing from SKILL.md and llm.txt — it immediately found eleven that had shipped undocumented |
+
+### Closed after the initial pass (2026-07)
+
+A follow-up audit found several sub-items the table above quietly narrowed or
+omitted. These are now built: MCP streamable HTTP (`mcp serve --http`),
+`watch --exit-on alert:<name>`, `tael ingest status`, PromQL regex matchers,
+structured log-attribute filters (`query logs --attribute`), the evals TUI
+sort/focus/comment keys, `eval case prune`, `signal compare --by` and
+`signal trend --last`, `experiment compare --metric`, README's missing
+`:4318` documentation, ingest backpressure (`TAEL_INGEST_MAX_IN_FLIGHT`,
+shed with retryable statuses), a metric series-cardinality cap
+(`TAEL_METRIC_SERIES_LIMIT`), leader-gated blob GC in coordinated clusters,
+and engine self-metrics (`tael.engine.*`).
+
+### Residual gaps (known, not yet built)
+
+- **Git/prompt span conventions** (`tael.git.commit`, `tael.git.branch`,
+  `tael.prompt.name`) and `--group-by` on `experiment compare`/`eval report`.
+- **D2 HA hardening**: a kill-the-leader failover test in CI and a "running
+  tael for a team" operations doc; docs/tael-server-scaling-ha.md phases 5–7
+  (pushdown cold reads, DataFusion hot∪cold unification, ingest-only mode).
+- **D3 Windows**: the client CLI does not build for Windows (WAL uses
+  unix-only file I/O); the planned client/server split was not pursued.
+- **DuckDB→tael-backend migration tool** (tracked in the backend plan's B5).
 
 ### Deviations from the plan, and why
 
@@ -70,6 +95,11 @@ default build's error names both plus the structured alternatives.
 **Tenancy is authorization, not isolation.** Physical isolation needs a
 storage key-schema change. What shipped is enforced at the query layer and
 documented as such rather than sold as more than it is.
+
+**Similarity search is a flat scan, not an HNSW index.** `embed`/`similar`/
+`cluster` compute brute-force cosine over the BYO-embedder store. That answers
+the C5 use case at current scales; an ANN index remains future work if flat
+scans stop scaling.
 
 ### Findings that were not in the plan
 
