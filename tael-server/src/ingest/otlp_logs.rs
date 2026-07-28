@@ -202,8 +202,10 @@ impl LogsService for OtlpLogsService {
         let log_count = logs.len();
         if let Err(e) = self.store.insert_logs(&logs) {
             tracing::error!(error = %e, "failed to insert logs");
+            super::stats::record_error(super::stats::Pipeline::OtlpLogs);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpLogs, log_count);
 
         if let Err(e) = self.bus.publish(&logs) {
             tracing::warn!(error = %e, "failed to publish logs to bus");

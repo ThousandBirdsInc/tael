@@ -4,3 +4,4 @@ pub mod otlp_http;
 pub mod otlp_logs;
 pub mod otlp_metrics;
 pub mod prom_remote_write;
+pub mod stats;

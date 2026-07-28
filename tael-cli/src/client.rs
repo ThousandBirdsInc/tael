@@ -286,6 +286,18 @@ impl TaelClient {
         Ok(resp)
     }
 
+    pub async fn ingest_status(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/ingest/status", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn topology(&self, last: Option<&str>, limit: u32) -> Result<Value> {
         let mut params = vec![("limit", limit.to_string())];
         if let Some(l) = last {

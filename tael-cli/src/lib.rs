@@ -281,6 +281,11 @@ pub enum Commands {
         #[arg(long, default_value = "5")]
         k: usize,
     },
+    /// Health of the server's ingestion pipelines
+    Ingest {
+        #[command(subcommand)]
+        action: IngestAction,
+    },
     /// Service dependency graph derived from span parent/child edges
     Topology {
         /// Time window (e.g. 1h, 24h)
@@ -321,8 +326,9 @@ pub enum Commands {
         interval: u64,
         /// Stop and exit 6 when this condition becomes true. Repeatable (any
         /// match stops). Format: <field><op><value>, where value is a number
-        /// or a multiple of the first sample.
-        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, span_count<1
+        /// or a multiple of the first sample, or alert:<name> to stop when the
+        /// named server alert rule fires.
+        /// Examples: error_rate>0.05, p95_ms>2x, delta_error_count>0, alert:high-error-rate
         #[arg(long = "exit-on")]
         exit_on: Vec<String>,
         /// Give up after this many ticks and exit 0. Without it, `watch` polls
@@ -510,6 +516,12 @@ pub enum ConfigAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum IngestAction {
+    /// Per-pipeline accept counters: batches, records, errors, last accepted
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -1342,6 +1354,11 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
         Commands::Cluster { k } => {
             commands::similar::cluster(&client, &opts.format, k).await?;
         }
+        Commands::Ingest { action } => match action {
+            IngestAction::Status => {
+                commands::ingest::status(&client, &opts.format).await?;
+            }
+        },
         Commands::Topology { last, limit } => {
             commands::topology::run(&client, &opts.format, last, limit).await?;
         }

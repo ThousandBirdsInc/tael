@@ -154,8 +154,10 @@ impl MetricsService for OtlpMetricsService {
         let count = points.len();
         if let Err(e) = self.store.insert_metrics(&points) {
             tracing::error!(error = %e, "failed to insert metrics");
+            super::stats::record_error(super::stats::Pipeline::OtlpMetrics);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpMetrics, count);
 
         tracing::debug!(metric_points = count, "ingested metrics");
 

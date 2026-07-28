@@ -242,8 +242,10 @@ impl TraceService for OtlpTraceService {
         let span_count = spans.len();
         if let Err(e) = self.store.insert_spans(&spans) {
             tracing::error!(error = %e, "failed to insert spans");
+            super::stats::record_error(super::stats::Pipeline::OtlpSpans);
             return Err(Status::internal(format!("storage error: {e}")));
         }
+        super::stats::record_accepted(super::stats::Pipeline::OtlpSpans, span_count);
 
         // Make any newly indexed payload text searchable.
         if indexed_any

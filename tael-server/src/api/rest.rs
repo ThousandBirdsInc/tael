@@ -131,6 +131,7 @@ pub fn router(
         .route("/api/v1/evals/runner-spans", post(eval_add_runner_span))
         .route("/api/v1/blobs", post(put_blob))
         .route("/api/v1/blobs/{sha256}", get(get_blob))
+        .route("/api/v1/ingest/status", get(ingest_status))
         .route("/api/v1/write", post(prom_remote_write))
         // Datadog trace-agent (dd-trace) intake, also usable through this
         // listener via DD_TRACE_AGENT_URL. See `ingest::datadog`.
@@ -2048,6 +2049,18 @@ async fn alert_events(
 
 /// Live alert feed. This is the long-poll primitive a babysitting agent blocks
 /// on: connect once and be woken when something changes, instead of polling.
+/// Per-pipeline ingest counters for this node: what arrived, what persisted,
+/// what failed, and when each pipeline last accepted a batch.
+async fn ingest_status() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "pipelines": crate::ingest::stats::snapshot(),
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+        })),
+    )
+}
+
 async fn live_alerts(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {

@@ -76,7 +76,58 @@ struct App {
     eval_cases: Vec<EvalCaseRow>,
     eval_state: TableState,
     eval_failures_only: bool,
+    eval_sort: EvalSort,
+    eval_focus: EvalFocus,
+    eval_detail_scroll: u16,
     panels: Panels,
+}
+
+/// Sort order for the eval case table, cycled with `s`.
+#[derive(Clone, Copy, PartialEq)]
+enum EvalSort {
+    /// The order the server returned (case index).
+    RunOrder,
+    CaseId,
+    /// Worst score first, so the cases needing attention lead.
+    Score,
+    /// Slowest first.
+    Duration,
+    /// Most expensive first.
+    Cost,
+    /// `fail` sorts before `pass`, so failures lead.
+    Status,
+}
+
+impl EvalSort {
+    fn next(self) -> Self {
+        match self {
+            Self::RunOrder => Self::CaseId,
+            Self::CaseId => Self::Score,
+            Self::Score => Self::Duration,
+            Self::Duration => Self::Cost,
+            Self::Cost => Self::Status,
+            Self::Status => Self::RunOrder,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::RunOrder => "run order",
+            Self::CaseId => "case id",
+            Self::Score => "score",
+            Self::Duration => "duration",
+            Self::Cost => "cost",
+            Self::Status => "status",
+        }
+    }
+}
+
+/// Which Evals pane `j`/`k` act on, cycled with Tab.
+#[derive(Clone, Copy, PartialEq)]
+enum EvalFocus {
+    Cases,
+    /// The selected-case pane; `j`/`k` scroll its score breakdown.
+    Detail,
 }
 
 struct SpanViewer {
@@ -273,6 +324,9 @@ impl App {
             eval_cases: Vec::new(),
             eval_state: TableState::default(),
             eval_failures_only: false,
+            eval_sort: EvalSort::RunOrder,
+            eval_focus: EvalFocus::Cases,
+            eval_detail_scroll: 0,
             panels: Panels::new("1h"),
         }
     }
@@ -384,6 +438,22 @@ impl App {
                         .map(|t| t.to_lowercase().contains(&q))
                         .unwrap_or(false)
             });
+        }
+        match self.eval_sort {
+            EvalSort::RunOrder => {}
+            EvalSort::CaseId => cases.sort_by(|a, b| a.case_id.cmp(&b.case_id)),
+            EvalSort::Score => cases.sort_by(|a, b| {
+                let sa = primary_score(a).unwrap_or(f64::INFINITY);
+                let sb = primary_score(b).unwrap_or(f64::INFINITY);
+                sa.total_cmp(&sb)
+            }),
+            EvalSort::Duration => cases.sort_by(|a, b| {
+                let da = a.duration_ms.unwrap_or(f64::NEG_INFINITY);
+                let db = b.duration_ms.unwrap_or(f64::NEG_INFINITY);
+                db.total_cmp(&da)
+            }),
+            EvalSort::Cost => cases.sort_by(|a, b| b.cost_usd.total_cmp(&a.cost_usd)),
+            EvalSort::Status => cases.sort_by(|a, b| a.status.cmp(&b.status)),
         }
         cases
     }
@@ -609,7 +679,11 @@ impl App {
             Some(id) => id.clone(),
             None => return,
         };
-        let span_id = self.selected_waterfall_span().map(|s| s.span_id.clone());
+        // The waterfall selection only describes this trace when the detail
+        // view is open; a comment from the Evals tab is trace-level.
+        let span_id = (self.tab == Tab::Detail)
+            .then(|| self.selected_waterfall_span().map(|s| s.span_id.clone()))
+            .flatten();
         match self
             .client
             .add_comment(&trace_id, &body, Some("tui"), span_id.as_deref())
@@ -824,6 +898,20 @@ impl App {
                     self.eval_state.select(None);
                 }
             }
+            KeyCode::Char('s') => {
+                if self.tab == Tab::Evals {
+                    self.eval_sort = self.eval_sort.next();
+                }
+            }
+            KeyCode::Tab => {
+                if self.tab == Tab::Evals {
+                    self.eval_focus = match self.eval_focus {
+                        EvalFocus::Cases => EvalFocus::Detail,
+                        EvalFocus::Detail => EvalFocus::Cases,
+                    };
+                    self.eval_detail_scroll = 0;
+                }
+            }
             KeyCode::Char('r') => {
                 if self.tab == Tab::Evals {
                     return Some("refresh_evals");
@@ -856,6 +944,18 @@ impl App {
             KeyCode::Char('c') => {
                 if self.tab == Tab::Detail {
                     self.comment_input = Some(String::new());
+                } else if self.tab == Tab::Evals {
+                    // Comment on the selected case's trace without leaving the
+                    // evals view — failure review happens right here.
+                    let trace_id = self
+                        .eval_state
+                        .selected()
+                        .and_then(|i| self.filtered_eval_cases().into_iter().nth(i))
+                        .and_then(|c| c.trace_id.clone());
+                    if let Some(trace_id) = trace_id {
+                        self.current_trace_id = Some(trace_id);
+                        self.comment_input = Some(String::new());
+                    }
                 }
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -884,10 +984,15 @@ impl App {
                         self.timeline_state.select(Some(i.min(len - 1)));
                     }
                 } else if self.tab == Tab::Evals {
-                    let len = self.filtered_eval_cases().len();
-                    if len > 0 {
-                        let i = self.eval_state.selected().map(|i| i + 1).unwrap_or(0);
-                        self.eval_state.select(Some(i.min(len - 1)));
+                    if self.eval_focus == EvalFocus::Detail {
+                        self.eval_detail_scroll = self.eval_detail_scroll.saturating_add(1);
+                    } else {
+                        let len = self.filtered_eval_cases().len();
+                        if len > 0 {
+                            let i = self.eval_state.selected().map(|i| i + 1).unwrap_or(0);
+                            self.eval_state.select(Some(i.min(len - 1)));
+                            self.eval_detail_scroll = 0;
+                        }
                     }
                 } else if self.tab == Tab::Services {
                     let len = self.services.len();
@@ -921,12 +1026,17 @@ impl App {
                         .unwrap_or(0);
                     self.timeline_state.select(Some(i));
                 } else if self.tab == Tab::Evals {
-                    let i = self
-                        .eval_state
-                        .selected()
-                        .map(|i| i.saturating_sub(1))
-                        .unwrap_or(0);
-                    self.eval_state.select(Some(i));
+                    if self.eval_focus == EvalFocus::Detail {
+                        self.eval_detail_scroll = self.eval_detail_scroll.saturating_sub(1);
+                    } else {
+                        let i = self
+                            .eval_state
+                            .selected()
+                            .map(|i| i.saturating_sub(1))
+                            .unwrap_or(0);
+                        self.eval_state.select(Some(i));
+                        self.eval_detail_scroll = 0;
+                    }
                 } else if self.tab == Tab::Services {
                     let i = self
                         .services_state
@@ -1049,6 +1159,18 @@ fn parse_comments(val: &Value) -> Vec<Comment> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The score a case is displayed and sorted on: `correctness`, then `pass`,
+/// then whichever score came first.
+fn primary_score(case: &EvalCaseRow) -> Option<f64> {
+    case.scores.as_object().and_then(|scores| {
+        scores
+            .get("correctness")
+            .or_else(|| scores.get("pass"))
+            .or_else(|| scores.iter().next().map(|(_, v)| v))
+            .and_then(|v| v.as_f64())
+    })
 }
 
 fn parse_eval_run(val: &Value) -> EvalRunRow {
@@ -1735,10 +1857,11 @@ fn draw_evals(frame: &mut Frame, area: Rect, app: &mut App) {
             run.failed_cases
         )),
         Line::from(format!(
-            "avg correctness: {}   cost: ${:.4}   f:failures={}   r:refresh",
+            "avg correctness: {}   cost: ${:.4}   f:failures={}   s:sort={}   r:refresh",
             correctness,
             run.cost_usd,
-            if app.eval_failures_only { "on" } else { "off" }
+            if app.eval_failures_only { "on" } else { "off" },
+            app.eval_sort.label()
         )),
     ];
     frame.render_widget(
@@ -1810,7 +1933,12 @@ fn draw_evals(frame: &mut Frame, area: Rect, app: &mut App) {
     .block(
         Block::default()
             .title(format!(" Cases ({}) ", cases.len()))
-            .borders(Borders::ALL),
+            .borders(Borders::ALL)
+            .border_style(if app.eval_focus == EvalFocus::Cases {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            }),
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(table, chunks[1], &mut app.eval_state);
@@ -1828,21 +1956,51 @@ fn draw_evals(frame: &mut Frame, area: Rect, app: &mut App) {
                     case.status,
                     case.trace_id.as_deref().unwrap_or("-")
                 )),
-                Line::from("Enter: open trace   f:failures only   r:refresh   /:filter"),
+                Line::from(
+                    "Enter: open trace   c:comment   Tab:focus   f:failures only   r:refresh",
+                ),
             ];
+            // Full score breakdown; Tab focuses this pane so j/k can scroll a
+            // breakdown taller than the pane.
+            if let Some(scores) = case.scores.as_object() {
+                for (name, value) in scores {
+                    let value = value
+                        .as_f64()
+                        .map(|v| format!("{v:.3}"))
+                        .unwrap_or_else(|| value.to_string());
+                    lines.push(Line::from(format!("  {name}: {value}")));
+                }
+            }
             if let Some(comment) = case.comments.last() {
                 lines.push(Line::from(format!("{}: {}", comment.author, comment.body)));
+            }
+            if app.tab == Tab::Evals
+                && let Some(ref input) = app.comment_input
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(" > ", Style::default().fg(Color::Cyan).bold()),
+                    Span::raw(input.clone()),
+                    Span::styled("█", Style::default().fg(Color::Cyan)),
+                ]));
             }
             lines
         }
         None => vec![Line::from("No case selected.")],
     };
     frame.render_widget(
-        Paragraph::new(detail).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .title(" Selected Case ")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(detail)
+            .wrap(Wrap { trim: true })
+            .scroll((app.eval_detail_scroll, 0))
+            .block(
+                Block::default()
+                    .title(" Selected Case ")
+                    .borders(Borders::ALL)
+                    .border_style(if app.eval_focus == EvalFocus::Detail {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    }),
+            ),
         chunks[2],
     );
 }

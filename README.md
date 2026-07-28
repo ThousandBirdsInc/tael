@@ -491,9 +491,11 @@ Runs the server in the same binary. Flags fall back to the matching env var
 | `--last` | Time window or PromQL selector lookback | `--last 5m` |
 | `--limit` | Max results in filter mode (default 500) | `--limit 1000` |
 
-PromQL support is intentionally small: bare selectors, `{label="value"}`,
-`rate(metric[5m])`, and `sum|avg|min|max|count` with optional `by (...)`.
-Binary operators, regex matchers, `histogram_quantile`, subqueries, offset, and
+PromQL support is intentionally small: bare selectors, `{label="value"}`
+with exact (`=`, `!=`) and anchored regex (`=~`, `!~`) matchers,
+`rate(metric[5m])`, `sum|avg|min|max|count` with optional `by (...)`,
+`histogram_quantile(phi, selector)`, and a top-level scalar comparison
+(`<expr> > 0.05`). Binary operators between series, subqueries, offset, and
 range queries are not supported.
 
 ### `tael query sql`

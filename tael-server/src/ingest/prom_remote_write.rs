@@ -120,7 +120,11 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
     }
 
     let count = points.len();
-    store.insert_metrics(&points)?;
+    if let Err(e) = store.insert_metrics(&points) {
+        super::stats::record_error(super::stats::Pipeline::RemoteWrite);
+        return Err(e);
+    }
+    super::stats::record_accepted(super::stats::Pipeline::RemoteWrite, count);
     Ok(count)
 }
 

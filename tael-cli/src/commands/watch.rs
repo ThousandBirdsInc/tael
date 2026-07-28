@@ -20,7 +20,22 @@ pub async fn run(
     max_ticks: Option<u64>,
 ) -> Result<()> {
     let window = last.as_deref().unwrap_or("1m");
-    let conditions = exit_on
+    // `alert:<name>` conditions ride on the server's alert engine instead of a
+    // summary field; everything else is a threshold over the tick.
+    let (alert_names, field_exprs): (Vec<&String>, Vec<&String>) =
+        exit_on.iter().partition(|c| c.starts_with("alert:"));
+    let alert_names: Vec<String> = alert_names
+        .into_iter()
+        .map(|c| c["alert:".len()..].trim().to_string())
+        .collect();
+    if alert_names.iter().any(String::is_empty) {
+        return Err(CategorizedError::new(
+            ExitCategory::BadQuery,
+            "`alert:` condition is missing a rule name (try alert:<name>)".to_string(),
+        )
+        .into());
+    }
+    let conditions = field_exprs
         .iter()
         .map(|c| Condition::parse(c))
         .collect::<Result<Vec<_>>>()
@@ -49,13 +64,40 @@ pub async fn run(
 
         // Conditions are checked against the tick just printed, so the output
         // always ends with the sample that tripped it.
-        let tripped: Vec<Trip> = conditions
+        let mut tripped: Vec<Value> = conditions
             .iter()
             .filter_map(|c| {
                 let baseline = baselines.get(&c.field).copied().filter(|b| !b.is_nan());
                 c.evaluate(&delta, baseline)
             })
+            .map(|trip: Trip| serde_json::to_value(trip).unwrap_or(Value::Null))
             .collect();
+
+        if !alert_names.is_empty() {
+            let listing = client.list_alerts().await?;
+            let rules = listing["alerts"].as_array().cloned().unwrap_or_default();
+            for name in &alert_names {
+                let rule = rules
+                    .iter()
+                    .find(|r| r["name"].as_str() == Some(name.as_str()));
+                // A missing rule must not look like a healthy system.
+                let Some(rule) = rule else {
+                    return Err(CategorizedError::new(
+                        ExitCategory::BadQuery,
+                        format!("alert rule `{name}` does not exist on the server"),
+                    )
+                    .into());
+                };
+                if rule["state"].as_str() == Some("firing") {
+                    tripped.push(json!({
+                        "condition": format!("alert:{name}"),
+                        "alert": name,
+                        "state": "firing",
+                        "query": rule["query"],
+                    }));
+                }
+            }
+        }
 
         if !tripped.is_empty() {
             let verdict = json!({

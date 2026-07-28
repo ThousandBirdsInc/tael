@@ -5,6 +5,7 @@
 //! ```text
 //! metric_name                                  bare selector
 //! metric_name{label="value", other!="x"}       labelled selector
+//! metric_name{label=~"re.*", other!~"re.*"}    regex matchers (anchored)
 //! rate(metric_name{...}[5m])                   rate over a range
 //! sum|avg|min|max|count(expr)                  aggregators
 //! sum by (label1,label2) (expr)
@@ -18,9 +19,8 @@
 //! `le`-labelled bucket series as in Prometheus — tael stores each data point's
 //! whole bucket layout on the point. See [`eval_histogram_quantile`].
 //!
-//! Not supported (yet): binary ops, offset, subqueries, `without`, regex
-//! matchers (`=~`/`!~`), time shifting. Anything outside the grammar returns a
-//! parse error.
+//! Not supported (yet): binary ops, offset, subqueries, `without`, time
+//! shifting. Anything outside the grammar returns a parse error.
 
 use std::collections::HashMap;
 
@@ -113,12 +113,17 @@ pub struct LabelMatcher {
     pub name: String,
     pub value: String,
     pub op: MatchOp,
+    /// Compiled pattern for `=~`/`!~`, anchored like Prometheus's matchers.
+    /// `None` for the exact operators.
+    pub re: Option<regex::Regex>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchOp {
     Eq,
     NotEq,
+    Re,
+    NotRe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,15 +251,33 @@ impl<'a> Parser<'a> {
                 break;
             }
             let name = self.parse_ident()?;
-            let op = if self.eat("=") {
-                MatchOp::Eq
+            // Two-character operators first, or `=~` parses as `=` with a
+            // value that starts with `~`.
+            let op = if self.eat("=~") {
+                MatchOp::Re
+            } else if self.eat("!~") {
+                MatchOp::NotRe
             } else if self.eat("!=") {
                 MatchOp::NotEq
+            } else if self.eat("=") {
+                MatchOp::Eq
             } else {
-                bail!("expected '=' or '!=' after label name");
+                bail!("expected '=', '!=', '=~', or '!~' after label name");
             };
             let value = self.parse_string()?;
-            out.push(LabelMatcher { name, value, op });
+            let re = match op {
+                MatchOp::Re | MatchOp::NotRe => Some(
+                    regex::Regex::new(&format!("^(?:{value})$"))
+                        .map_err(|e| anyhow!("invalid regex `{value}`: {e}"))?,
+                ),
+                MatchOp::Eq | MatchOp::NotEq => None,
+            };
+            out.push(LabelMatcher {
+                name,
+                value,
+                op,
+                re,
+            });
             self.skip_ws();
             if self.eat(",") {
                 continue;
@@ -667,11 +690,14 @@ fn matches_labels(point: &MetricPoint, matchers: &[LabelMatcher]) -> bool {
         } else {
             point.attributes.get(&m.name).map(|s| s.as_str())
         };
+        // An absent label matches like the empty string, as in Prometheus.
         let matched = match (m.op, actual) {
             (MatchOp::Eq, Some(v)) => v == m.value,
             (MatchOp::Eq, None) => m.value.is_empty(),
             (MatchOp::NotEq, Some(v)) => v != m.value,
             (MatchOp::NotEq, None) => !m.value.is_empty(),
+            (MatchOp::Re, v) => m.re.as_ref().is_some_and(|re| re.is_match(v.unwrap_or(""))),
+            (MatchOp::NotRe, v) => !m.re.as_ref().is_some_and(|re| re.is_match(v.unwrap_or(""))),
         };
         if !matched {
             return false;
@@ -836,6 +862,59 @@ mod tests {
         assert_eq!(s.matchers.len(), 2);
         assert_eq!(s.matchers[0].op, MatchOp::Eq);
         assert_eq!(s.matchers[1].op, MatchOp::NotEq);
+    }
+
+    #[test]
+    fn parses_regex_matchers() {
+        let e = parse(r#"http_requests{service=~"api|web",method!~"GET.*"}"#).unwrap();
+        let Expr::Selector(s) = e else {
+            panic!("expected selector");
+        };
+        assert_eq!(s.matchers[0].op, MatchOp::Re);
+        assert_eq!(s.matchers[1].op, MatchOp::NotRe);
+        assert!(s.matchers.iter().all(|m| m.re.is_some()));
+    }
+
+    #[test]
+    fn rejects_invalid_regex() {
+        assert!(parse(r#"http_requests{service=~"(unclosed"}"#).is_err());
+    }
+
+    #[test]
+    fn regex_matchers_are_anchored_and_treat_absent_as_empty() {
+        let point = |service: &str, method: Option<&str>| MetricPoint {
+            timestamp: Utc::now(),
+            service: service.into(),
+            name: "http_requests".into(),
+            metric_type: MetricType::Gauge,
+            value: 1.0,
+            unit: String::new(),
+            attributes: method
+                .map(|m| HashMap::from([("method".to_string(), m.to_string())]))
+                .unwrap_or_default(),
+            histogram: None,
+        };
+        let matchers = |q: &str| {
+            let Expr::Selector(s) = parse(q).unwrap() else {
+                panic!("expected selector");
+            };
+            s.matchers
+        };
+
+        // Anchored: `api` must match the whole value, not a substring of it.
+        let m = matchers(r#"http_requests{service=~"api"}"#);
+        assert!(matches_labels(&point("api", None), &m));
+        assert!(!matches_labels(&point("api-gateway", None), &m));
+
+        let m = matchers(r#"http_requests{service=~"api.*"}"#);
+        assert!(matches_labels(&point("api-gateway", None), &m));
+
+        // An absent label matches like the empty string.
+        let m = matchers(r#"http_requests{method=~".*"}"#);
+        assert!(matches_labels(&point("api", None), &m));
+        let m = matchers(r#"http_requests{method!~"GET"}"#);
+        assert!(matches_labels(&point("api", None), &m));
+        assert!(!matches_labels(&point("api", Some("GET")), &m));
     }
 
     #[test]

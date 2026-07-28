@@ -146,12 +146,14 @@ pub async fn handle_traces(
     let span_count = spans.len();
     if let Err(e) = store.insert_spans(&spans) {
         tracing::error!(error = %e, "failed to insert datadog spans");
+        super::stats::record_error(super::stats::Pipeline::Datadog);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("storage error: {e}"),
         )
             .into_response();
     }
+    super::stats::record_accepted(super::stats::Pipeline::Datadog, span_count);
     if let Err(e) = bus.publish(&spans) {
         tracing::warn!(error = %e, "failed to publish spans to bus");
     }

@@ -9,6 +9,7 @@ pub mod diagnose;
 pub mod eval;
 pub mod experiment;
 pub mod get;
+pub mod ingest;
 pub mod issue;
 pub mod query;
 pub mod reliability;
