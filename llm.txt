@@ -402,12 +402,16 @@ tael ingest status
 ```
 
 `server status` health-checks the server (hits `/healthz`). `ingest status`
-reports per-pipeline accept counters — batches, records, errors, and the last
-accepted time for OTLP spans/logs/metrics, Prometheus remote-write, and the
-Datadog intake — so "no data" splits into "nothing arriving" vs "storage
-failing" without log access. Shape:
-`{"pipelines": [{"pipeline", "batches", "records", "errors",
-"last_accepted_at"}], "generated_at"}`.
+reports per-pipeline accept counters — batches, records, errors, shed
+(refused at admission under backpressure), and the last accepted time for
+OTLP spans/logs/metrics, Prometheus remote-write, and the Datadog intake —
+so "no data" splits into "nothing arriving" vs "storage failing" without log
+access. Shape: `{"pipelines": [{"pipeline", "batches", "records", "errors",
+"shed", "last_accepted_at"}], "backpressure": {"in_flight",
+"max_in_flight"}, "generated_at"}`. The server sheds ingest batches with
+gRPC RESOURCE_EXHAUSTED / HTTP 429 when more than
+`TAEL_INGEST_MAX_IN_FLIGHT` (default 512, 0 = unbounded) batches are in
+flight; exporters should retry with backoff.
 
 ### Output parsing notes
 

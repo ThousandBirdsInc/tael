@@ -2071,6 +2071,11 @@ async fn ingest_status() -> impl IntoResponse {
         StatusCode::OK,
         Json(serde_json::json!({
             "pipelines": crate::ingest::stats::snapshot(),
+            "backpressure": {
+                "in_flight": crate::ingest::backpressure::in_flight(),
+                // 0 = unbounded (TAEL_INGEST_MAX_IN_FLIGHT=0)
+                "max_in_flight": crate::ingest::backpressure::max_in_flight(),
+            },
             "generated_at": chrono::Utc::now().to_rfc3339(),
         })),
     )

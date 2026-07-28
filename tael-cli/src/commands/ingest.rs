@@ -23,6 +23,7 @@ pub async fn status(client: &TaelClient, format: &OutputFormat) -> Result<()> {
                 "BATCHES",
                 "RECORDS",
                 "ERRORS",
+                "SHED",
                 "LAST ACCEPTED",
             ]);
             for p in &pipelines {
@@ -31,6 +32,7 @@ pub async fn status(client: &TaelClient, format: &OutputFormat) -> Result<()> {
                     p["batches"].as_u64().unwrap_or(0).to_string(),
                     p["records"].as_u64().unwrap_or(0).to_string(),
                     p["errors"].as_u64().unwrap_or(0).to_string(),
+                    p["shed"].as_u64().unwrap_or(0).to_string(),
                     p["last_accepted_at"]
                         .as_str()
                         .unwrap_or("never")
@@ -38,6 +40,16 @@ pub async fn status(client: &TaelClient, format: &OutputFormat) -> Result<()> {
                 ]);
             }
             println!("{table}");
+            let bp = &result["backpressure"];
+            if let (Some(in_flight), Some(max)) =
+                (bp["in_flight"].as_u64(), bp["max_in_flight"].as_u64())
+            {
+                if max == 0 {
+                    println!("admission: {in_flight} in flight (unbounded)");
+                } else {
+                    println!("admission: {in_flight}/{max} in flight");
+                }
+            }
         }
     }
     Ok(())

@@ -54,6 +54,14 @@ pub struct Sample {
 // ── Handler ─────────────────────────────────────────────────────────
 
 pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoResponse {
+    let Some(_permit) = super::backpressure::try_acquire() else {
+        super::stats::record_shed(super::stats::Pipeline::RemoteWrite);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "ingest at capacity; retry with backoff",
+        )
+            .into_response();
+    };
     match decode_and_insert(store.as_ref(), &body) {
         Ok(count) => {
             tracing::debug!(metric_points = count, "ingested prom remote-write");

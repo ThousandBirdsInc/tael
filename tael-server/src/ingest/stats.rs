@@ -29,6 +29,8 @@ struct Counter {
     batches: AtomicU64,
     records: AtomicU64,
     errors: AtomicU64,
+    /// Batches refused at admission because the node was at capacity.
+    shed: AtomicU64,
     /// Unix millis of the last accepted batch; 0 = never.
     last_accepted_ms: AtomicI64,
 }
@@ -39,6 +41,7 @@ pub struct PipelineStatus {
     pub batches: u64,
     pub records: u64,
     pub errors: u64,
+    pub shed: u64,
     /// RFC3339 time of the last accepted batch, absent when nothing has
     /// arrived since the process started.
     pub last_accepted_at: Option<String>,
@@ -56,6 +59,7 @@ impl Counter {
             batches: AtomicU64::new(0),
             records: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            shed: AtomicU64::new(0),
             last_accepted_ms: AtomicI64::new(0),
         }
     }
@@ -67,6 +71,7 @@ impl Counter {
             batches: self.batches.load(Ordering::Relaxed),
             records: self.records.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
+            shed: self.shed.load(Ordering::Relaxed),
             last_accepted_at: (last_ms > 0)
                 .then(|| chrono::DateTime::from_timestamp_millis(last_ms))
                 .flatten()
@@ -97,6 +102,11 @@ pub fn record_accepted(pipeline: Pipeline, records: usize) {
 /// Record a batch that failed to persist.
 pub fn record_error(pipeline: Pipeline) {
     counter(pipeline).errors.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a batch shed at admission (backpressure).
+pub fn record_shed(pipeline: Pipeline) {
+    counter(pipeline).shed.fetch_add(1, Ordering::Relaxed);
 }
 
 /// A snapshot of every pipeline, in a fixed order.

@@ -60,6 +60,12 @@ impl LogsService for OtlpLogsService {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
+        let Some(_permit) = super::backpressure::try_acquire() else {
+            super::stats::record_shed(super::stats::Pipeline::OtlpLogs);
+            return Err(Status::resource_exhausted(
+                "ingest at capacity; retry with backoff",
+            ));
+        };
         let req = request.into_inner();
         let mut logs = Vec::new();
         // Bodies moved to the blob store, kept here so the search index still

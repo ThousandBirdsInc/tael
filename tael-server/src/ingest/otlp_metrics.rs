@@ -45,6 +45,12 @@ impl MetricsService for OtlpMetricsService {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
+        let Some(_permit) = super::backpressure::try_acquire() else {
+            super::stats::record_shed(super::stats::Pipeline::OtlpMetrics);
+            return Err(Status::resource_exhausted(
+                "ingest at capacity; retry with backoff",
+            ));
+        };
         let req = request.into_inner();
         let mut points: Vec<MetricPoint> = Vec::new();
 

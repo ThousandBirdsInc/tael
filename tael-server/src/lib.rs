@@ -99,6 +99,33 @@ impl ServerRunOptions {
     }
 }
 
+/// Whether this node may garbage-collect the (possibly shared) blob store.
+///
+/// On a shared store, per-node mark-and-sweep would delete blobs other shards
+/// still reference, so exactly one owner must run it. In a coordinated cluster
+/// the elected leader is that owner — checked live each pass, so GC ownership
+/// follows failover instead of dying with a statically designated node.
+/// Without a cluster the operator designates the owner statically.
+#[derive(Clone)]
+enum BlobGcOwnership {
+    /// Node-local blob store: every node owns its own blobs and GCs freely.
+    Always,
+    /// Shared store, no cluster, not the designated coordinator.
+    Never,
+    /// Shared store in a coordinated cluster: GC only while leader.
+    Leader(Arc<cluster::ClusterCoordinator>),
+}
+
+impl BlobGcOwnership {
+    fn may_gc(&self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Leader(c) => c.is_leader(),
+        }
+    }
+}
+
 /// Periodically roll aged signals into the cold tier and drop expired
 /// partitions, following the resolved [`RetentionPolicy`]. Runs the (blocking)
 /// compaction off the async executor. A 0-hour hot-tier window compacts
@@ -106,7 +133,7 @@ impl ServerRunOptions {
 fn spawn_span_compactor(
     backend: Arc<TaelBackend>,
     blobs: Arc<BlobStore>,
-    blob_gc_enabled: bool,
+    gc_ownership: BlobGcOwnership,
     policy: retention::RetentionPolicy,
 ) {
     tokio::spawn(async move {
@@ -117,6 +144,9 @@ fn spawn_span_compactor(
             let backend = Arc::clone(&backend);
             let blobs = Arc::clone(&blobs);
             let policy = policy.clone();
+            // Sampled per pass, so a node that loses leadership stops GCing on
+            // its next tick and the new leader picks it up.
+            let blob_gc_enabled = gc_ownership.may_gc();
             let result = tokio::task::spawn_blocking(move || {
                 // One clock for the whole pass, so signals don't drift apart
                 // across a long compaction.
@@ -530,22 +560,33 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
                     comments,
                 )?);
                 search = Some(backend.search_index());
-                // Blob GC single-owner guard: on a shared (GCS) blob store,
-                // per-node mark-and-sweep would delete blobs other shards still
-                // reference, so it only runs on the designated coordinator. On a
-                // node-local store every node owns its own blobs and GCs freely.
-                let blob_gc_enabled =
-                    !config.object_store.blobs_shared() || config.object_store.blob_gc_coordinator;
-                if !blob_gc_enabled {
+                // Blob GC single-owner guard: on a shared (object-store) blob
+                // store, per-node mark-and-sweep would delete blobs other
+                // shards still reference. In a coordinated cluster the elected
+                // leader owns GC (re-checked every pass, so ownership follows
+                // failover); without a cluster, the operator designates one
+                // owner statically. Node-local stores GC freely.
+                let gc_ownership = if !config.object_store.blobs_shared() {
+                    BlobGcOwnership::Always
+                } else if let Some(c) = &coordinator {
+                    tracing::info!(
+                        "blob GC leader-gated: shared blob store in a coordinated cluster, \
+                         GC runs only while this node holds leadership"
+                    );
+                    BlobGcOwnership::Leader(Arc::clone(c))
+                } else if config.object_store.blob_gc_coordinator {
+                    BlobGcOwnership::Always
+                } else {
                     tracing::info!(
                         "blob GC disabled on this node: shared blob store, not the GC coordinator \
                          (set TAEL_BLOB_GC_ROLE=coordinator on exactly one node)"
                     );
-                }
+                    BlobGcOwnership::Never
+                };
                 spawn_span_compactor(
                     Arc::clone(&backend),
                     Arc::clone(&blobs),
-                    blob_gc_enabled,
+                    gc_ownership,
                     retention_policy.clone(),
                 );
                 backend as Arc<dyn Store>

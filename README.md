@@ -775,6 +775,7 @@ The server (`tael serve`) is configured via flags or environment variables
 |----------|---------|-------------|
 | `TAEL_OTLP_GRPC_ADDR` | `127.0.0.1:4317` | OTLP gRPC listen address |
 | `TAEL_OTLP_HTTP_ADDR` | `127.0.0.1:4318` | OTLP/HTTP listen address (`off` to disable) |
+| `TAEL_INGEST_MAX_IN_FLIGHT` | `512` | Max concurrent in-flight ingest batches before new batches are shed with a retryable status (`0` = unbounded) |
 | `TAEL_REST_API_ADDR` | `127.0.0.1:7701` | REST API listen address |
 | `TAEL_DATA_DIR` | `~/.tael/data` | Telemetry data directory |
 | `TAEL_WAL_DIR` | `~/.tael/wal_files` | Write-ahead log directory |
