@@ -62,7 +62,7 @@ impl OtlpTraceService {
 /// with the OTLP/HTTP listener. `tonic`'s generated server takes ownership of
 /// its service, and the orphan rule blocks implementing [`TraceService`] on
 /// `Arc<OtlpTraceService>` directly, so the wrapper carries the shared handle.
-pub struct SharedTraceService(pub Arc<OtlpTraceService>);
+pub struct SharedTraceService(pub Arc<dyn TraceService>);
 
 #[tonic::async_trait]
 impl TraceService for SharedTraceService {

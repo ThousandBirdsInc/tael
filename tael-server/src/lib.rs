@@ -44,7 +44,7 @@ use tonic::transport::Server as TonicServer;
 use tracing_subscriber::EnvFilter;
 
 pub use config::{
-    DEFAULT_DD_AGENT_ADDR, DEFAULT_OTLP_HTTP_ADDR, ServerConfig, StorageBackend,
+    DEFAULT_DD_AGENT_ADDR, DEFAULT_OTLP_HTTP_ADDR, NodeRole, ServerConfig, StorageBackend,
     parse_dd_agent_addr, parse_otlp_http_addr,
 };
 #[cfg(feature = "duckdb")]
@@ -500,6 +500,25 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
         config.multi_tenant = true;
     }
 
+    // An ingest-only node forwards OTLP and nothing else: it has no engine
+    // for the Datadog/remote-write decode paths to write into, so the
+    // dedicated agent listener is off and those clients point at storage
+    // nodes directly (docs/running-tael-for-a-team.md).
+    if config.node_role == NodeRole::Ingest {
+        if config.ingest_shards.is_empty() {
+            bail!(
+                "TAEL_NODE_ROLE=ingest requires TAEL_INGEST_SHARDS=<http://shard:7701,...> — \
+                 the storage shards this node forwards to"
+            );
+        }
+        if config.dd_agent_addr.take().is_some() {
+            tracing::info!(
+                "ingest-only node: dd-trace listener disabled (point DD_TRACE_AGENT_URL at a \
+                 storage node)"
+            );
+        }
+    }
+
     // Resolve auth and retention before anything binds, so a misconfigured
     // deployment fails at startup rather than after it is already accepting
     // traffic.
@@ -555,7 +574,25 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     // Where ingest routes payload text for indexing: the single engine's
     // shared index, per-tenant indexes under isolation, or nothing.
     let mut payload_indexes = storage::PayloadIndexes::None;
-    let store: Arc<dyn Store> = if !config.query_shards.is_empty() {
+    // Ingest tier: the OTLP transports forward to these shards instead of
+    // storing (`ingest::forward`); the Store behind the REST router refuses
+    // everything with an explanation.
+    let forwarder = if config.node_role == NodeRole::Ingest {
+        Some(Arc::new(ingest::forward::OtlpForwarder::new(
+            config.ingest_shards.clone(),
+        )?))
+    } else {
+        None
+    };
+    let store: Arc<dyn Store> = if let Some(f) = &forwarder {
+        tracing::info!(
+            shards = f.shard_count(),
+            "ingest-only node: forwarding OTLP to storage shards (no local engine)"
+        );
+        Arc::new(ingest::forward::IngestOnlyStore::new(
+            &config.ingest_shards,
+        )?)
+    } else if !config.query_shards.is_empty() {
         // Stateless query-tier mode: serve reads by scatter-gather over remote
         // shards, no local engine (`docs/tael-server-scaling-ha.md` §3, Phase 2).
         let shards = config
@@ -745,10 +782,14 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     let alert_store = Arc::new(alerts::AlertStore::open(&config.data_dir)?);
     let score_rules = Arc::new(scoring::ScoreRuleStore::open(&config.data_dir)?);
     let suite_store = Arc::new(suites::SuiteStore::open(&config.data_dir)?);
-    spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
-    // Evaluate more often than the compaction pass: an alert is only useful if
-    // it fires close to when the condition started.
-    spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
+    // Online scoring and alert evaluation read the store; an ingest-only
+    // node has none, so the loops would only log refusals.
+    if config.node_role != NodeRole::Ingest {
+        spawn_online_scorer(Arc::clone(&store), Arc::clone(&score_rules), 60);
+        // Evaluate more often than the compaction pass: an alert is only
+        // useful if it fires close to when the condition started.
+        spawn_alert_evaluator(Arc::clone(&store), Arc::clone(&alert_store), 30);
+    }
 
     tracing::info!(
         otlp_grpc = %config.otlp_grpc_addr,
@@ -765,25 +806,34 @@ pub async fn run_with_options(mut config: ServerConfig, options: ServerRunOption
     // HTTP/protobuf (:4318) hand decoded batches to the same implementations,
     // so there is one ingest path regardless of how a client speaks to it.
     let payload_indexes = Arc::new(payload_indexes);
-    let otlp_services = ingest::otlp_http::OtlpHttpState {
-        traces: Arc::new(ingest::otlp::OtlpTraceService::new(
-            Arc::clone(&store),
-            Arc::clone(&blobs),
-            Arc::clone(&payload_indexes),
-            Arc::clone(&bus),
-            config.multi_tenant,
-        )),
-        logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
-            Arc::clone(&store),
-            Arc::clone(&blobs),
-            Arc::clone(&payload_indexes),
-            Arc::clone(&log_bus),
-            config.multi_tenant,
-        )),
-        metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(
-            Arc::clone(&store),
-            config.multi_tenant,
-        )),
+    let otlp_services = match &forwarder {
+        // Ingest tier: both transports split-and-forward at the protobuf
+        // layer, so blobs/indexing/tenant stamping happen on the owning shard.
+        Some(f) => ingest::otlp_http::OtlpHttpState {
+            traces: Arc::new(ingest::forward::ForwardingTraceService(Arc::clone(f))),
+            logs: Arc::new(ingest::forward::ForwardingLogsService(Arc::clone(f))),
+            metrics: Arc::new(ingest::forward::ForwardingMetricsService(Arc::clone(f))),
+        },
+        None => ingest::otlp_http::OtlpHttpState {
+            traces: Arc::new(ingest::otlp::OtlpTraceService::new(
+                Arc::clone(&store),
+                Arc::clone(&blobs),
+                Arc::clone(&payload_indexes),
+                Arc::clone(&bus),
+                config.multi_tenant,
+            )),
+            logs: Arc::new(ingest::otlp_logs::OtlpLogsService::new(
+                Arc::clone(&store),
+                Arc::clone(&blobs),
+                Arc::clone(&payload_indexes),
+                Arc::clone(&log_bus),
+                config.multi_tenant,
+            )),
+            metrics: Arc::new(ingest::otlp_metrics::OtlpMetricsService::new(
+                Arc::clone(&store),
+                config.multi_tenant,
+            )),
+        },
     };
 
     let grpc_handle = tokio::spawn({
@@ -1102,6 +1152,9 @@ fn print_startup_banner(
                 dd_agent_url(config)
             ),
         },
+    }
+    if config.node_role == NodeRole::Ingest {
+        println!("  role         ingest-only (forwarding OTLP to storage shards)");
     }
     println!("  data dir     {}", config.data_dir);
     println!("  WAL dir      {}", config.wal_dir);

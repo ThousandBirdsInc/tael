@@ -33,7 +33,7 @@ impl OtlpMetricsService {
 
 /// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
 /// metrics service. See [`super::otlp::SharedTraceService`].
-pub struct SharedMetricsService(pub Arc<OtlpMetricsService>);
+pub struct SharedMetricsService(pub Arc<dyn MetricsService>);
 
 #[tonic::async_trait]
 impl MetricsService for SharedMetricsService {

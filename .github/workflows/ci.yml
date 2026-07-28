@@ -118,3 +118,27 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --shell=sh install.sh
+
+  # The multi-process failover drill: two real server processes over real
+  # TCP, synchronous WAL replication, SIGKILL the leader, gossip election,
+  # zero acked-write loss. The in-process equivalent runs in the test job;
+  # this one exists because process boundaries find what in-process tests
+  # can't — it caught reqwest::blocking panicking inside the runtime on the
+  # replication path the day it was written.
+  failover-drill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Shell lint
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck scripts/failover-drill.sh
+      - name: Build server + traffic generator
+        run: cargo build -p tael-cli -p tael-test
+      - name: Run the drill
+        run: timeout 300 scripts/failover-drill.sh
+        env:
+          TAEL_BIN: target/debug/tael
+          TAEL_TEST_BIN: target/debug/tael-test

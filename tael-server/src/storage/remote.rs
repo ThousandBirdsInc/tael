@@ -4,13 +4,17 @@
 //! [`FanoutStore`](super::FanoutStore) scatter reads across N shard processes
 //! without the REST/gRPC/CLI layers above the `Store` trait changing at all.
 //!
-//! ## Synchronous over blocking HTTP
+//! ## Synchronous over a dedicated IO runtime
 //!
-//! The `Store` trait is synchronous by design (`storage/mod.rs`). We therefore
-//! use [`reqwest::blocking`], whose client owns its own runtime on a dedicated
-//! thread and parks the caller on a channel — safe to call from inside the
-//! server's tokio workers, and consistent with the rest of the engine treating
-//! `Store` calls as blocking.
+//! The `Store` trait is synchronous by design (`storage/mod.rs`), but these
+//! clients are called from inside the server's tokio workers (query fan-out
+//! in REST handlers, WAL shipping on the ingest path). `reqwest::blocking`
+//! is NOT safe there — its `wait::enter` creates and drops a throwaway tokio
+//! runtime per call, which panics inside an async context ("Cannot drop a
+//! runtime…"); the multi-process failover drill caught exactly that. Instead
+//! the async client runs on a small dedicated IO runtime and callers park on
+//! a std channel (the same pattern as `objstore::cloud_store`), which is safe
+//! from any context.
 //!
 //! ## Read-only
 //!
@@ -21,11 +25,67 @@
 //! Comment writes, which *do* have a REST endpoint, are supported.
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::StatusCode;
-use reqwest::blocking::Client;
+use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// The dedicated runtime that drives every remote-store/WAL-sink HTTP call.
+fn io_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("tael-remote-io")
+            .build()
+            .expect("building remote-store IO runtime")
+    })
+}
+
+/// Run `fut` on the IO runtime, blocking the caller on a std channel — no
+/// tokio entering/blocking guards involved, so it works on a tokio worker and
+/// a plain thread alike.
+fn block<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    io_runtime().spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx.recv().expect("remote IO worker dropped")
+}
+
+/// A fully-buffered HTTP response: status + body, produced on the IO runtime.
+struct RawResponse {
+    status: StatusCode,
+    body: bytes::Bytes,
+}
+
+impl RawResponse {
+    fn json_value(&self, what: &str) -> Result<Value> {
+        serde_json::from_slice(&self.body).with_context(|| format!("decoding {what} response"))
+    }
+
+    fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// Execute a prepared request on the IO runtime and buffer the response.
+fn execute(req: reqwest::RequestBuilder, what: impl Into<String>) -> Result<RawResponse> {
+    let what = what.into();
+    block(async move {
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body = resp.bytes().await?;
+        Ok::<_, reqwest::Error>(RawResponse { status, body })
+    })
+    .with_context(|| what)
+}
 
 use super::Store;
 use super::backend::WalSink;
@@ -58,26 +118,27 @@ impl RemoteStore {
         })
     }
 
-    fn send_get(
-        &self,
-        path: &str,
-        params: &[(&str, String)],
-    ) -> Result<reqwest::blocking::Response> {
-        self.http
-            .get(format!("{}{path}", self.base_url))
-            .query(params)
-            .send()
-            .with_context(|| format!("GET {path} from {}", self.base_url))
+    fn send_get(&self, path: &str, params: &[(&str, String)]) -> Result<RawResponse> {
+        execute(
+            self.http
+                .get(format!("{}{path}", self.base_url))
+                .query(params),
+            format!("GET {path} from {}", self.base_url),
+        )
     }
 
     /// GET expecting a JSON object, surfacing non-2xx as an error.
     fn get_json(&self, path: &str, params: &[(&str, String)]) -> Result<Value> {
-        let resp = self
-            .send_get(path, params)?
-            .error_for_status()
-            .with_context(|| format!("GET {path} from {}", self.base_url))?;
-        resp.json::<Value>()
-            .with_context(|| format!("decoding {path} response from {}", self.base_url))
+        let resp = self.send_get(path, params)?;
+        if !resp.status.is_success() {
+            bail!(
+                "GET {path} from {}: HTTP {} — {}",
+                self.base_url,
+                resp.status,
+                resp.body_text()
+            );
+        }
+        resp.json_value(path)
     }
 
     /// The peer's live blob hashes (`GET /internal/blobs/live`). Used by the
@@ -155,14 +216,9 @@ impl Store for RemoteStore {
         // fan-out can union shards without a missing shard aborting the whole
         // lookup.
         let resp = self.send_get(&format!("/api/v1/traces/{trace_id}"), &[])?;
-        match resp.status() {
+        match resp.status {
             StatusCode::NOT_FOUND => Ok(Vec::new()),
-            s if s.is_success() => {
-                let body = resp
-                    .json::<Value>()
-                    .context("decoding get_trace response")?;
-                field(body, "spans")
-            }
+            s if s.is_success() => field(resp.json_value("get_trace")?, "spans"),
             s => bail!("get_trace {trace_id} on {}: HTTP {s}", self.base_url),
         }
     }
@@ -184,20 +240,24 @@ impl Store for RemoteStore {
         if let Some(s) = span_id {
             payload["span_id"] = serde_json::json!(s);
         }
-        let resp = self
-            .http
-            .post(format!(
-                "{}/api/v1/traces/{trace_id}/comments",
-                self.base_url
-            ))
-            .json(&payload)
-            .send()
-            .with_context(|| format!("POST comment to {}", self.base_url))?
-            .error_for_status()
-            .with_context(|| format!("POST comment to {}", self.base_url))?
-            .json::<Value>()
-            .context("decoding add_comment response")?;
-        field(resp, "comment")
+        let resp = execute(
+            self.http
+                .post(format!(
+                    "{}/api/v1/traces/{trace_id}/comments",
+                    self.base_url
+                ))
+                .json(&payload),
+            format!("POST comment to {}", self.base_url),
+        )?;
+        if !resp.status.is_success() {
+            bail!(
+                "POST comment to {}: HTTP {} — {}",
+                self.base_url,
+                resp.status,
+                resp.body_text()
+            );
+        }
+        field(resp.json_value("add_comment")?, "comment")
     }
 
     fn get_comments(&self, trace_id: &str) -> Result<Vec<TraceComment>> {
@@ -294,16 +354,12 @@ impl Store for RemoteStore {
 
     fn query_correlate(&self, trace_id: &str) -> Result<Option<CorrelateReport>> {
         let resp = self.send_get("/api/v1/correlate", &[("trace", trace_id.to_string())])?;
-        match resp.status() {
+        match resp.status {
             StatusCode::NOT_FOUND => Ok(None),
-            s if s.is_success() => {
-                let body = resp
-                    .json::<Value>()
-                    .context("decoding correlate response")?;
-                Ok(Some(
-                    serde_json::from_value(body).context("deserializing CorrelateReport")?,
-                ))
-            }
+            s if s.is_success() => Ok(Some(
+                serde_json::from_value(resp.json_value("correlate")?)
+                    .context("deserializing CorrelateReport")?,
+            )),
             s => bail!("correlate {trace_id} on {}: HTTP {s}", self.base_url),
         }
     }
@@ -315,21 +371,20 @@ impl Store for RemoteStore {
 
     // ── Lifecycle ───────────────────────────────────────────────────
     fn health(&self) -> Result<()> {
-        let resp = self
-            .send_get("/healthz", &[])?
-            .error_for_status()
-            .with_context(|| format!("health check on {}", self.base_url))?;
-        let _ = resp.text();
+        let resp = self.send_get("/healthz", &[])?;
+        if !resp.status.is_success() {
+            bail!("health check on {}: HTTP {}", self.base_url, resp.status);
+        }
         Ok(())
     }
 }
 
 /// A [`WalSink`] that ships framed WAL records to a standby `tael-server`'s
-/// `POST /internal/wal/records` endpoint over blocking HTTP — the leader→standby
-/// transport for WAL replication (`docs/tael-server-scaling-ha.md` §5.1).
-/// Blocking, like [`RemoteStore`], because the WAL append path that drives it is
-/// synchronous; `append_framed` returns only once the standby has applied the
-/// record (the per-record ack that makes replication synchronous).
+/// `POST /internal/wal/records` endpoint — the leader→standby transport for
+/// WAL replication (`docs/tael-server-scaling-ha.md` §5.1). Synchronous like
+/// [`RemoteStore`] (and over the same dedicated IO runtime): `append_framed`
+/// returns only once the standby has applied the record — the per-record ack
+/// that makes replication synchronous.
 /// HTTP header carrying the leader's epoch, so the standby can fence out a
 /// deposed leader's records (`cluster::EpochFencer`).
 pub const WAL_EPOCH_HEADER: &str = "x-tael-wal-epoch";
@@ -386,11 +441,18 @@ impl WalSink for RemoteWalSink {
                 epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
             );
         }
-        req.body(framed.to_vec())
-            .send()
-            .with_context(|| format!("shipping WAL record to {}", self.url))?
-            .error_for_status()
-            .with_context(|| format!("standby {} rejected WAL record", self.url))?;
+        let resp = execute(
+            req.body(framed.to_vec()),
+            format!("shipping WAL record to {}", self.url),
+        )?;
+        if !resp.status.is_success() {
+            bail!(
+                "standby {} rejected WAL record: HTTP {} — {}",
+                self.url,
+                resp.status,
+                resp.body_text()
+            );
+        }
         Ok(())
     }
 

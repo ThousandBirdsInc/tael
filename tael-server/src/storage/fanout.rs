@@ -55,7 +55,7 @@ pub struct FanoutStore {
 /// keys (unlike `RandomState`), so the same key maps to the same shard across
 /// processes and restarts — a prerequisite for `get_trace` to find the shard
 /// the ingest router wrote to.
-fn shard_index(key: &str, n: usize) -> usize {
+pub(crate) fn shard_index(key: &str, n: usize) -> usize {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
     (h.finish() % n as u64) as usize

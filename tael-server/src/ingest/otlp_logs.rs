@@ -47,7 +47,7 @@ impl OtlpLogsService {
 
 /// Shared-handle wrapper so the gRPC and OTLP/HTTP listeners serve the same
 /// logs service. See [`super::otlp::SharedTraceService`].
-pub struct SharedLogsService(pub Arc<OtlpLogsService>);
+pub struct SharedLogsService(pub Arc<dyn LogsService>);
 
 #[tonic::async_trait]
 impl LogsService for SharedLogsService {

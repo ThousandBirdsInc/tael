@@ -35,14 +35,14 @@ use opentelemetry_proto::tonic::collector::{
 };
 use prost::Message;
 
-use super::{otlp::OtlpTraceService, otlp_logs::OtlpLogsService, otlp_metrics::OtlpMetricsService};
-
-/// The three OTLP services, shared with the gRPC listener.
+/// The three OTLP services, shared with the gRPC listener. Trait objects, so
+/// the same transports serve either the storing services (`otlp*`) or the
+/// ingest-tier forwarding services (`ingest::forward`).
 #[derive(Clone)]
 pub struct OtlpHttpState {
-    pub traces: Arc<OtlpTraceService>,
-    pub logs: Arc<OtlpLogsService>,
-    pub metrics: Arc<OtlpMetricsService>,
+    pub traces: Arc<dyn TraceService>,
+    pub logs: Arc<dyn LogsService>,
+    pub metrics: Arc<dyn MetricsService>,
 }
 
 /// The OTLP/HTTP route set. Mounted on its own listener (`:4318` by default)
@@ -247,6 +247,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::ingest::{
+        otlp::OtlpTraceService, otlp_logs::OtlpLogsService, otlp_metrics::OtlpMetricsService,
+    };
     use crate::log_bus::LogBus;
     use crate::span_bus::SpanBus;
     use crate::storage::testing::TestBackend;
