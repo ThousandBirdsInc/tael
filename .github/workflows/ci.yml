@@ -111,6 +111,19 @@ jobs:
       - name: Agent contract matches the CLI
         run: cargo test -p tael-cli --test docs_contract
 
+  # The client CLI builds (and links) on Windows; the server engine is
+  # compiled out there (unix-only WAL), so `tael` is a pure client for a
+  # remote server. This job is what keeps unix-only code from sneaking into
+  # the client half.
+  windows-client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build client CLI
+        run: cargo build -p tael-cli
+
   install-script:
     runs-on: ubuntu-latest
     steps:

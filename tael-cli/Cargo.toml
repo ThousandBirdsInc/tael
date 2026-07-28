@@ -45,8 +45,15 @@ sql = ["tael-server/sql"]
 # Kafka/Redpanda ingest buffer support in the embedded server (`tael serve`).
 kafka = ["tael-server/kafka"]
 
-[dependencies]
+# The server engine's WAL (walrus) is unix-only, so the server half of the
+# binary exists only off-Windows. On Windows the same crate builds as a pure
+# client: every query/eval/annotation command works against a remote server
+# (--server / TAEL_SERVER); `serve`, `auth`, `config`, and `server migrate`
+# explain where to run instead. See docs/gap-closure-roadmap.md D3.
+[target.'cfg(not(windows))'.dependencies]
 tael-server = { path = "../tael-server", version = "0.5.14" }
+
+[dependencies]
 tael-gui = { path = "../tael-gui/src-tauri", version = "0.5.14", package = "tael-gui", optional = true }
 anyhow.workspace = true
 axum.workspace = true

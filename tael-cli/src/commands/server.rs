@@ -5,7 +5,7 @@ use crate::client::TaelClient;
 
 /// `tael server migrate` — copy a legacy DuckDB datastore into the
 /// tael-backend engine. Offline: operates on the data directory directly.
-#[cfg(feature = "duckdb")]
+#[cfg(all(feature = "duckdb", not(windows)))]
 pub fn migrate(format: &OutputFormat, source: &str, target: &str, dry_run: bool) -> Result<()> {
     let report = tael_server::migrate::migrate_duckdb(source, target, dry_run)?;
     match format {
@@ -31,8 +31,9 @@ pub fn migrate(format: &OutputFormat, source: &str, target: &str, dry_run: bool)
 }
 
 /// Without the `duckdb` feature there is no DuckDB engine in the binary to
-/// read from — say so instead of failing with a missing-file error.
-#[cfg(not(feature = "duckdb"))]
+/// read from — say so instead of failing with a missing-file error. (On
+/// Windows there is no server engine at all; the same refusal applies.)
+#[cfg(any(not(feature = "duckdb"), windows))]
 pub fn migrate(_format: &OutputFormat, _source: &str, _target: &str, _dry_run: bool) -> Result<()> {
     Err(crate::exit::CategorizedError::new(
         crate::exit::ExitCategory::BadQuery,

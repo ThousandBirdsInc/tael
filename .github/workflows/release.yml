@@ -49,9 +49,11 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-14
             target: x86_64-apple-darwin
-          # No Windows target: the WAL dependency (walrus-rust) uses unix-only
-          # positioned file I/O (std::os::unix::fs::FileExt), so tael does not
-          # build on Windows — via this workflow or `cargo install`.
+          # Windows ships the client-only build: the server engine (whose WAL
+          # uses unix-only positioned file I/O) is compiled out on Windows, so
+          # `tael` there is a pure client for a remote/WSL/Docker server.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -79,7 +81,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           stage="tael-cli-v${version}-${{ matrix.target }}"
           mkdir "$stage"
-          cp "target/${{ matrix.target }}/release/tael" "$stage/"
+          bin="tael"
+          case "${{ matrix.target }}" in *windows*) bin="tael.exe";; esac
+          cp "target/${{ matrix.target }}/release/$bin" "$stage/"
           cp README.md "$stage/" 2>/dev/null || true
           tar czf "$stage.tar.gz" "$stage"
           echo "ASSET=$stage.tar.gz" >> "$GITHUB_ENV"

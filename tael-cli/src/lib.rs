@@ -58,6 +58,9 @@ pub mod tui_panels;
 pub use client::TaelClient;
 /// Re-export of the server crate so embedders can run an in-process tael
 /// server (`tael_server::run_embedded`) without adding a second dependency.
+/// Absent on Windows, where the server engine does not build (the WAL is
+/// unix-only) and the crate is a pure client.
+#[cfg(not(windows))]
 pub use tael_server;
 
 use anyhow::{Result, bail};
@@ -1130,8 +1133,31 @@ pub async fn run(cli: Cli) -> Result<()> {
 /// `Commands::Serve` (runs the server in-process until shutdown) and
 /// `Commands::Live` (takes over the terminal with the live TUI).
 pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
+    // On Windows the binary is a pure client: the server engine (and with it
+    // the local keystore, retention config, and migration surface) only
+    // exists where the server runs. Refuse those four commands with the
+    // pointer instead of failing to link; everything else talks HTTP.
+    #[cfg(windows)]
+    if matches!(
+        command,
+        Commands::Serve { .. }
+            | Commands::Config { .. }
+            | Commands::Auth { .. }
+            | Commands::Server {
+                action: ServerAction::Migrate { .. },
+            }
+    ) {
+        bail!(
+            "the tael server engine does not run on Windows (its WAL uses unix-only \
+             file I/O). Run `tael serve` on Linux/macOS/WSL/Docker and point this CLI \
+             at it with --server http://<host>:7701 (or TAEL_SERVER); manage keys and \
+             config on the server host."
+        );
+    }
+
     // `serve` runs the embedded server; it needs no REST client, so handle it
     // before constructing one.
+    #[cfg(not(windows))]
     if let Commands::Serve {
         otlp_grpc_addr,
         otlp_http_addr,
@@ -1191,6 +1217,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
 
     // Config inspection reads the same files the server does, so it works
     // whether or not one is running.
+    #[cfg(not(windows))]
     if let Commands::Config { action } = command {
         let resolve_dir = |explicit: Option<String>| {
             explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
@@ -1214,6 +1241,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
 
     // Migration works on the data directory directly; the server must in fact
     // NOT be running against either engine while it copies.
+    #[cfg(not(windows))]
     if let Commands::Server {
         action:
             ServerAction::Migrate {
@@ -1231,6 +1259,7 @@ pub async fn run_command(command: Commands, opts: &GlobalOpts) -> Result<()> {
 
     // Key management works on the keystore file directly, so it must not need
     // a reachable server — the first key is minted before one can start.
+    #[cfg(not(windows))]
     if let Commands::Auth { action } = command {
         let resolve_dir = |explicit: Option<String>| {
             explicit.unwrap_or_else(|| tael_server::ServerConfig::from_env().data_dir)
