@@ -127,6 +127,7 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
         }
     }
 
+    super::cardinality::admit(&mut points);
     let count = points.len();
     if let Err(e) = store.insert_metrics(&points) {
         super::stats::record_error(super::stats::Pipeline::RemoteWrite);

@@ -151,6 +151,7 @@ fn spawn_span_compactor(
                 // One clock for the whole pass, so signals don't drift apart
                 // across a long compaction.
                 let cutoffs = policy.cutoffs(chrono::Utc::now());
+                let started = std::time::Instant::now();
                 let mut compacted = backend.compact_spans(cutoffs.hot_tier)?;
                 compacted += backend.compact_logs_metrics(cutoffs.hot_tier)?;
                 let dropped = backend.enforce_retention(&cutoffs)?;
@@ -165,6 +166,19 @@ fn spawn_span_compactor(
                 } else {
                     0
                 };
+                let elapsed_ms = started.elapsed().as_millis() as f64;
+                // The engine reports on itself through its own metric pipeline,
+                // so compaction health is queryable and alertable like any
+                // other series instead of living only in log lines.
+                let points = engine_metric_points(&[
+                    ("tael.engine.compacted_rows", compacted as f64),
+                    ("tael.engine.partitions_dropped", dropped as f64),
+                    ("tael.engine.blobs_gcd", blobs_gcd as f64),
+                    ("tael.engine.maintenance_ms", elapsed_ms),
+                ]);
+                if let Err(e) = backend.insert_metrics(&points) {
+                    tracing::warn!(error = %e, "failed to record engine metrics");
+                }
                 anyhow::Ok((compacted, dropped, blobs_gcd))
             })
             .await;
@@ -181,6 +195,25 @@ fn spawn_span_compactor(
             }
         }
     });
+}
+
+/// Gauge points for the engine's own health, emitted under the `tael` service
+/// each maintenance pass.
+fn engine_metric_points(values: &[(&str, f64)]) -> Vec<storage::models::MetricPoint> {
+    let now = chrono::Utc::now();
+    values
+        .iter()
+        .map(|(name, value)| storage::models::MetricPoint {
+            timestamp: now,
+            service: "tael".to_string(),
+            name: (*name).to_string(),
+            metric_type: storage::models::MetricType::Gauge,
+            value: *value,
+            unit: String::new(),
+            attributes: std::collections::HashMap::new(),
+            histogram: None,
+        })
+        .collect()
 }
 
 /// Evaluate alert rules on a schedule and deliver the resulting transitions.

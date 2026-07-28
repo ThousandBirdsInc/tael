@@ -157,6 +157,7 @@ impl MetricsService for OtlpMetricsService {
             }
         }
 
+        super::cardinality::admit(&mut points);
         let count = points.len();
         if let Err(e) = self.store.insert_metrics(&points) {
             tracing::error!(error = %e, "failed to insert metrics");

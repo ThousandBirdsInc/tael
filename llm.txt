@@ -408,10 +408,17 @@ OTLP spans/logs/metrics, Prometheus remote-write, and the Datadog intake —
 so "no data" splits into "nothing arriving" vs "storage failing" without log
 access. Shape: `{"pipelines": [{"pipeline", "batches", "records", "errors",
 "shed", "last_accepted_at"}], "backpressure": {"in_flight",
-"max_in_flight"}, "generated_at"}`. The server sheds ingest batches with
-gRPC RESOURCE_EXHAUSTED / HTTP 429 when more than
-`TAEL_INGEST_MAX_IN_FLIGHT` (default 512, 0 = unbounded) batches are in
-flight; exporters should retry with backoff.
+"max_in_flight"}, "metric_series": {"tracked", "limit", "dropped_points"},
+"generated_at"}`. The server sheds ingest batches with gRPC
+RESOURCE_EXHAUSTED / HTTP 429 when more than `TAEL_INGEST_MAX_IN_FLIGHT`
+(default 512, 0 = unbounded) batches are in flight; exporters should retry
+with backoff. Metric points that would mint a distinct series beyond
+`TAEL_METRIC_SERIES_LIMIT` (default 100k, 0 = unbounded) are dropped and
+counted in `metric_series.dropped_points` — a high-cardinality label is the
+usual culprit. The engine also reports on itself: `tael.engine.compacted_rows`,
+`tael.engine.partitions_dropped`, `tael.engine.blobs_gcd`, and
+`tael.engine.maintenance_ms` are gauge series under `service="tael"`,
+emitted each maintenance pass and queryable/alertable like any metric.
 
 ### Output parsing notes
 

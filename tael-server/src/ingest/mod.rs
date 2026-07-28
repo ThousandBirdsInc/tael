@@ -1,4 +1,5 @@
 pub mod backpressure;
+pub mod cardinality;
 pub mod datadog;
 pub mod otlp;
 pub mod otlp_http;

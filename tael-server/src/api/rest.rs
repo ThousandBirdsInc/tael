@@ -2076,6 +2076,12 @@ async fn ingest_status() -> impl IntoResponse {
                 // 0 = unbounded (TAEL_INGEST_MAX_IN_FLIGHT=0)
                 "max_in_flight": crate::ingest::backpressure::max_in_flight(),
             },
+            "metric_series": {
+                "tracked": crate::ingest::cardinality::tracked_series(),
+                // 0 = unbounded (TAEL_METRIC_SERIES_LIMIT=0)
+                "limit": crate::ingest::cardinality::series_limit(),
+                "dropped_points": crate::ingest::cardinality::dropped_points(),
+            },
             "generated_at": chrono::Utc::now().to_rfc3339(),
         })),
     )
