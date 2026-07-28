@@ -1,6 +1,6 @@
 # tael-backend: Implementation Plan
 
-> Status: Draft · Owner: colton@thousandbirds.ai · Last updated: 2026-05-25
+> Status: Executed (see per-phase status notes) · Owner: colton@thousandbirds.ai · Last updated: 2026-07-28
 >
 > Execution plan for [`tael-backend-design.md`](./tael-backend-design.md). Read
 > the design doc first for the *why*; this doc is the *how* and *in what order*.
@@ -279,7 +279,7 @@ for all three signals passes against the new backend.
 
 ---
 
-## Phase 5 — Parquet cold tier + compactor ✅ DONE (all 3 signals; downsampling deferred)
+## Phase 5 — Parquet cold tier + compactor ✅ DONE (all 3 signals, incl. 5m downsampling)
 
 > **Status:** spans, logs, and metrics all tiered. `storage/backend/cold.rs`
 > `ColdTier`: per-signal Arrow schemas + Parquet writers producing
@@ -293,9 +293,11 @@ for all three signals passes against the new backend.
 > `metric_matches` predicates. Background maintenance task in `main.rs` (24h
 > window, hourly; env-tunable). Verified e2e (spans → Parquet, hot emptied,
 > union still serves all 24, LLM model preserved) + unit tests for logs/metrics
-> compaction+union. 31 tests pass. **Deferred:** metric 5m downsampling
-> (`metrics_5m` rollups) — raw metric retention via partition drop already
-> bounds storage; downsampling is a resolution-vs-history refinement.
+> compaction+union. 31 tests pass. **Update (2026-07):** metric 5m downsampling
+> shipped — `cold.rs` `write_downsampled`/`downsample` produce day-partitioned
+> `metrics_5m/date=…` rollups (min/max/avg/sum/count via `RollupPoint`), wired
+> into compaction (`backend/mod.rs`), readable via `Store::query_metric_rollups`
+> and `GET /api/v1/metrics/rollups`.
 
 **Goal:** age data out of the LSM into immutable Parquet, each signal laid out
 for its access pattern; add metric downsampling.
@@ -419,8 +421,12 @@ survive to the longer clock.
 > matching trace_ids via `search_trace_ids`. Wired through REST (`?text=`) and
 > CLI (`tael query traces --text "…"`). Verified e2e: `--text "OTLP"` returns
 > the LLM trace, `--text "kubernetes"` returns none. 35 tests pass (+2).
-> **Deferred:** HNSW semantic index (feature-gated, off by default — needs a
-> BYO embedding source, design Open Q #3).
+> **Update (2026-07):** the index now also covers log bodies (`index_log_body`,
+> wired at `ingest/otlp_logs.rs`) and span attributes, surfaced via `--text`.
+> **Deferred:** HNSW ANN index — the semantic-search *use case* shipped
+> differently: brute-force cosine over a BYO `--embed-cmd` `EmbeddingStore`
+> (`similarity.rs`, `/api/v1/embed`, `/similar`, `/cluster`). An ANN index
+> remains future work if flat scans stop scaling.
 
 **Goal:** full-text and (optional) semantic search over text-bearing signals.
 
@@ -459,9 +465,15 @@ embedding source.
 >   migrated — a fresh start on the new default reads the (empty) new tiers, so
 >   sites with existing data should either pass `--storage duckdb` or await the
 >   DuckDB→backend migration tool (tracked in B5).
-> - **Deferred to v2 (per design B5):** native S3/R2 via the async `object_store`
->   crate (needs the read path to go async), the optional Kafka/Redpanda ingest
->   buffer, and splitting ingest/query into separate processes.
+> - **Update (2026-07):** native S3/GCS via the `object_store` crate shipped
+>   behind the `cloud` feature — `storage/objstore.rs` (`TAEL_COLD_STORE`/
+>   `TAEL_BLOB_STORE` accept `s3://`/`gs://` locations), with both `ColdTier`
+>   and `BlobStore` sitting on the `ObjectBackend` seam (async driven on a
+>   dedicated IO runtime behind the sync facade). Query-tier sharding landed
+>   via `FanoutStore`/`RemoteStore` per docs/tael-server-scaling-ha.md.
+> - **Still deferred:** the DuckDB→backend migration tool, the optional
+>   Kafka/Redpanda ingest buffer, a dedicated ingest-only process mode, and
+>   predicate/partition pushdown on cold reads (DataFusion Phase 6 follow-on).
 
 **Goal:** promote `tael-backend` to default; enable cloud cold tier.
 
