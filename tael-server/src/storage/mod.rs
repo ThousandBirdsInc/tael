@@ -8,6 +8,7 @@ pub mod models;
 mod objstore;
 mod remote;
 mod search;
+mod tenant_shard;
 
 pub use backend::{TaelBackend, WalSink};
 pub use blobs::BlobStore;
@@ -18,11 +19,96 @@ pub use fanout::FanoutStore;
 pub use objstore::{DynObjectBackend, FsBackend, StoreLocation, open_object_backend};
 pub use remote::{RemoteStore, RemoteWalSink, WAL_EPOCH_HEADER};
 pub use search::SearchIndex;
+pub use tenant_shard::{ColdBackendFactory, TenantShardedStore, tenant_dir_component};
 
 #[cfg(test)]
 pub(crate) mod testing;
 
 use anyhow::Result;
+use std::sync::Arc;
+
+/// Where the ingest path routes payload text for full-text indexing.
+///
+/// The index lives with the engine that serves `--text` queries, so its
+/// location follows the storage topology: one shared index for the single
+/// engine, the writing tenant's engine index under tenant isolation, and none
+/// at all for backends without a text index (DuckDB, remote/fan-out tiers).
+pub enum PayloadIndexes {
+    /// No text index on this node.
+    None,
+    /// The single-engine default: one shared index.
+    Single(Arc<SearchIndex>),
+    /// Tenant isolation: each batch indexes into its writer's engine.
+    PerTenant(Arc<TenantShardedStore>),
+}
+
+impl PayloadIndexes {
+    /// The index a batch written by `tenant` should be indexed into, if any.
+    /// A failure to open a tenant engine downgrades to "not indexed" — search
+    /// completeness must not fail ingestion.
+    pub fn for_tenant(&self, tenant: &str) -> Option<Arc<SearchIndex>> {
+        match self {
+            Self::None => None,
+            Self::Single(index) => Some(Arc::clone(index)),
+            Self::PerTenant(store) => match store.search_index_for(tenant) {
+                Ok(index) => Some(index),
+                Err(e) => {
+                    tracing::warn!(tenant, error = %e, "payload index unavailable for tenant");
+                    None
+                }
+            },
+        }
+    }
+}
+
+/// The maintenance surface the background compactor task drives —
+/// implemented by both the single engine and the tenant-sharded store, so the
+/// server runs one compactor loop regardless of the storage topology.
+pub trait EngineMaintenance: Send + Sync {
+    fn compact_spans(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize>;
+    fn compact_logs_metrics(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize>;
+    fn enforce_retention(&self, cutoffs: &crate::retention::RetentionCutoffs) -> Result<usize>;
+    fn live_blob_hashes(&self) -> Result<std::collections::HashSet<String>>;
+    /// Record the engine's self-metrics (`tael.engine.*`) for the pass.
+    fn record_engine_metrics(&self, points: &[models::MetricPoint]) -> Result<()>;
+}
+
+impl EngineMaintenance for TaelBackend {
+    fn compact_spans(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        TaelBackend::compact_spans(self, cutoff)
+    }
+    fn compact_logs_metrics(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        TaelBackend::compact_logs_metrics(self, cutoff)
+    }
+    fn enforce_retention(&self, cutoffs: &crate::retention::RetentionCutoffs) -> Result<usize> {
+        TaelBackend::enforce_retention(self, cutoffs)
+    }
+    fn live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        TaelBackend::collect_live_blob_hashes(self)
+    }
+    fn record_engine_metrics(&self, points: &[models::MetricPoint]) -> Result<()> {
+        self.insert_metrics(points)
+    }
+}
+
+impl EngineMaintenance for TenantShardedStore {
+    fn compact_spans(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        TenantShardedStore::compact_spans(self, cutoff)
+    }
+    fn compact_logs_metrics(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        TenantShardedStore::compact_logs_metrics(self, cutoff)
+    }
+    fn enforce_retention(&self, cutoffs: &crate::retention::RetentionCutoffs) -> Result<usize> {
+        TenantShardedStore::enforce_retention(self, cutoffs)
+    }
+    fn live_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        Store::collect_live_blob_hashes(self)
+    }
+    fn record_engine_metrics(&self, points: &[models::MetricPoint]) -> Result<()> {
+        // Unstamped self-metrics land in the default tenant's engine.
+        self.insert_metrics(points)
+    }
+}
 
 use models::{
     AnomalyReport, CorrelateReport, LogQuery, LogRecord, MetricPoint, MetricQuery, ServiceInfo,

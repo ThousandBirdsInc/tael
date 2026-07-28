@@ -17,11 +17,17 @@ use crate::storage::models::{HistogramBuckets, MetricPoint, MetricType, Temporal
 
 pub struct OtlpMetricsService {
     store: Arc<dyn Store>,
+    /// Stamp every record with the writing principal's tenant
+    /// (`TAEL_MULTI_TENANT`). See [`crate::tenancy::stamp`].
+    multi_tenant: bool,
 }
 
 impl OtlpMetricsService {
-    pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn Store>, multi_tenant: bool) -> Self {
+        Self {
+            store,
+            multi_tenant,
+        }
     }
 }
 
@@ -51,6 +57,10 @@ impl MetricsService for OtlpMetricsService {
                 "ingest at capacity; retry with backoff",
             ));
         };
+        let principal = request
+            .extensions()
+            .get::<crate::auth::Principal>()
+            .cloned();
         let req = request.into_inner();
         let mut points: Vec<MetricPoint> = Vec::new();
 
@@ -159,6 +169,14 @@ impl MetricsService for OtlpMetricsService {
 
         super::cardinality::admit(&mut points);
         let count = points.len();
+        // Stamp the writer's tenant last, so it overrides anything the client
+        // sent — the attribute is an authorization boundary, not client data.
+        crate::tenancy::stamp(
+            self.multi_tenant,
+            principal.as_ref(),
+            points.iter_mut().map(|p| &mut p.attributes),
+        );
+
         if let Err(e) = self.store.insert_metrics(&points) {
             tracing::error!(error = %e, "failed to insert metrics");
             super::stats::record_error(super::stats::Pipeline::OtlpMetrics);

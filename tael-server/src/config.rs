@@ -76,6 +76,12 @@ pub struct ServerConfig {
     /// feature it does not use. See [`crate::tenancy`] for what this does and
     /// does not guarantee.
     pub multi_tenant: bool,
+    /// Physically isolate tenants (`TAEL_TENANT_ISOLATION`): each tenant gets
+    /// its own complete storage engine under `<data_dir>/tenants/<tenant>/`,
+    /// making the tenant the top-level shard key rather than a query-layer
+    /// filter. Implies `multi_tenant`. tael-backend engine only. See
+    /// [`crate::storage::TenantShardedStore`].
+    pub tenant_isolation: bool,
 }
 
 /// Object-storage selection for the cold (Parquet) tier and the blob store.
@@ -212,14 +218,8 @@ impl ServerConfig {
             // a `from_env`; the server logs and falls back to the address-based
             // default.
             config_path: non_empty_env("TAEL_CONFIG"),
-            multi_tenant: std::env::var("TAEL_MULTI_TENANT")
-                .map(|v| {
-                    matches!(
-                        v.trim().to_lowercase().as_str(),
-                        "1" | "true" | "on" | "yes"
-                    )
-                })
-                .unwrap_or(false),
+            multi_tenant: bool_env("TAEL_MULTI_TENANT"),
+            tenant_isolation: bool_env("TAEL_TENANT_ISOLATION"),
             auth: non_empty_env("TAEL_AUTH").and_then(|s| match crate::auth::AuthMode::parse(&s) {
                 Ok(mode) => Some(mode),
                 Err(e) => {
@@ -324,6 +324,18 @@ fn parse_optional_addr(value: Option<String>, default: &str) -> Option<String> {
 
 fn non_empty_env(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// Parse a boolean env var (`1`/`true`/`on`/`yes`, case-insensitive).
+fn bool_env(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Parse a comma-separated env var into a trimmed, non-empty list.

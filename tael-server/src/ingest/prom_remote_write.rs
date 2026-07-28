@@ -53,7 +53,11 @@ pub struct Sample {
 
 // ── Handler ─────────────────────────────────────────────────────────
 
-pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoResponse {
+pub async fn handle_write(
+    store: Arc<dyn Store>,
+    body: Bytes,
+    write_tenant: Option<String>,
+) -> impl IntoResponse {
     let Some(_permit) = super::backpressure::try_acquire() else {
         super::stats::record_shed(super::stats::Pipeline::RemoteWrite);
         return (
@@ -62,7 +66,7 @@ pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoRespon
         )
             .into_response();
     };
-    match decode_and_insert(store.as_ref(), &body) {
+    match decode_and_insert(store.as_ref(), &body, write_tenant.as_deref()) {
         Ok(count) => {
             tracing::debug!(metric_points = count, "ingested prom remote-write");
             StatusCode::NO_CONTENT.into_response()
@@ -74,7 +78,7 @@ pub async fn handle_write(store: Arc<dyn Store>, body: Bytes) -> impl IntoRespon
     }
 }
 
-fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
+fn decode_and_insert(store: &dyn Store, body: &[u8], write_tenant: Option<&str>) -> Result<usize> {
     let mut decoder = snap::raw::Decoder::new();
     let decompressed = decoder
         .decompress_vec(body)
@@ -126,6 +130,10 @@ fn decode_and_insert(store: &dyn Store, body: &[u8]) -> Result<usize> {
             });
         }
     }
+
+    // Stamp the writer's tenant last, so it overrides anything the client
+    // sent — the attribute is an authorization boundary, not client data.
+    crate::tenancy::stamp_resolved(write_tenant, points.iter_mut().map(|p| &mut p.attributes));
 
     super::cardinality::admit(&mut points);
     let count = points.len();

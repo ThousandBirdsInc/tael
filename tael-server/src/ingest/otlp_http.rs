@@ -19,13 +19,15 @@ use std::io::Read;
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Extension, Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::post,
 };
+
+use crate::auth::Principal;
 use opentelemetry_proto::tonic::collector::{
     logs::v1::{ExportLogsServiceRequest, logs_service_server::LogsService},
     metrics::v1::{ExportMetricsServiceRequest, metrics_service_server::MetricsService},
@@ -171,6 +173,7 @@ fn export_failed(err: tonic::Status) -> ErrorResponse {
 
 async fn export_traces(
     State(state): State<OtlpHttpState>,
+    principal: Option<Extension<Principal>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -178,7 +181,13 @@ async fn export_traces(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match state.traces.export(tonic::Request::new(req)).await {
+    // Carry the auth layer's principal into the shared service, which stamps
+    // each record with the writer's tenant — same as the gRPC interceptor.
+    let mut req = tonic::Request::new(req);
+    if let Some(Extension(p)) = principal {
+        req.extensions_mut().insert(p);
+    }
+    match state.traces.export(req).await {
         Ok(resp) => ok_response(resp.into_inner()),
         Err(e) => export_failed(e).into_response(),
     }
@@ -186,6 +195,7 @@ async fn export_traces(
 
 async fn export_logs(
     State(state): State<OtlpHttpState>,
+    principal: Option<Extension<Principal>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -193,7 +203,13 @@ async fn export_logs(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match state.logs.export(tonic::Request::new(req)).await {
+    // Carry the auth layer's principal into the shared service, which stamps
+    // each record with the writer's tenant — same as the gRPC interceptor.
+    let mut req = tonic::Request::new(req);
+    if let Some(Extension(p)) = principal {
+        req.extensions_mut().insert(p);
+    }
+    match state.logs.export(req).await {
         Ok(resp) => ok_response(resp.into_inner()),
         Err(e) => export_failed(e).into_response(),
     }
@@ -201,6 +217,7 @@ async fn export_logs(
 
 async fn export_metrics(
     State(state): State<OtlpHttpState>,
+    principal: Option<Extension<Principal>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -208,7 +225,13 @@ async fn export_metrics(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match state.metrics.export(tonic::Request::new(req)).await {
+    // Carry the auth layer's principal into the shared service, which stamps
+    // each record with the writer's tenant — same as the gRPC interceptor.
+    let mut req = tonic::Request::new(req);
+    if let Some(Extension(p)) = principal {
+        req.extensions_mut().insert(p);
+    }
+    match state.metrics.export(req).await {
         Ok(resp) => ok_response(resp.into_inner()),
         Err(e) => export_failed(e).into_response(),
     }
@@ -235,16 +258,22 @@ mod tests {
             traces: Arc::new(OtlpTraceService::new(
                 Arc::clone(&store),
                 Arc::clone(&blobs),
-                Some(engine.backend.search_index()),
+                Arc::new(crate::storage::PayloadIndexes::Single(
+                    engine.backend.search_index(),
+                )),
                 Arc::new(SpanBus::new().unwrap()),
+                false,
             )),
             logs: Arc::new(OtlpLogsService::new(
                 Arc::clone(&store),
                 blobs,
-                Some(engine.backend.search_index()),
+                Arc::new(crate::storage::PayloadIndexes::Single(
+                    engine.backend.search_index(),
+                )),
                 Arc::new(LogBus::new().unwrap()),
+                false,
             )),
-            metrics: Arc::new(OtlpMetricsService::new(store)),
+            metrics: Arc::new(OtlpMetricsService::new(store, false)),
         }
     }
 

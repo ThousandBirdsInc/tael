@@ -110,6 +110,7 @@ pub async fn handle_traces(
     version: TracesVersion,
     headers: HeaderMap,
     body: Bytes,
+    write_tenant: Option<String>,
 ) -> Response {
     // dd-trace clients flush on a timer and may send an empty body (or an
     // empty msgpack array) as a keep-alive; ack those without decoding.
@@ -151,6 +152,13 @@ pub async fn handle_traces(
             }
         }
     }
+
+    // Stamp the writer's tenant last, so it overrides anything the client
+    // sent — the attribute is an authorization boundary, not client data.
+    crate::tenancy::stamp_resolved(
+        write_tenant.as_deref(),
+        spans.iter_mut().map(|s| &mut s.attributes),
+    );
 
     let span_count = spans.len();
     if let Err(e) = store.insert_spans(&spans) {
