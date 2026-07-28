@@ -3,9 +3,11 @@
 //! Aged spans roll out of the LSM hot tier into immutable Parquet objects,
 //! **sorted by `trace_id`** within `spans/date=YYYY-MM-DD/hour=HH/` partitions
 //! so a span-tree read is one contiguous scan (see
-//! `docs/tael-backend-design.md` → "Cold tier"). Reads scan the partitions and
-//! filter in memory; DataFusion (Phase 6) replaces the manual scan with
-//! predicate/partition pushdown.
+//! `docs/tael-backend-design.md` → "Cold tier"). Time-bounded reads prune
+//! whole `date=`/`hour=` partitions from the listing before fetching anything
+//! (see [`partition_may_contain_since`]); rows inside surviving partitions are
+//! filtered in memory. DataFusion (Phase 6) would extend this to full
+//! predicate pushdown inside objects.
 //!
 //! Objects live on the shared [`ObjectBackend`](crate::storage::ObjectBackend):
 //! a local directory by default (`<data_dir>/cold`, overridable via
@@ -153,7 +155,7 @@ impl ColdTier {
     /// Read all spans for a trace from the cold tier.
     pub fn get_trace(&self, trace_id: &str) -> Result<Vec<Span>> {
         let mut out = Vec::new();
-        self.for_each_span(&mut |s: Span| {
+        self.for_each_span(None, &mut |s: Span| {
             if s.trace_id == trace_id {
                 out.push(s);
             }
@@ -163,14 +165,22 @@ impl ColdTier {
 
     /// Read every cold span (used by the hot∪cold union, which then filters).
     pub fn all_spans(&self) -> Result<Vec<Span>> {
+        self.spans_since(None)
+    }
+
+    /// Cold spans from partitions that can hold rows at or after `since`.
+    /// Rows are partitioned by their own timestamp, so partitions entirely
+    /// before `since` are skipped without ever being fetched or decoded — the
+    /// partition-pruning half of the pushdown the design's Phase 6 asks for.
+    pub fn spans_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Span>> {
         let mut out = Vec::new();
-        self.for_each_span(&mut |s: Span| out.push(s))?;
+        self.for_each_span(since, &mut |s: Span| out.push(s))?;
         Ok(out)
     }
 
-    /// Read every Parquet object under the spans prefix, decoding each row.
-    fn for_each_span(&self, f: &mut dyn FnMut(Span)) -> Result<()> {
-        self.for_each_row(SPANS, &mut |b| {
+    /// Read the Parquet objects under the spans prefix, decoding each row.
+    fn for_each_span(&self, since: Option<DateTime<Utc>>, f: &mut dyn FnMut(Span)) -> Result<()> {
+        self.for_each_row(SPANS, since, &mut |b| {
             for s in batch_to_spans(b)? {
                 f(s);
             }
@@ -198,8 +208,13 @@ impl ColdTier {
     }
 
     pub fn all_logs(&self) -> Result<Vec<LogRecord>> {
+        self.logs_since(None)
+    }
+
+    /// Cold logs from partitions that can hold rows at or after `since`.
+    pub fn logs_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<LogRecord>> {
         let mut out = Vec::new();
-        self.for_each_row(LOGS, &mut |b| {
+        self.for_each_row(LOGS, since, &mut |b| {
             out.extend(batch_to_logs(b)?);
             Ok(())
         })?;
@@ -226,8 +241,14 @@ impl ColdTier {
     }
 
     pub fn all_metrics(&self) -> Result<Vec<MetricPoint>> {
+        self.metrics_since(None)
+    }
+
+    /// Cold metric points from partitions that can hold rows at or after
+    /// `since`.
+    pub fn metrics_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<MetricPoint>> {
         let mut out = Vec::new();
-        self.for_each_row(METRICS, &mut |b| {
+        self.for_each_row(METRICS, since, &mut |b| {
             out.extend(batch_to_metrics(b)?);
             Ok(())
         })?;
@@ -261,8 +282,13 @@ impl ColdTier {
     }
 
     pub fn all_rollups(&self) -> Result<Vec<RollupPoint>> {
+        self.rollups_since(None)
+    }
+
+    /// Rollups from day partitions that can hold buckets at or after `since`.
+    pub fn rollups_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<RollupPoint>> {
         let mut out = Vec::new();
-        self.for_each_row(METRICS_5M, &mut |b| {
+        self.for_each_row(METRICS_5M, since, &mut |b| {
             out.extend(batch_to_rollups(b)?);
             Ok(())
         })?;
@@ -310,14 +336,22 @@ impl ColdTier {
         Ok(())
     }
 
-    /// Read every Parquet object under `prefix`, invoking `f` with each batch.
+    /// Read the Parquet objects under `prefix`, invoking `f` with each batch.
+    /// With `since`, partitions whose `date=`/`hour=` segments end before it
+    /// are pruned from the listing without being fetched.
     fn for_each_row(
         &self,
         prefix: &str,
+        since: Option<DateTime<Utc>>,
         f: &mut dyn FnMut(&RecordBatch) -> Result<()>,
     ) -> Result<()> {
         for key in self.backend.list(prefix)? {
             if !key.ends_with(".parquet") {
+                continue;
+            }
+            if let Some(since) = since
+                && !partition_may_contain_since(&key, since)
+            {
                 continue;
             }
             let Some(bytes) = self.backend.get(&key)? else {
@@ -330,6 +364,31 @@ impl ColdTier {
             }
         }
         Ok(())
+    }
+}
+
+/// Whether the partition a key belongs to can contain rows with timestamps at
+/// or after `since`. Rows land in the partition of their own timestamp, so a
+/// partition strictly before `since`'s date (and hour, when the key carries
+/// one) cannot. Both segments are fixed-width zero-padded, so lexicographic
+/// comparison is chronological. A key with no parsable date is kept — pruning
+/// must never hide data over a naming surprise.
+fn partition_may_contain_since(key: &str, since: DateTime<Utc>) -> bool {
+    let Some(date) = parse_date_segment(key) else {
+        return true;
+    };
+    let since_date = since.format("%Y-%m-%d").to_string();
+    match date.cmp(since_date.as_str()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            // Same date: an hour-partitioned key needs its hour checked; a
+            // day-partitioned key (rollups) covers the whole day.
+            match key.split('/').find_map(|seg| seg.strip_prefix("hour=")) {
+                Some(hour) => hour >= since.format("%H").to_string().as_str(),
+                None => true,
+            }
+        }
     }
 }
 
@@ -817,6 +876,53 @@ fn batch_to_metrics(batch: &RecordBatch) -> Result<Vec<MetricPoint>> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn partition_pruning_compares_date_then_hour() {
+        let since = Utc.with_ymd_and_hms(2026, 7, 15, 9, 30, 0).unwrap();
+        let key = |d: &str, h: &str| format!("spans/date={d}/hour={h}/spans-x.parquet");
+        assert!(!partition_may_contain_since(
+            &key("2026-07-14", "23"),
+            since
+        ));
+        assert!(!partition_may_contain_since(
+            &key("2026-07-15", "08"),
+            since
+        ));
+        // since's own hour partition holds rows on both sides of since.
+        assert!(partition_may_contain_since(&key("2026-07-15", "09"), since));
+        assert!(partition_may_contain_since(&key("2026-07-15", "10"), since));
+        assert!(partition_may_contain_since(&key("2026-07-16", "00"), since));
+        // Day-granular keys (rollups) prune on date alone.
+        assert!(!partition_may_contain_since(
+            "metrics_5m/date=2026-07-14/r.parquet",
+            since
+        ));
+        assert!(partition_may_contain_since(
+            "metrics_5m/date=2026-07-15/r.parquet",
+            since
+        ));
+        // No parsable date: never pruned.
+        assert!(partition_may_contain_since("spans/odd-key.parquet", since));
+    }
+
+    #[test]
+    fn spans_since_skips_old_partitions_but_keeps_boundary_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let tier = ColdTier::open(dir.path().to_str().unwrap()).unwrap();
+        let old = Utc::now() - chrono::Duration::days(10);
+        let recent = Utc::now();
+        tier.write_spans(&[span_at("t-old", "s1", old), span_at("t-new", "s2", recent)])
+            .unwrap();
+
+        let all = tier.all_spans().unwrap();
+        assert_eq!(all.len(), 2);
+
+        let since = Utc::now() - chrono::Duration::days(1);
+        let pruned = tier.spans_since(Some(since)).unwrap();
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].trace_id, "t-new");
+    }
 
     fn span(trace: &str, sid: &str) -> Span {
         Span {

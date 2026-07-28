@@ -359,7 +359,7 @@ impl Store for TaelBackend {
         let cutoff = last_seconds.map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
         let mut out: Vec<super::models::MetricRollup> = self
             .cold
-            .all_rollups()?
+            .rollups_since(cutoff)?
             .into_iter()
             .filter(|r| name.is_none_or(|n| r.name == n))
             .filter(|r| service.is_none_or(|s| r.service == s))
@@ -426,7 +426,7 @@ impl Store for TaelBackend {
             } else {
                 let cold_rows = self
                     .cold
-                    .all_spans()?
+                    .spans_since(cutoff)?
                     .into_iter()
                     .filter(|s| hot::span_matches(s, query, cutoff))
                     .count();
@@ -501,7 +501,7 @@ impl Store for TaelBackend {
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
             let mut cold: Vec<Span> = self
                 .cold
-                .all_spans()?
+                .spans_since(cutoff)?
                 .into_iter()
                 .filter(|s| hot::span_matches(s, query, cutoff))
                 .collect();
@@ -541,7 +541,7 @@ impl Store for TaelBackend {
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
             let mut cold: Vec<LogRecord> = self
                 .cold
-                .all_logs()?
+                .logs_since(cutoff)?
                 .into_iter()
                 .filter(|l| hot::log_matches(l, query, cutoff))
                 .collect();
@@ -564,7 +564,7 @@ impl Store for TaelBackend {
                 .map(|s| chrono::Utc::now() - chrono::Duration::seconds(s));
             let mut cold: Vec<MetricPoint> = self
                 .cold
-                .all_metrics()?
+                .metrics_since(cutoff)?
                 .into_iter()
                 .filter(|m| hot::metric_matches(m, query, cutoff))
                 .collect();
@@ -746,7 +746,7 @@ impl TaelBackend {
             last_seconds: Some(last_seconds),
             ..Default::default()
         };
-        for span in self.cold.all_spans()? {
+        for span in self.cold.spans_since(Some(cutoff))? {
             if hot::span_matches(&span, &cold_query, Some(cutoff)) {
                 window.push(&span);
             }
