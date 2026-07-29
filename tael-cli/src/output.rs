@@ -784,6 +784,51 @@ pub fn print_eval_compare(value: &Value) {
         value["current_run_id"].as_str().unwrap_or("-"),
         value["baseline_run_id"].as_str().unwrap_or("-")
     );
+    if let Some(delta) = value["pass_rate_delta"].as_f64() {
+        let current = value["current_run"]["pass_rate"].as_f64().unwrap_or(0.0);
+        let baseline = value["baseline_run"]["pass_rate"].as_f64().unwrap_or(0.0);
+        println!(
+            "Pass rate: {:.1}% vs {:.1}% ({}{:.1} pts)",
+            current * 100.0,
+            baseline * 100.0,
+            if delta >= 0.0 { "+" } else { "" },
+            delta * 100.0
+        );
+    }
+    if let Some(delta) = value["cost_delta_usd"].as_f64() {
+        println!(
+            "Cost: ${:.4} vs ${:.4} ({}{:.4})",
+            value["current_run"]["cost_usd"].as_f64().unwrap_or(0.0),
+            value["baseline_run"]["cost_usd"].as_f64().unwrap_or(0.0),
+            if delta >= 0.0 { "+" } else { "" },
+            delta
+        );
+    }
+    if let Some(metrics) = value
+        .get("metrics")
+        .and_then(|v| v.as_array())
+        .filter(|m| !m.is_empty())
+    {
+        let mut summary = Table::new();
+        summary.set_header(vec![
+            "Metric", "Cur avg", "Base avg", "Delta", "Up", "Down", "Same", "Cur only",
+            "Base only",
+        ]);
+        for m in metrics {
+            summary.add_row(vec![
+                Cell::new(m["metric"].as_str().unwrap_or("-")),
+                Cell::new(format_optional_f64(&m["current_avg"])),
+                Cell::new(format_optional_f64(&m["baseline_avg"])),
+                Cell::new(format_optional_f64(&m["delta"])),
+                Cell::new(m["increased_cases"].as_u64().unwrap_or(0)),
+                Cell::new(m["decreased_cases"].as_u64().unwrap_or(0)),
+                Cell::new(m["unchanged_cases"].as_u64().unwrap_or(0)),
+                Cell::new(m["current_only_cases"].as_u64().unwrap_or(0)),
+                Cell::new(m["baseline_only_cases"].as_u64().unwrap_or(0)),
+            ]);
+        }
+        println!("{summary}");
+    }
     let mut table = Table::new();
     table.set_header(vec!["Case", "Metric", "Current", "Baseline", "Delta"]);
     for case in cases {

@@ -877,6 +877,8 @@ struct EvalRunSummary {
     passed_cases: usize,
     failed_cases: usize,
     pending_cases: Option<usize>,
+    /// `passed / (passed + failed)`, absent until at least one case resolved.
+    pass_rate: Option<f64>,
     avg_scores: BTreeMap<String, f64>,
     cost_usd: f64,
     started_at: Option<String>,
@@ -926,10 +928,33 @@ struct EvalCompareCase {
     baseline_trace_id: Option<String>,
 }
 
+/// Run-level aggregate movement for one metric between two runs. Deltas are
+/// sign-only facts (`current - baseline`); which direction is "better" is a
+/// presentation decision (e.g. lower `cost_usd` is good).
+#[derive(Debug, Clone, Serialize)]
+struct EvalMetricDelta {
+    metric: String,
+    current_avg: Option<f64>,
+    baseline_avg: Option<f64>,
+    delta: Option<f64>,
+    /// Cases scored in both runs where the value moved up / down / stayed put.
+    increased_cases: usize,
+    decreased_cases: usize,
+    unchanged_cases: usize,
+    /// Cases scored in only one of the two runs (added / removed coverage).
+    current_only_cases: usize,
+    baseline_only_cases: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct EvalCompareReport {
     current_run_id: String,
     baseline_run_id: String,
+    current_run: Option<EvalRunSummary>,
+    baseline_run: Option<EvalRunSummary>,
+    pass_rate_delta: Option<f64>,
+    cost_delta_usd: Option<f64>,
+    metrics: Vec<EvalMetricDelta>,
     cases: Vec<EvalCompareCase>,
 }
 
@@ -1082,9 +1107,27 @@ async fn eval_compare(
                     .then_with(|| a.metric.cmp(&b.metric))
             });
 
+            let current_run = snapshot.runs.get(&run_id).cloned();
+            let baseline_run = snapshot.runs.get(&params.baseline).cloned();
+            let pass_rate_delta = match (&current_run, &baseline_run) {
+                (Some(c), Some(b)) => match (c.pass_rate, b.pass_rate) {
+                    (Some(c), Some(b)) => Some(c - b),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let cost_delta_usd = match (&current_run, &baseline_run) {
+                (Some(c), Some(b)) => Some(c.cost_usd - b.cost_usd),
+                _ => None,
+            };
             let report = EvalCompareReport {
                 current_run_id: run_id,
                 baseline_run_id: params.baseline,
+                current_run,
+                baseline_run,
+                pass_rate_delta,
+                cost_delta_usd,
+                metrics: summarize_compare_metrics(&cases),
                 cases,
             };
             (
@@ -1388,6 +1431,7 @@ fn build_eval_snapshot(store: &dyn Store) -> anyhow::Result<EvalSnapshot> {
                 passed_cases: 0,
                 failed_cases: 0,
                 pending_cases: None,
+                pass_rate: None,
                 avg_scores: BTreeMap::new(),
                 cost_usd: 0.0,
                 started_at: case.started_at.clone(),
@@ -1433,6 +1477,8 @@ fn build_eval_snapshot(store: &dyn Store) -> anyhow::Result<EvalSnapshot> {
         run.pending_cases = run
             .case_count
             .map(|n| n.saturating_sub(run.observed_cases.max(run.scored_cases)));
+        let resolved = run.passed_cases + run.failed_cases;
+        run.pass_rate = (resolved > 0).then(|| run.passed_cases as f64 / resolved as f64);
         run.status = infer_run_status(run);
     }
 
@@ -1541,6 +1587,73 @@ fn infer_run_status(run: &EvalRunSummary) -> String {
         return "running".to_string();
     }
     "unknown".to_string()
+}
+
+/// Fold per-case compare rows into one aggregate row per metric: average on
+/// each side, delta of averages, and how many cases moved which way.
+fn summarize_compare_metrics(cases: &[EvalCompareCase]) -> Vec<EvalMetricDelta> {
+    const EPS: f64 = 1e-9;
+    #[derive(Default)]
+    struct Accum {
+        current_sum: f64,
+        current_n: usize,
+        baseline_sum: f64,
+        baseline_n: usize,
+        increased: usize,
+        decreased: usize,
+        unchanged: usize,
+        current_only: usize,
+        baseline_only: usize,
+    }
+    let mut by_metric: BTreeMap<String, Accum> = BTreeMap::new();
+    for case in cases {
+        let acc = by_metric.entry(case.metric.clone()).or_default();
+        if let Some(v) = case.current_value {
+            acc.current_sum += v;
+            acc.current_n += 1;
+        }
+        if let Some(v) = case.baseline_value {
+            acc.baseline_sum += v;
+            acc.baseline_n += 1;
+        }
+        match (case.current_value, case.baseline_value) {
+            (Some(_), Some(_)) => {
+                let delta = case.delta.unwrap_or(0.0);
+                if delta > EPS {
+                    acc.increased += 1;
+                } else if delta < -EPS {
+                    acc.decreased += 1;
+                } else {
+                    acc.unchanged += 1;
+                }
+            }
+            (Some(_), None) => acc.current_only += 1,
+            (None, Some(_)) => acc.baseline_only += 1,
+            (None, None) => {}
+        }
+    }
+    by_metric
+        .into_iter()
+        .map(|(metric, acc)| {
+            let current_avg = (acc.current_n > 0).then(|| acc.current_sum / acc.current_n as f64);
+            let baseline_avg =
+                (acc.baseline_n > 0).then(|| acc.baseline_sum / acc.baseline_n as f64);
+            EvalMetricDelta {
+                metric,
+                current_avg,
+                baseline_avg,
+                delta: match (current_avg, baseline_avg) {
+                    (Some(c), Some(b)) => Some(c - b),
+                    _ => None,
+                },
+                increased_cases: acc.increased,
+                decreased_cases: acc.decreased,
+                unchanged_cases: acc.unchanged,
+                current_only_cases: acc.current_only,
+                baseline_only_cases: acc.baseline_only,
+            }
+        })
+        .collect()
 }
 
 fn cases_by_metric(
@@ -1974,6 +2087,7 @@ mod tests {
         assert_eq!(run.scored_cases, 1);
         assert_eq!(run.passed_cases, 1);
         assert_eq!(run.pending_cases, Some(1));
+        assert_eq!(run.pass_rate, Some(1.0));
         assert_eq!(run.avg_scores.get("correctness"), Some(&1.0));
 
         let case = snapshot
@@ -1982,6 +2096,57 @@ mod tests {
             .unwrap();
         assert_eq!(case.status, "pass");
         assert_eq!(case.trace_id.as_deref(), Some("trace-a"));
+    }
+
+    #[test]
+    fn compare_metric_summary_aggregates_case_deltas_per_metric() {
+        let row = |case_id: &str,
+                   metric: &str,
+                   current: Option<f64>,
+                   baseline: Option<f64>|
+         -> EvalCompareCase {
+            EvalCompareCase {
+                case_id: case_id.to_string(),
+                metric: metric.to_string(),
+                current_value: current,
+                baseline_value: baseline,
+                delta: match (current, baseline) {
+                    (Some(c), Some(b)) => Some(c - b),
+                    _ => None,
+                },
+                current_trace_id: None,
+                baseline_trace_id: None,
+            }
+        };
+        let cases = vec![
+            row("case-1", "correctness", Some(1.0), Some(0.0)),
+            row("case-2", "correctness", Some(0.5), Some(0.5)),
+            row("case-3", "correctness", Some(0.0), Some(1.0)),
+            row("case-4", "correctness", Some(1.0), None),
+            row("case-1", "cost_usd", None, Some(0.02)),
+        ];
+
+        let summary = summarize_compare_metrics(&cases);
+        assert_eq!(summary.len(), 2);
+
+        let correctness = &summary[0];
+        assert_eq!(correctness.metric, "correctness");
+        // Averages are over every scored case on each side, matched or not.
+        assert_eq!(correctness.current_avg, Some(2.5 / 4.0));
+        assert_eq!(correctness.baseline_avg, Some(1.5 / 3.0));
+        assert_eq!(correctness.delta, Some(2.5 / 4.0 - 1.5 / 3.0));
+        assert_eq!(correctness.increased_cases, 1);
+        assert_eq!(correctness.decreased_cases, 1);
+        assert_eq!(correctness.unchanged_cases, 1);
+        assert_eq!(correctness.current_only_cases, 1);
+        assert_eq!(correctness.baseline_only_cases, 0);
+
+        let cost = &summary[1];
+        assert_eq!(cost.metric, "cost_usd");
+        assert_eq!(cost.current_avg, None);
+        assert_eq!(cost.baseline_avg, Some(0.02));
+        assert_eq!(cost.delta, None);
+        assert_eq!(cost.baseline_only_cases, 1);
     }
 }
 

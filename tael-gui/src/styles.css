@@ -683,6 +683,120 @@ tbody tr.selected {
   align-self: center;
 }
 
+.run-stat select {
+  max-width: 320px;
+  height: 24px;
+  font-size: 11.5px;
+}
+
+/* ─── Eval run comparison ────────────────────────── */
+
+.split.vertical.eval-layout.compare-layout {
+  grid-template-rows: auto auto minmax(0, 1fr) 232px;
+}
+
+.compare-summary {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.compare-summary .panel-subhead {
+  position: static;
+}
+
+.delta-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 12px;
+}
+
+.delta-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 150px) 120px minmax(110px, 1fr) 72px auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+}
+
+.delta-metric {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delta-avgs {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.delta-track {
+  position: relative;
+  height: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.delta-mid {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
+}
+
+.delta-fill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 2px;
+}
+
+.delta-fill.ok {
+  background: var(--ok);
+}
+
+.delta-fill.danger {
+  background: var(--danger);
+}
+
+.delta-fill.muted {
+  background: var(--text-faint);
+}
+
+.delta-value {
+  text-align: right;
+  font-weight: 700;
+}
+
+.delta-counts {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.trend-pane {
+  display: grid;
+  /* minmax(0, …): a plain 1fr track floors at the canvas's intrinsic height,
+     which prepareCanvas rewrites every render — the floor would ratchet the
+     track past the fixed 232px row. */
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+}
+
+.trend-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 /* ─── Modals ─────────────────────────────────────── */
 
 .overlay {
