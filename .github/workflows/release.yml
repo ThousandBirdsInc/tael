@@ -156,11 +156,41 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      # `--workspace` publishes tael-server, tael-gui, and tael-cli in dependency
-      # order and waits for each to be indexed before the next one's verification
-      # build resolves it from the registry. tael-test is `publish = false`, so
-      # it's skipped. Requires cargo >= 1.90.
+      # Published one crate at a time, in dependency order, rather than with
+      # `--workspace`, because tael-gui needs `--no-verify` and the other two
+      # must not have it. `cargo publish` waits for each crate to land in the
+      # index before returning, so the next crate resolves it fine.
+      #
+      # tael-gui skips verification: tauri-build writes gen/schemas/{os}-schema.json
+      # into the source directory, and cargo fails any build.rs that touches
+      # anything outside OUT_DIR. Only macOS-schema.json is committed, so a Linux
+      # runner always generates a file that wasn't in the tarball. tael-server and
+      # tael-cli keep verification — that's what catches sources that build
+      # locally but not from a packaged tarball, e.g. an include_str! reaching
+      # outside the package root.
+      #
+      # Each crate is skipped if that version is already on crates.io, so a
+      # partially-successful run can be re-run without tripping over
+      # "crate version already exists".
       - name: Publish
-        run: cargo publish --workspace --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+
+          publish() {
+            crate="$1"; shift
+            if curl -sfL -o /dev/null \
+                 -H 'User-Agent: tael-release (github actions)' \
+                 "https://crates.io/api/v1/crates/${crate}/${version}"; then
+              echo "==> ${crate} ${version} is already on crates.io, skipping"
+              return 0
+            fi
+            echo "==> publishing ${crate} ${version}"
+            cargo publish -p "${crate}" --locked "$@"
+          }
+
+          publish tael-gui --no-verify
+          publish tael-server
+          publish tael-cli
