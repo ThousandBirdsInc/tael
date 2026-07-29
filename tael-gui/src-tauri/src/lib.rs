@@ -253,6 +253,17 @@ async fn eval_cases(server: String, run_id: String) -> Result<Value, String> {
     get_json(&server, &format!("/api/v1/evals/runs/{run_id}/cases"), &[]).await
 }
 
+#[tauri::command]
+async fn eval_compare(server: String, run_id: String, baseline: String) -> Result<Value, String> {
+    let params = vec![("baseline".to_string(), baseline)];
+    get_json(
+        &server,
+        &format!("/api/v1/evals/runs/{run_id}/compare"),
+        &params,
+    )
+    .await
+}
+
 // ── Panels beyond traces/services/evals ─────────────────────────────
 //
 // Each is a thin pass-through to the REST surface the CLI already uses, so the
@@ -504,6 +515,7 @@ pub fn run_with_server(server: String) {
             eval_runs,
             eval_status,
             eval_cases,
+            eval_compare,
             query_summary,
             query_anomalies,
             query_topology,

@@ -60,8 +60,44 @@ type EvalRunRow = {
   scoredCases: number
   passedCases: number
   failedCases: number
+  passRate: number | null
   costUsd: number
   avgScores: Record<string, Json>
+  codeVersion: string | null
+  startedAt: string | null
+}
+
+type EvalMetricDeltaRow = {
+  metric: string
+  currentAvg: number | null
+  baselineAvg: number | null
+  delta: number | null
+  increasedCases: number
+  decreasedCases: number
+  unchangedCases: number
+  currentOnlyCases: number
+  baselineOnlyCases: number
+}
+
+type EvalCompareCaseRow = {
+  caseId: string
+  metric: string
+  currentValue: number | null
+  baselineValue: number | null
+  delta: number | null
+  currentTraceId: string | null
+  baselineTraceId: string | null
+}
+
+type EvalCompareRow = {
+  currentRunId: string
+  baselineRunId: string
+  currentRun: EvalRunRow | null
+  baselineRun: EvalRunRow | null
+  passRateDelta: number | null
+  costDeltaUsd: number | null
+  metrics: EvalMetricDeltaRow[]
+  cases: EvalCompareCaseRow[]
 }
 
 type EvalCaseRow = {
@@ -159,6 +195,10 @@ type AppState = {
   comments: CommentRow[]
   commentDraft: string
   evalRun: EvalRunRow | null
+  evalRuns: EvalRunRow[]
+  evalSelectedRunId: string | null
+  evalBaselineRunId: string | null
+  evalCompare: EvalCompareRow | null
   evalCases: EvalCaseRow[]
   selectedEvalIdx: number | null
   evalFailuresOnly: boolean
@@ -218,6 +258,10 @@ const state: AppState = {
   comments: [],
   commentDraft: '',
   evalRun: null,
+  evalRuns: [],
+  evalSelectedRunId: null,
+  evalBaselineRunId: null,
+  evalCompare: null,
   evalCases: [],
   selectedEvalIdx: null,
   evalFailuresOnly: false,
@@ -309,6 +353,7 @@ function parseComments(value: any): CommentRow[] {
 
 function parseEvalRun(value: any): EvalRunRow | null {
   if (!value) return null
+  const passRate = value.pass_rate ?? value.passRate
   return {
     runId: String(value.run_id ?? value.runId ?? '-'),
     suiteId: String(value.suite_id ?? value.suiteId ?? '-'),
@@ -318,8 +363,47 @@ function parseEvalRun(value: any): EvalRunRow | null {
     scoredCases: Number(value.scored_cases ?? value.scoredCases ?? 0),
     passedCases: Number(value.passed_cases ?? value.passedCases ?? 0),
     failedCases: Number(value.failed_cases ?? value.failedCases ?? 0),
+    passRate: typeof passRate === 'number' ? passRate : null,
     costUsd: Number(value.cost_usd ?? value.costUsd ?? 0),
     avgScores: (value.avg_scores ?? value.avgScores ?? {}) as Record<string, Json>,
+    codeVersion: value.code_version ?? value.codeVersion ?? null,
+    startedAt: value.started_at ?? value.startedAt ?? null,
+  }
+}
+
+function optNum(value: any): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function parseEvalCompare(value: any): EvalCompareRow | null {
+  if (!value) return null
+  return {
+    currentRunId: String(value.current_run_id ?? '-'),
+    baselineRunId: String(value.baseline_run_id ?? '-'),
+    currentRun: parseEvalRun(value.current_run),
+    baselineRun: parseEvalRun(value.baseline_run),
+    passRateDelta: optNum(value.pass_rate_delta),
+    costDeltaUsd: optNum(value.cost_delta_usd),
+    metrics: (Array.isArray(value.metrics) ? value.metrics : []).map((m: any) => ({
+      metric: String(m.metric ?? '-'),
+      currentAvg: optNum(m.current_avg),
+      baselineAvg: optNum(m.baseline_avg),
+      delta: optNum(m.delta),
+      increasedCases: Number(m.increased_cases ?? 0),
+      decreasedCases: Number(m.decreased_cases ?? 0),
+      unchangedCases: Number(m.unchanged_cases ?? 0),
+      currentOnlyCases: Number(m.current_only_cases ?? 0),
+      baselineOnlyCases: Number(m.baseline_only_cases ?? 0),
+    })),
+    cases: (Array.isArray(value.cases) ? value.cases : []).map((c: any) => ({
+      caseId: String(c.case_id ?? '-'),
+      metric: String(c.metric ?? '-'),
+      currentValue: optNum(c.current_value),
+      baselineValue: optNum(c.baseline_value),
+      delta: optNum(c.delta),
+      currentTraceId: c.current_trace_id ?? null,
+      baselineTraceId: c.baseline_trace_id ?? null,
+    })),
   }
 }
 
@@ -553,17 +637,40 @@ async function refreshServices() {
 
 async function refreshEvals() {
   const runsValue: any = await invoke<Json>('eval_runs', {server: state.server})
-  const firstRun = Array.isArray(runsValue?.runs) ? runsValue.runs[0] : null
-  const runId = firstRun?.run_id ?? firstRun?.runId
-  if (!runId) {
+  state.evalRuns = (Array.isArray(runsValue?.runs) ? runsValue.runs : [])
+    .map(parseEvalRun)
+    .filter((run: EvalRunRow | null): run is EvalRunRow => run != null)
+
+  // Keep the user's picks across refreshes; fall back to the newest run, and
+  // drop a baseline whose run no longer exists.
+  const selected =
+    state.evalRuns.find(run => run.runId === state.evalSelectedRunId) ?? state.evalRuns[0] ?? null
+  state.evalSelectedRunId = selected?.runId ?? null
+  if (!state.evalRuns.some(run => run.runId === state.evalBaselineRunId)) {
+    state.evalBaselineRunId = null
+  }
+  if (!selected) {
     state.evalRun = null
     state.evalCases = []
+    state.evalCompare = null
     return
   }
 
-  const statusValue: any = await invoke<Json>('eval_status', {server: state.server, runId})
-  state.evalRun = parseEvalRun(statusValue?.run ?? statusValue)
-  state.evalCases = parseEvalCases(await invoke<Json>('eval_cases', {server: state.server, runId}))
+  state.evalRun = selected
+  state.evalCases = parseEvalCases(
+    await invoke<Json>('eval_cases', {server: state.server, runId: selected.runId}),
+  )
+  if (state.evalBaselineRunId && state.evalBaselineRunId !== selected.runId) {
+    state.evalCompare = parseEvalCompare(
+      await invoke<Json>('eval_compare', {
+        server: state.server,
+        runId: selected.runId,
+        baseline: state.evalBaselineRunId,
+      }),
+    )
+  } else {
+    state.evalCompare = null
+  }
 }
 
 // ── Panels ──────────────────────────────────────────────────────────
@@ -1266,6 +1373,11 @@ function renderServices(): string {
   `
 }
 
+function evalRunOption(run: EvalRunRow, selectedId: string | null): string {
+  const label = `${run.runId}${run.suiteId !== '-' ? ` · ${run.suiteId}` : ''}`
+  return `<option value="${escapeHtml(run.runId)}" ${run.runId === selectedId ? 'selected' : ''}>${escapeHtml(label)}</option>`
+}
+
 function renderEvals(): string {
   const run = state.evalRun
   const cases = filteredEvalCases()
@@ -1274,13 +1386,25 @@ function renderEvals(): string {
     return '<section class="pane full"><div class="empty">No eval runs found.</div></section>'
   }
   const correctness = typeof run.avgScores.correctness === 'number' ? run.avgScores.correctness.toFixed(3) : '-'
+  const comparing = state.evalCompare != null
   return `
-    <section class="split vertical eval-layout">
+    <section class="split vertical eval-layout ${comparing ? 'compare-layout' : ''}">
       <div class="pane run-strip">
         <div class="run-stat grow">
-          <span class="run-stat-label">Suite</span>
-          <span class="run-stat-value">${escapeHtml(run.suiteId)}</span>
-          <span class="run-stat-sub mono">${escapeHtml(run.runId)}</span>
+          <span class="run-stat-label">Run</span>
+          <select id="eval-run-select">${state.evalRuns.map(item => evalRunOption(item, run.runId)).join('')}</select>
+          <span class="run-stat-sub mono">${escapeHtml(run.suiteId)}${run.codeVersion ? ` @ ${escapeHtml(run.codeVersion)}` : ''}</span>
+        </div>
+        <div class="run-stat grow">
+          <span class="run-stat-label">Compare vs</span>
+          <select id="eval-baseline-select">
+            <option value="">none</option>
+            ${state.evalRuns
+              .filter(item => item.runId !== run.runId)
+              .map(item => evalRunOption(item, state.evalBaselineRunId))
+              .join('')}
+          </select>
+          <span class="run-stat-sub">${state.evalRuns.length} runs recorded</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Status</span>
@@ -1291,12 +1415,9 @@ function renderEvals(): string {
           <span class="run-stat-value">${run.observedCases}<span class="run-stat-sub"> / ${run.caseCount ?? '?'}</span></span>
         </div>
         <div class="run-stat">
-          <span class="run-stat-label">Pass</span>
-          <span class="run-stat-value ok">${run.passedCases}</span>
-        </div>
-        <div class="run-stat">
-          <span class="run-stat-label">Fail</span>
-          <span class="run-stat-value ${run.failedCases > 0 ? 'danger' : ''}">${run.failedCases}</span>
+          <span class="run-stat-label">Pass rate</span>
+          <span class="run-stat-value ${run.passRate == null ? '' : run.passRate >= 1 ? 'ok' : run.failedCases > 0 ? 'danger' : ''}">${run.passRate == null ? '-' : `${(run.passRate * 100).toFixed(0)}%`}</span>
+          <span class="run-stat-sub">${run.passedCases} pass / ${run.failedCases} fail</span>
         </div>
         <div class="run-stat">
           <span class="run-stat-label">Avg score</span>
@@ -1306,8 +1427,9 @@ function renderEvals(): string {
           <span class="run-stat-label">Cost</span>
           <span class="run-stat-value">$${run.costUsd.toFixed(4)}</span>
         </div>
-        <button id="failures-only-btn" class="spacer ${state.evalFailuresOnly ? 'active' : ''}">Failures</button>
+        ${comparing ? '' : `<button id="failures-only-btn" class="spacer ${state.evalFailuresOnly ? 'active' : ''}">Failures</button>`}
       </div>
+      ${comparing ? renderEvalCompare(state.evalCompare!) : `
       <div class="pane table-pane">
         <div class="pane-title"><span>Cases</span><span>${cases.length}</span></div>
         <div class="table-wrap">
@@ -1334,7 +1456,99 @@ function renderEvals(): string {
         </div>
       </div>
       <aside class="pane detail-pane">${selected ? renderEvalDetail(selected) : '<div class="empty">No case selected.</div>'}</aside>
+      `}
     </section>
+  `
+}
+
+function signed(value: number, digits = 3): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
+}
+
+/// Tone for a delta where higher is better — except cost, where higher is
+/// spend. Near-zero deltas stay muted so noise doesn't read as movement.
+function deltaTone(metric: string, delta: number): string {
+  if (Math.abs(delta) < 1e-9) return 'muted'
+  const good = metric === 'cost_usd' ? delta < 0 : delta > 0
+  return good ? 'ok' : 'danger'
+}
+
+function renderEvalCompare(cmp: EvalCompareRow): string {
+  const current = cmp.currentRun
+  const baseline = cmp.baselineRun
+  const passRateText = (run: EvalRunRow | null) =>
+    run?.passRate == null ? '-' : `${(run.passRate * 100).toFixed(0)}%`
+  const matched = cmp.cases.filter(c => c.delta != null).length
+
+  const deltas = cmp.metrics.filter(m => m.delta != null)
+  const maxDelta = Math.max(1e-9, ...deltas.map(m => Math.abs(m.delta!)))
+  const metricRows = cmp.metrics
+    .map(m => {
+      const barPct = m.delta == null ? 0 : (Math.abs(m.delta) / maxDelta) * 50
+      const positive = (m.delta ?? 0) >= 0
+      const tone = m.delta == null ? 'muted' : deltaTone(m.metric, m.delta)
+      return `
+        <div class="delta-row">
+          <span class="delta-metric mono">${escapeHtml(m.metric)}</span>
+          <span class="delta-avgs">${m.baselineAvg == null ? '-' : m.baselineAvg.toFixed(3)} → ${m.currentAvg == null ? '-' : m.currentAvg.toFixed(3)}</span>
+          <div class="delta-track">
+            <div class="delta-mid"></div>
+            ${m.delta == null ? '' : `<div class="delta-fill ${tone}" style="${positive ? `left:50%` : `right:50%`};width:${Math.max(barPct, 0.5)}%"></div>`}
+          </div>
+          <span class="delta-value ${tone}">${m.delta == null ? 'n/a' : signed(m.delta)}</span>
+          <span class="delta-counts muted">▲${m.increasedCases} ▼${m.decreasedCases} =${m.unchangedCases}${m.currentOnlyCases + m.baselineOnlyCases > 0 ? ` ±${m.currentOnlyCases + m.baselineOnlyCases}` : ''}</span>
+        </div>
+      `
+    })
+    .join('')
+
+  const q = state.textFilter.trim().toLowerCase()
+  const movers = cmp.cases
+    .filter(c => c.delta != null && Math.abs(c.delta) > 1e-9)
+    .filter(c => !q || c.caseId.toLowerCase().includes(q) || c.metric.toLowerCase().includes(q))
+    .sort((a, b) => Math.abs(b.delta!) - Math.abs(a.delta!))
+    .slice(0, 100)
+  const moverRows = movers
+    .map(c => {
+      const trace = c.currentTraceId ?? c.baselineTraceId
+      return `
+        <tr ${trace ? `data-cmp-trace="${escapeHtml(trace)}"` : ''}>
+          <td>${escapeHtml(c.caseId)}</td>
+          <td class="mono">${escapeHtml(c.metric)}</td>
+          <td>${c.baselineValue == null ? '-' : c.baselineValue.toFixed(3)}</td>
+          <td>${c.currentValue == null ? '-' : c.currentValue.toFixed(3)}</td>
+          <td class="${deltaTone(c.metric, c.delta!)}">${signed(c.delta!)}</td>
+          <td class="mono muted">${escapeHtml(trace ? shortId(trace, 12) : '-')}</td>
+        </tr>
+      `
+    })
+    .join('')
+
+  return `
+    <div class="pane compare-summary">
+      <div class="stat-row">
+        ${statCard('pass rate', `${passRateText(current)} vs ${passRateText(baseline)}`)}
+        ${statCard('pass Δ', cmp.passRateDelta == null ? '-' : `${signed(cmp.passRateDelta * 100, 1)} pts`, cmp.passRateDelta == null ? '' : deltaTone('pass', cmp.passRateDelta))}
+        ${statCard('cost', `$${(current?.costUsd ?? 0).toFixed(4)} vs $${(baseline?.costUsd ?? 0).toFixed(4)}`)}
+        ${statCard('cost Δ', cmp.costDeltaUsd == null ? '-' : `${signed(cmp.costDeltaUsd, 4)}`, cmp.costDeltaUsd == null ? '' : deltaTone('cost_usd', cmp.costDeltaUsd))}
+        ${statCard('scored pairs', String(matched))}
+      </div>
+      <div class="panel-subhead">Avg score deltas vs ${escapeHtml(cmp.baselineRunId)}</div>
+      <div class="delta-rows">${metricRows || '<div class="empty compact">No shared metrics between these runs.</div>'}</div>
+    </div>
+    <div class="pane table-pane">
+      <div class="pane-title"><span>Case movements</span><span>${movers.length} of ${matched} scored pairs</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Case</th><th>Metric</th><th>Baseline</th><th>Current</th><th>Delta</th><th>Trace</th></tr></thead>
+          <tbody>${moverRows || '<tr><td colspan="6" class="muted">No case moved between these runs.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="pane trend-pane">
+      <div class="pane-title"><span>Aggregates across runs</span><span>click a point to open that run</span></div>
+      <canvas id="eval-trend-canvas" class="trend-canvas"></canvas>
+    </div>
   `
 }
 
@@ -1597,6 +1811,25 @@ function bindShell() {
     state.selectedEvalIdx = null
     queueRender()
   })
+  const evalRefetch = () => {
+    state.selectedEvalIdx = null
+    refreshEvals()
+      .catch(error => (state.error = String(error)))
+      .finally(queueRender)
+  }
+  app.querySelector<HTMLSelectElement>('#eval-run-select')?.addEventListener('change', event => {
+    state.evalSelectedRunId = (event.currentTarget as HTMLSelectElement).value
+    evalRefetch()
+  })
+  app
+    .querySelector<HTMLSelectElement>('#eval-baseline-select')
+    ?.addEventListener('change', event => {
+      state.evalBaselineRunId = (event.currentTarget as HTMLSelectElement).value || null
+      evalRefetch()
+    })
+  app.querySelectorAll<HTMLTableRowElement>('[data-cmp-trace]').forEach(row => {
+    row.addEventListener('click', () => void loadTrace(row.dataset.cmpTrace!))
+  })
   app.querySelectorAll<HTMLTableRowElement>('[data-eval-idx]').forEach(row => {
     row.addEventListener('click', () => {
       state.selectedEvalIdx = Number(row.dataset.evalIdx)
@@ -1630,6 +1863,8 @@ function renderCanvases() {
   if (timeline) renderTimelineCanvas(timeline)
   const waterfall = app.querySelector<HTMLCanvasElement>('#waterfall-canvas')
   if (waterfall) renderWaterfallCanvas(waterfall)
+  const trend = app.querySelector<HTMLCanvasElement>('#eval-trend-canvas')
+  if (trend) renderEvalTrendCanvas(trend)
 }
 
 function prepareCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
@@ -1756,6 +1991,194 @@ function renderWaterfallCanvas(canvas: HTMLCanvasElement) {
     event.preventDefault()
     zoomRange(state.detailZoom, event.deltaY > 0 ? 1.18 : 0.84, event.offsetX / rect.width)
     queueRender()
+  }
+}
+
+/// Pass rate always draws in the accent yellow; score metrics take the rest of
+/// the palette in name order, so a metric keeps its color as runs come and go.
+const TREND_PASS_COLOR = '#facc15'
+const TREND_METRIC_COLORS = ['#62a9ff', '#52d284', '#b78cff', '#f59e8c']
+
+type TrendSeries = {
+  label: string
+  color: string
+  values: Array<number | null>
+}
+
+/// Aggregates per run, oldest → newest: pass rate plus the average of each
+/// score metric. Cost is deliberately not a line here — dollars on a score
+/// axis would need a second scale, and this chart has one.
+function evalTrendSeries(runs: EvalRunRow[]): TrendSeries[] {
+  const metricNames = [...new Set(runs.flatMap(run => Object.keys(run.avgScores)))]
+    .filter(name => name !== 'cost_usd')
+    .sort()
+    .slice(0, TREND_METRIC_COLORS.length)
+  const series: TrendSeries[] = [
+    {label: 'pass rate', color: TREND_PASS_COLOR, values: runs.map(run => run.passRate)},
+  ]
+  for (const [idx, name] of metricNames.entries()) {
+    series.push({
+      label: name,
+      color: TREND_METRIC_COLORS[idx],
+      values: runs.map(run =>
+        typeof run.avgScores[name] === 'number' ? (run.avgScores[name] as number) : null,
+      ),
+    })
+  }
+  return series.filter(s => s.values.some(v => v != null))
+}
+
+function trendRuns(): EvalRunRow[] {
+  return [...state.evalRuns].sort((a, b) =>
+    a.startedAt === b.startedAt
+      ? a.runId.localeCompare(b.runId)
+      : (a.startedAt ?? '') < (b.startedAt ?? '')
+        ? -1
+        : 1,
+  )
+}
+
+function renderEvalTrendCanvas(canvas: HTMLCanvasElement) {
+  const runs = trendRuns()
+  const ctx = prepareCanvas(canvas)
+  const rect = canvas.getBoundingClientRect()
+  ctx.fillStyle = CANVAS_BG
+  ctx.fillRect(0, 0, rect.width, rect.height)
+  const series = evalTrendSeries(runs)
+  if (runs.length === 0 || series.length === 0) {
+    ctx.fillStyle = CANVAS_FAINT
+    ctx.font = CANVAS_FONT
+    ctx.fillText('No scored runs to chart yet.', 18, 24)
+    return
+  }
+
+  const left = 46
+  const right = rect.width - 150
+  const top = 30
+  const bottom = rect.height - 24
+  const plotWidth = Math.max(right - left, 1)
+  const plotHeight = Math.max(bottom - top, 1)
+  const maxValue = Math.max(1, ...series.flatMap(s => s.values.filter((v): v is number => v != null)))
+  const runX = (idx: number) =>
+    left + (runs.length === 1 ? plotWidth / 2 : (plotWidth * idx) / (runs.length - 1))
+  const valueY = (value: number) => bottom - (value / maxValue) * plotHeight
+
+  // Recessive horizontal gridlines with value labels.
+  ctx.font = CANVAS_AXIS_FONT
+  for (let i = 0; i <= 4; i += 1) {
+    const value = (maxValue * i) / 4
+    const y = valueY(value)
+    ctx.strokeStyle = CANVAS_AXIS
+    ctx.beginPath()
+    ctx.moveTo(left, y)
+    ctx.lineTo(right, y)
+    ctx.stroke()
+    ctx.fillStyle = CANVAS_FAINT
+    ctx.fillText(value.toFixed(2), 8, y + 4)
+  }
+
+  // Mark the two runs under comparison so the chart answers "where am I".
+  const markRun = (runId: string | null, label: string) => {
+    const idx = runs.findIndex(run => run.runId === runId)
+    if (idx < 0) return
+    const x = runX(idx)
+    ctx.strokeStyle = CANVAS_FAINT
+    ctx.setLineDash([3, 3])
+    ctx.beginPath()
+    ctx.moveTo(x, top - 4)
+    ctx.lineTo(x, bottom)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = CANVAS_TEXT
+    // Near the right edge the label would run into the legend column, so it
+    // flips to the left side of its marker line.
+    const flip = x > right - 60
+    ctx.fillText(label, flip ? x - ctx.measureText(label).width - 4 : x + 4, top + 4)
+  }
+  markRun(state.evalBaselineRunId, 'base')
+  markRun(state.evalSelectedRunId, 'current')
+
+  // Run ticks along the x axis: id tails when they fit, count otherwise. The
+  // tail, because run ids tend to share a prefix (`run-2026-…`) and differ at
+  // the end.
+  ctx.fillStyle = CANVAS_FAINT
+  const idTail = (runId: string) => (runId.length > 8 ? `…${runId.slice(-7)}` : runId)
+  if (runs.length <= 8) {
+    runs.forEach((run, idx) => ctx.fillText(idTail(run.runId), runX(idx) - 20, rect.height - 8))
+  } else {
+    ctx.fillText(idTail(runs[0].runId), left, rect.height - 8)
+    ctx.fillText(idTail(runs[runs.length - 1].runId), right - 52, rect.height - 8)
+    ctx.fillText(`${runs.length} runs`, left + plotWidth / 2 - 24, rect.height - 8)
+  }
+
+  series.forEach((s, seriesIdx) => {
+    ctx.strokeStyle = s.color
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    let started = false
+    s.values.forEach((value, idx) => {
+      if (value == null) return
+      const x = runX(idx)
+      const y = valueY(value)
+      if (started) ctx.lineTo(x, y)
+      else ctx.moveTo(x, y)
+      started = true
+    })
+    ctx.stroke()
+    ctx.lineWidth = 1
+    s.values.forEach((value, idx) => {
+      if (value == null) return
+      ctx.fillStyle = s.color
+      ctx.beginPath()
+      ctx.arc(runX(idx), valueY(value), 3.5, 0, Math.PI * 2)
+      ctx.fill()
+      // A 2px surface ring keeps overlapping points separable.
+      ctx.strokeStyle = CANVAS_BG
+      ctx.lineWidth = 2
+      ctx.stroke()
+      ctx.lineWidth = 1
+    })
+    // Legend column on the right: the swatch carries identity, text stays ink,
+    // and the latest value doubles as the direct label.
+    const lastIdx = s.values.reduce<number>((acc, v, idx) => (v != null ? idx : acc), -1)
+    const legendY = top + 8 + seriesIdx * 16
+    ctx.fillStyle = s.color
+    ctx.fillRect(right + 10, legendY - 8, 8, 8)
+    ctx.fillStyle = CANVAS_TEXT
+    ctx.font = CANVAS_AXIS_FONT
+    ctx.fillText(
+      `${s.label}${lastIdx >= 0 ? ` ${s.values[lastIdx]!.toFixed(2)}` : ''}`.slice(0, 22),
+      right + 22,
+      legendY,
+    )
+  })
+
+  const nearestRun = (offsetX: number): number => {
+    let best = 0
+    let bestDist = Infinity
+    runs.forEach((_, idx) => {
+      const dist = Math.abs(runX(idx) - offsetX)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = idx
+      }
+    })
+    return best
+  }
+  canvas.onmousemove = event => {
+    const run = runs[nearestRun(event.offsetX)]
+    canvas.title = run
+      ? `${run.runId} · pass ${run.passRate == null ? '-' : `${(run.passRate * 100).toFixed(0)}%`} · $${run.costUsd.toFixed(4)}`
+      : ''
+  }
+  canvas.onclick = event => {
+    const run = runs[nearestRun(event.offsetX)]
+    if (!run || run.runId === state.evalSelectedRunId) return
+    state.evalSelectedRunId = run.runId
+    state.selectedEvalIdx = null
+    refreshEvals()
+      .catch(error => (state.error = String(error)))
+      .finally(queueRender)
   }
 }
 
