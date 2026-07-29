@@ -605,8 +605,14 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 
 /// `SKILL.md` and `llm.txt` shipped inside the binary, so a connected agent can
 /// self-onboard without the files being installed anywhere.
-const SKILL_MD: &str = include_str!("../../SKILL.md");
-const LLM_TXT: &str = include_str!("../../llm.txt");
+///
+/// These resolve to `tael-cli/{SKILL.md,llm.txt}`, which are symlinks to the
+/// workspace-root originals. The indirection is what makes the crate
+/// publishable: `cargo package` only collects files under the package root, so
+/// pointing at `../../` directly would build locally but fail to compile from
+/// the published tarball.
+const SKILL_MD: &str = include_str!("../SKILL.md");
+const LLM_TXT: &str = include_str!("../llm.txt");
 
 fn resource_definitions() -> Vec<Value> {
     vec![

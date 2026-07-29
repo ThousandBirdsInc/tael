@@ -90,3 +90,43 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: ${{ env.ASSET }}
           fail_on_unmatched_files: true
+
+  # Publish to crates.io via Trusted Publishing: no long-lived API token lives
+  # in repo secrets. `rust-lang/crates-io-auth-action` exchanges this workflow's
+  # GitHub OIDC identity for a short-lived crates.io token (auto-revoked when
+  # the job ends). crates.io authorizes it against per-crate Trusted Publisher
+  # configs pinned to this repo + workflow file + environment, so the config
+  # below must stay in sync with what's registered on crates.io for
+  # tael-server, tael-gui, and tael-cli.
+  #
+  # Runs only after every binary target is built and attached: a crates.io
+  # release is permanent (yank-only), so we never want a published version whose
+  # `cargo binstall` archives are missing because a build job failed.
+  publish:
+    name: publish to crates.io
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # mint the OIDC token for Trusted Publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # `--workspace` publishes tael-server, tael-gui, and tael-cli in dependency
+      # order and waits for each to be indexed before the next one's verification
+      # build resolves it from the registry. tael-test is `publish = false`, so
+      # it's skipped. Requires cargo >= 1.90.
+      - name: Publish
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
