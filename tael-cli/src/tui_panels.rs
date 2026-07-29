@@ -659,10 +659,14 @@ impl Automation {
             .map(|r| {
                 let status = r.get("status").cloned().unwrap_or(Value::Null);
                 let last_error = text(&status, "last_error");
+                // Status field names mirror `RuleStatus` on the server
+                // (`traces_sampled` / `scores_written`), same as
+                // `tael score rule list` reads them.
                 Row::new(vec![
                     Cell::from(text(r, "name")).style(Style::default().fg(Color::Cyan)),
                     Cell::from(format!("{:.0}%", num(r, "sample") * 100.0)),
-                    Cell::from(format!("{}", num(&status, "scored") as i64)),
+                    Cell::from(format!("{}", num(&status, "traces_sampled") as i64)),
+                    Cell::from(format!("{}", num(&status, "scores_written") as i64)),
                     Cell::from(if last_error.is_empty() {
                         "-".to_string()
                     } else {
@@ -690,6 +694,7 @@ impl Automation {
                         Constraint::Length(20),
                         Constraint::Length(8),
                         Constraint::Length(8),
+                        Constraint::Length(8),
                         Constraint::Length(24),
                         Constraint::Min(16),
                     ],
@@ -697,6 +702,7 @@ impl Automation {
                 .header(header_row(&[
                     "Rule",
                     "Sample",
+                    "Sampled",
                     "Scored",
                     "Last error",
                     "Command",
@@ -842,43 +848,7 @@ impl Review {
         let Some(list) = self.fetch.record(client.list_comments(500).await) else {
             return;
         };
-        // Requests and answers are both structured trace comments, and an
-        // answer references its request rather than mutating it — so the
-        // effective state is derived here exactly as `tael review list`
-        // derives it, not read from a field.
-        let comments = array(&list, "comments");
-        let bodies: Vec<Value> = comments
-            .iter()
-            .filter_map(|c| serde_json::from_str::<Value>(&text(c, "body")).ok())
-            .collect();
-
-        let answers: std::collections::HashMap<String, &Value> = bodies
-            .iter()
-            .filter(|b| text(b, "kind") == "review_answer")
-            .map(|b| (text(b, "review_id"), b))
-            .collect();
-
-        self.reviews = bodies
-            .iter()
-            .filter(|b| text(b, "kind") == "review_request")
-            .map(|b| {
-                let review_id = text(b, "review_id");
-                let answer = answers.get(&review_id);
-                ReviewRow {
-                    state: if answer.is_some() { "answered" } else { "open" }.to_string(),
-                    trace_id: b
-                        .get("trace_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    question: text(b, "question"),
-                    answer: answer.map(|a| text(a, "answer")),
-                    review_id,
-                }
-            })
-            .collect();
-        // Open questions first: they are the ones that need a human.
-        self.reviews
-            .sort_by_key(|r| (r.state != "open", r.review_id.clone()));
+        self.reviews = derive_reviews(&array(&list, "comments"));
         if self.state.selected().is_none() && !self.reviews.is_empty() {
             self.state.select(Some(0));
         }
@@ -951,6 +921,56 @@ impl Review {
             &mut self.state,
         );
     }
+}
+
+/// Derive review rows from raw comment records.
+///
+/// Requests and answers are both structured trace comments, and an answer
+/// references its request rather than mutating it — so the effective state is
+/// derived here exactly as `tael review list` derives it, not read from a
+/// field. The body names the review and carries the question, but the trace a
+/// request hangs off lives on the comment record itself: `tael review request`
+/// posts a body without a trace_id and the server stamps the comment. Reading
+/// only the body would leave the Trace column empty and make enter-to-open a
+/// no-op on every row.
+fn derive_reviews(comments: &[Value]) -> Vec<ReviewRow> {
+    let parsed: Vec<(&Value, Value)> = comments
+        .iter()
+        .filter_map(|c| {
+            serde_json::from_str::<Value>(&text(c, "body"))
+                .ok()
+                .map(|body| (c, body))
+        })
+        .collect();
+
+    let answers: std::collections::HashMap<String, &Value> = parsed
+        .iter()
+        .filter(|(_, body)| text(body, "kind") == "review_answer")
+        .map(|(_, body)| (text(body, "review_id"), body))
+        .collect();
+
+    let mut reviews: Vec<ReviewRow> = parsed
+        .iter()
+        .filter(|(_, body)| text(body, "kind") == "review_request")
+        .map(|(comment, body)| {
+            let review_id = text(body, "review_id");
+            let answer = answers.get(&review_id);
+            ReviewRow {
+                state: if answer.is_some() { "answered" } else { "open" }.to_string(),
+                trace_id: comment
+                    .get("trace_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| body.get("trace_id").and_then(Value::as_str))
+                    .map(str::to_string),
+                question: text(body, "question"),
+                answer: answer.map(|a| text(a, "answer")),
+                review_id,
+            }
+        })
+        .collect();
+    // Open questions first: they are the ones that need a human.
+    reviews.sort_by_key(|r| (r.state != "open", r.review_id.clone()));
+    reviews
 }
 
 // ── SQL: a read-only query console ──────────────────────────────────
@@ -1215,49 +1235,55 @@ mod tests {
     fn a_review_request_is_answered_only_when_an_answer_references_it() {
         // The queue's state is derived, because comments are append-only and an
         // answer is a separate comment. Getting this wrong would either hide
-        // open questions or show answered ones forever.
-        let mut review = Review::default();
+        // open questions or show answered ones forever. The fixtures mirror
+        // what the server actually returns: the body JSON has no trace_id, the
+        // comment record does.
         let comments = serde_json::json!({"comments": [
-            {"body": r#"{"kind":"review_request","review_id":"r1","trace_id":"t1","question":"q1"}"#},
-            {"body": r#"{"kind":"review_request","review_id":"r2","trace_id":"t2","question":"q2"}"#},
-            {"body": r#"{"kind":"review_answer","review_id":"r2","answer":"yes"}"#},
-            {"body": "not json at all"},
+            {"trace_id": "t1", "body": r#"{"kind":"review_request","review_id":"r1","question":"q1"}"#},
+            {"trace_id": "t2", "body": r#"{"kind":"review_request","review_id":"r2","question":"q2"}"#},
+            {"trace_id": "t2", "body": r#"{"kind":"review_answer","review_id":"r2","answer":"yes"}"#},
+            {"trace_id": "t3", "body": "not json at all"},
         ]});
-        let bodies: Vec<Value> = array(&comments, "comments")
-            .iter()
-            .filter_map(|c| serde_json::from_str::<Value>(&text(c, "body")).ok())
-            .collect();
-        let answers: std::collections::HashMap<String, &Value> = bodies
-            .iter()
-            .filter(|b| text(b, "kind") == "review_answer")
-            .map(|b| (text(b, "review_id"), b))
-            .collect();
-        review.reviews = bodies
-            .iter()
-            .filter(|b| text(b, "kind") == "review_request")
-            .map(|b| {
-                let review_id = text(b, "review_id");
-                let answer = answers.get(&review_id);
-                ReviewRow {
-                    state: if answer.is_some() { "answered" } else { "open" }.to_string(),
-                    trace_id: b
-                        .get("trace_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    question: text(b, "question"),
-                    answer: answer.map(|a| text(a, "answer")),
-                    review_id,
-                }
-            })
-            .collect();
+        let reviews = derive_reviews(&array(&comments, "comments"));
 
-        assert_eq!(review.reviews.len(), 2, "the non-JSON comment is skipped");
-        let r1 = review.reviews.iter().find(|r| r.review_id == "r1").unwrap();
+        assert_eq!(reviews.len(), 2, "the non-JSON comment is skipped");
+        let r1 = reviews.iter().find(|r| r.review_id == "r1").unwrap();
         assert_eq!(r1.state, "open");
         assert_eq!(r1.answer, None);
-        let r2 = review.reviews.iter().find(|r| r.review_id == "r2").unwrap();
+        let r2 = reviews.iter().find(|r| r.review_id == "r2").unwrap();
         assert_eq!(r2.state, "answered");
         assert_eq!(r2.answer.as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn a_review_row_takes_its_trace_from_the_comment_record() {
+        // `tael review request` posts a body without a trace_id; the server
+        // stamps the comment record. Reading only the body left every Trace
+        // cell empty and made enter-to-open (the point of the panel) a no-op.
+        let comments = serde_json::json!({"comments": [
+            {"trace_id": "trace-on-comment",
+             "body": r#"{"kind":"review_request","review_id":"r1","question":"q1"}"#},
+            {"body": r#"{"kind":"review_request","review_id":"r2","trace_id":"trace-in-body","question":"q2"}"#},
+        ]});
+        let reviews = derive_reviews(&array(&comments, "comments"));
+
+        let r1 = reviews.iter().find(|r| r.review_id == "r1").unwrap();
+        assert_eq!(r1.trace_id.as_deref(), Some("trace-on-comment"));
+        // A body-side trace_id still counts when the record has none.
+        let r2 = reviews.iter().find(|r| r.review_id == "r2").unwrap();
+        assert_eq!(r2.trace_id.as_deref(), Some("trace-in-body"));
+    }
+
+    #[test]
+    fn open_reviews_sort_before_answered_ones() {
+        let comments = serde_json::json!({"comments": [
+            {"trace_id": "t1", "body": r#"{"kind":"review_request","review_id":"r1","question":"q1"}"#},
+            {"trace_id": "t1", "body": r#"{"kind":"review_answer","review_id":"r1","answer":"yes"}"#},
+            {"trace_id": "t2", "body": r#"{"kind":"review_request","review_id":"r2","question":"q2"}"#},
+        ]});
+        let reviews = derive_reviews(&array(&comments, "comments"));
+        assert_eq!(reviews[0].review_id, "r2", "the open question leads");
+        assert_eq!(reviews[1].state, "answered");
     }
 
     #[test]
@@ -1343,9 +1369,12 @@ mod tests {
             "rule": "high-errors", "state": "firing", "previous_state": "ok",
             "at": "2026-07-27T03:14:16Z", "matched": [{}],
         })];
+        // Status fields carry the server's `RuleStatus` names; reading any
+        // other key renders a rule that scores all day as stuck at zero.
         panels.automation.score_rules = vec![serde_json::json!({
             "name": "judge", "sample": 0.1, "command": "./score.sh",
-            "status": {"scored": 42, "last_error": null},
+            "status": {"traces_seen": 900, "traces_sampled": 87, "scores_written": 42,
+                       "failures": 0, "last_error": null},
         })];
         panels.clusters.clusters = vec![ClusterRow {
             id: 0,
@@ -1383,6 +1412,10 @@ mod tests {
         // loose cluster says so, and a window that lost parents says how many.
         assert!(rendered(&mut panels, Panel::Clusters).contains("weak"));
         assert!(rendered(&mut panels, Panel::Topology).contains("outside window"));
+        // The scoring rule's progress counters, straight off `RuleStatus`.
+        let automation = rendered(&mut panels, Panel::Automation);
+        assert!(automation.contains("87"), "traces_sampled must render");
+        assert!(automation.contains("42"), "scores_written must render");
     }
 
     #[test]
