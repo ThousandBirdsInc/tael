@@ -29,9 +29,27 @@ jobs:
             exit 1
           fi
 
+  # Create the GitHub Release once, up front. If the matrix jobs each create it
+  # on demand, all four race: `softprops/action-gh-release` looks the release up
+  # by tag, a draft is not discoverable by tag, so several jobs conclude it's
+  # missing and create duplicates. The losers then fail to finalize with
+  # `already_exists`, splitting the archives across two releases for the same
+  # tag. Creating it here means the matrix only ever uploads into an existing,
+  # already-published release.
+  create-release:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+
   build:
     name: ${{ matrix.target }}
-    needs: verify-version
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
