@@ -794,7 +794,8 @@ The server (`tael serve`) is configured via flags or environment variables
 # Prerequisites: Rust 1.87+ (or use mise)
 mise install
 
-# Build
+# Build (server + CLI + test data generator; the Tauri GUI crate is excluded
+# from the default build — use `cargo build -p tael-gui` when working on it)
 cargo build
 
 # Run server (alias for `cargo run --bin tael -- serve`)

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["tael-server", "tael-cli", "tael-test", "tael-gui/src-tauri"]
+# A bare `cargo build` skips the Tauri GUI crate: the `gui` feature is opt-in
+# on every install path, and building tael-gui compiles ~185 extra crates and
+# fails outright on machines without the webkit2gtk/GTK dev libraries. Build it
+# explicitly with `cargo build -p tael-gui` (or `-p tael-cli --features gui`).
+default-members = ["tael-server", "tael-cli", "tael-test"]
 
 [workspace.package]
 version = "0.5.15"
@@ -57,3 +62,10 @@ chitchat = "0.10"
 # these are pulled into the default local build.
 object_store = { version = "0.11", features = ["gcp", "aws"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+
+# Dependencies keep line tables (file:line in backtraces and profiles) but skip
+# full debuginfo, which dominates dev-build codegen and link time across the
+# ~490-crate default tree. Workspace crates are unaffected ("*" never matches
+# workspace members) and keep complete debuginfo for debugger use.
+[profile.dev.package."*"]
+debug = "line-tables-only"
