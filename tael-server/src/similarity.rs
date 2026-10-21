@@ -446,7 +446,9 @@ mod tests {
 
     #[tokio::test]
     async fn embed_runs_the_users_command() {
-        let v = embed("echo '[0.1, 0.2, 0.3]'", "some trace text")
+        // Consume stdin before exiting so the fake embedder cannot race the
+        // parent's write and fail with BrokenPipe on a fast CI runner.
+        let v = embed("cat >/dev/null; echo '[0.1, 0.2, 0.3]'", "some trace text")
             .await
             .unwrap();
         assert_eq!(v, vec![0.1, 0.2, 0.3]);
@@ -461,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_embed_command_reports_its_stderr() {
-        let err = embed("echo 'no API key' >&2; exit 2", "x")
+        let err = embed("cat >/dev/null; echo 'no API key' >&2; exit 2", "x")
             .await
             .unwrap_err()
             .to_string();

@@ -58,6 +58,15 @@ struct LiveStatusPayload {
     message: Option<String>,
 }
 
+// Explicit backend selection survives reqwest feature unification. Loading only
+// native roots keeps system-installed private CAs without adding bundled roots.
+fn http_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .use_rustls_tls()
+        .tls_built_in_root_certs(false)
+        .tls_built_in_native_certs(true)
+}
+
 fn target(server: &str) -> Result<HttpTarget, String> {
     if let Some(socket_path) = server.strip_prefix("unix://") {
         return unix_target(socket_path);
@@ -65,7 +74,7 @@ fn target(server: &str) -> Result<HttpTarget, String> {
 
     Ok(HttpTarget {
         base_url: server.trim_end_matches('/').to_string(),
-        http: Client::new(),
+        http: http_client_builder().build().map_err(to_string)?,
     })
 }
 
@@ -73,7 +82,7 @@ fn target(server: &str) -> Result<HttpTarget, String> {
 fn unix_target(socket_path: &str) -> Result<HttpTarget, String> {
     Ok(HttpTarget {
         base_url: "http://tael".to_string(),
-        http: Client::builder()
+        http: http_client_builder()
             .unix_socket(socket_path)
             .build()
             .map_err(to_string)?,

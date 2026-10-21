@@ -811,7 +811,14 @@ pub fn print_eval_compare(value: &Value) {
     {
         let mut summary = Table::new();
         summary.set_header(vec![
-            "Metric", "Cur avg", "Base avg", "Delta", "Up", "Down", "Same", "Cur only",
+            "Metric",
+            "Cur avg",
+            "Base avg",
+            "Delta",
+            "Up",
+            "Down",
+            "Same",
+            "Cur only",
             "Base only",
         ]);
         for m in metrics {

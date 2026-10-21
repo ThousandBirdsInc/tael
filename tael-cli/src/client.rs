@@ -30,7 +30,13 @@ fn build_client(builder: reqwest::ClientBuilder, api_key: Option<&str>) -> Clien
         }
         None => builder,
     };
-    builder.build().expect("failed to build HTTP client")
+    // Keep system/private trust anchors, but use the patched Rustls verifier.
+    builder
+        .use_rustls_tls()
+        .tls_built_in_root_certs(false)
+        .tls_built_in_native_certs(true)
+        .build()
+        .expect("failed to build HTTP client")
 }
 
 impl TaelClient {
@@ -943,4 +949,40 @@ async fn sse_lines(http: &Client, url: &str, tx: &mpsc::UnboundedSender<String>)
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tls_tests {
+    #[test]
+    fn dependency_default_clients_do_not_select_native_tls() {
+        // Do not re-enable native-tls in libraries that share reqwest with us.
+        let debug = format!("{:?}", reqwest::Client::builder());
+        assert!(!debug.contains("tls_backend: Default"), "{debug}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the public eMudhra incident test hosts without TLS interception"]
+    async fn rejects_compromised_emudhra_chains() {
+        let client = super::build_client(
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)),
+            None,
+        );
+        client
+            .get("https://example.com/")
+            .send()
+            .await
+            .expect("ordinary valid HTTPS must still work");
+        for host in [
+            "dv-g3b-emudhra.we-have-a-problem.com",
+            "dv-g3b-aaa-emudhra.we-have-a-problem.com",
+        ] {
+            let error = client
+                .get(format!("https://{host}/"))
+                .send()
+                .await
+                .expect_err("compromised intermediate must be rejected");
+            let detail = format!("{error:?}");
+            assert!(detail.contains("CertDistrusted"), "{host}: {detail}");
+        }
+    }
 }
