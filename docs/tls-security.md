@@ -52,6 +52,19 @@ ordinary suite because it depends on third-party public hosts remaining
 available and on an unintercepted TLS connection. It does not disable normal
 certificate checks or transmit application credentials.
 
+## Bundled roots and RUSTSEC-2026-0381
+
+The optional cloud dependency graph also locks `webpki-roots` 1.0.10, which
+removes the affected emSign ECC Root CA G3 per
+[RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html).
+The transitive 0.26.11 compatibility crate only re-exports `TLS_SERVER_ROOTS`
+from the same patched 1.0.10 crate; it has no independent root list. An advisory
+scanner that only compares the shim's version to `>= 1.0.10` may still flag it.
+The actual root contents and the SPKI verifier are both updated; this change
+does not suppress advisories or replace the private/native roots used by owned
+HTTP clients. Keep the verifier fix as well, because alternate cross-signs are
+not solved by removing only one root.
+
 ## Tael-specific coverage
 
 The explicit backend applies to the CLI (including SSE), GUI, alert webhooks,
