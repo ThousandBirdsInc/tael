@@ -49,6 +49,9 @@ impl RemoteStore {
     /// Like [`Self::new`] with an explicit per-request timeout.
     pub fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Result<Self> {
         let http = Client::builder()
+            .use_rustls_tls()
+            .tls_built_in_root_certs(false)
+            .tls_built_in_native_certs(true)
             .timeout(timeout)
             .build()
             .context("building RemoteStore HTTP client")?;
@@ -362,6 +365,9 @@ impl RemoteWalSink {
         epoch: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<Self> {
         let http = Client::builder()
+            .use_rustls_tls()
+            .tls_built_in_root_certs(false)
+            .tls_built_in_native_certs(true)
             .timeout(Duration::from_secs(30))
             .build()
             .context("building RemoteWalSink HTTP client")?;

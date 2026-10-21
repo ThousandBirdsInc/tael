@@ -401,7 +401,18 @@ pub fn span_derived_points(store: &dyn Store, window_seconds: i64) -> Result<Vec
 pub async fn deliver(event: &AlertEvent, sink: &Sink) {
     match sink {
         Sink::Webhook { url } => {
-            let client = reqwest::Client::new();
+            let client = match reqwest::Client::builder()
+                .use_rustls_tls()
+                .tls_built_in_root_certs(false)
+                .tls_built_in_native_certs(true)
+                .build()
+            {
+                Ok(client) => client,
+                Err(e) => {
+                    tracing::warn!(rule = %event.rule, url = %url, error = %e, "building alert webhook client failed");
+                    return;
+                }
+            };
             match client
                 .post(url)
                 .json(event)
