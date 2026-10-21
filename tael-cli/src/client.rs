@@ -953,6 +953,13 @@ async fn sse_lines(http: &Client, url: &str, tx: &mpsc::UnboundedSender<String>)
 
 #[cfg(test)]
 mod tls_tests {
+    #[test]
+    fn dependency_default_clients_do_not_select_native_tls() {
+        // Do not re-enable native-tls in libraries that share reqwest with us.
+        let debug = format!("{:?}", reqwest::Client::builder());
+        assert!(!debug.contains("tls_backend: Default"), "{debug}");
+    }
+
     #[tokio::test]
     #[ignore = "requires the public eMudhra incident test hosts without TLS interception"]
     async fn rejects_compromised_emudhra_chains() {

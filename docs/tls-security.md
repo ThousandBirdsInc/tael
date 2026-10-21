@@ -12,7 +12,10 @@ cross-signs. Updating a root bundle alone is not equivalent to this verifier fix
 
 This update intentionally selects Rustls for repository-owned HTTP clients.
 Merely enabling a Rustls feature is insufficient: reqwest's default TLS feature
-or dependency feature unification can otherwise select native-tls.
+or dependency feature unification can otherwise select native-tls. The manifest
+therefore disables reqwest defaults and explicitly retains its non-TLS default
+features (`charset`, `http2`, `system-proxy`). This also prevents re-enabling
+native TLS in dependencies that use `Client::new()` themselves.
 
 The clients continue to load native/system roots, including installed private
 CAs. Bundled public roots are explicitly disabled before native roots are
